@@ -875,6 +875,7 @@ void Ciphertext::rotate(const int index__, const bool moddown) {
 				c1_out.push_back(&c1);
 				int32_t actual_index;
 				auto& ksk = cc.GetRotationKey(index, keyID, slots, actual_index);
+				ksk.ensureLevel(getLevel());
 				ksk_a.push_back(&ksk.a);
 				ksk_b.push_back(&ksk.b);
 				index_.push_back(actual_index);
@@ -918,6 +919,7 @@ void Ciphertext::conjugate(const Ciphertext& c) {
 			c1_out.push_back(&c1);
 			int actual_index;
 			auto& ksk = cc.GetRotationKey(index, c.keyID, slots, actual_index);
+			ksk.ensureLevel(c.getLevel());
 			ksk_a.push_back(&ksk.a);
 			ksk_b.push_back(&ksk.b);
 			index_.push_back(actual_index);
@@ -991,7 +993,9 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 					}
 				} else {
 					int actual_index;
-					RNSPoly& aux0 = results[i]->c1.dotKSKInPlaceFrom(cc.getKeySwitchAux(), cc.GetRotationKey(indexes[i], keyID, slots, actual_index), &c1);
+					auto& ksk_i = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
+					ksk_i.ensureLevel(getLevel());
+					RNSPoly& aux0 = results[i]->c1.dotKSKInPlaceFrom(cc.getKeySwitchAux(), ksk_i, &c1);
 					// results[i]->c0.dropToLevel(getLevel());
 					// results[i]->c1.dropToLevel(getLevel());
 					if (!ext)
@@ -1027,7 +1031,9 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 					}
 				} else {
 					int actual_index;
-					RNSPoly& aux0 = in.dotKSKInPlace(cc.GetRotationKey(indexes[i], keyID, slots, actual_index), &c1);
+					auto& ksk_i = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
+					ksk_i.ensureLevel(getLevel());
+					RNSPoly& aux0 = in.dotKSKInPlace(ksk_i, &c1);
 					// results[i]->c0.dropToLevel(getLevel());
 					// results[i]->c1.dropToLevel(getLevel());
 					if (!ext) {
@@ -1093,6 +1099,7 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 				c1_out.push_back(&results[i]->c1);
 				int actual_index;
 				auto& ksk = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
+				ksk.ensureLevel(getLevel());
 				ksk_a.push_back(&ksk.a);
 				ksk_b.push_back(&ksk.b);
 				index.push_back(actual_index);

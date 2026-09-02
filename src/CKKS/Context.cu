@@ -4,6 +4,7 @@
 #include "CKKS/BootstrapPrecomputation.cuh"
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
+#include <cstdlib>
 #include <source_location>
 
 #include "../parallel_for.hpp"
@@ -44,6 +45,12 @@ ContextData::ContextData(const Parameters& param_, const std::vector<int>& devs,
   limbGPUid(generateLimbGPUid(meta, L, splitSpecialMeta, K)), digitGPUid(generateDigitGPUid(meta, L, dnum)), GPUrank(GPUid.size())
 // top_limb(devs.size())
 {
+	if (const char* env = std::getenv("FIDESLIB_KEY_TRUNCATION")) {
+		truncateKeys = !(env[0] == '0' || env[0] == 'f' || env[0] == 'F');
+	}
+	if (const char* env = std::getenv("FIDESLIB_KEY_LEVEL_MARGIN")) {
+		keyLevelMargin = std::max(0, std::atoi(env));
+	}
 #ifndef NCCL
 	if (GPUid.size() > 1) {
 		std::cerr << "MGPU requested but no NCCL linked, aborting" << std::endl;
@@ -642,6 +649,54 @@ void ContextData::AddEvalKey(KeySwitchingKey&& ksk) {
 	std::unique_ptr<KeySwitchingKey> key       = std::make_unique<KeySwitchingKey>(std::move(ksk));
 	std::unique_ptr<KeySwitchingKey>& dest_key = precom.keys.at(key->keyID).eval_key;
 	dest_key                                   = std::move(key);
+}
+
+size_t ContextData::keyDeviceBytes(const KeyHash& keyID) const {
+	size_t bytes = 0;
+	for (auto& [id, kp] : precom.keys) {
+		if (!keyID.empty() && id != keyID)
+			continue;
+		if (kp.eval_key)
+			bytes += kp.eval_key->deviceBytes();
+		for (auto& [idx, k] : kp.rot_keys)
+			bytes += k.deviceBytes();
+	}
+	return bytes;
+}
+
+int ContextData::grownKeyCount(const KeyHash& keyID) const {
+	int n = 0;
+	for (auto& [id, kp] : precom.keys) {
+		if (!keyID.empty() && id != keyID)
+			continue;
+		if (kp.eval_key && kp.eval_key->grown)
+			n++;
+		for (auto& [idx, k] : kp.rot_keys)
+			n += k.grown ? 1 : 0;
+	}
+	return n;
+}
+
+void ContextData::printKeyMemoryReport(std::ostream& os) const {
+	for (auto& [id, kp] : precom.keys) {
+		size_t total = 0, truncated = 0;
+		int ntrunc = 0, ngrown = 0;
+		for (auto& [idx, k] : kp.rot_keys) {
+			total += k.deviceBytes();
+			if (k.isTruncated()) {
+				truncated += k.deviceBytes();
+				ntrunc++;
+			}
+			ngrown += k.grown ? 1 : 0;
+		}
+		if (kp.eval_key)
+			total += kp.eval_key->deviceBytes();
+		const size_t full_key = 2ull * dnum * (L + 1 + K) * N * sizeof(uint64_t);
+		os << "[FIDESlib] key memory for keyID '" << id << "': " << kp.rot_keys.size() << " rotation keys"
+		   << (kp.eval_key ? " + eval key" : "") << ", resident " << (total >> 20) << " MiB"
+		   << " (would be " << (((kp.rot_keys.size() + (kp.eval_key ? 1 : 0)) * full_key) >> 20) << " MiB untruncated), "
+		   << ntrunc << " truncated (" << (truncated >> 20) << " MiB), " << ngrown << " grown at runtime" << std::endl;
+	}
 }
 
 KeySwitchingKey& ContextData::GetEvalKey(const KeyHash& keyID) {

@@ -210,6 +210,14 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	bool loaded = false;
 	/// @brief List of devices the context is loaded on.
 	std::vector<int> devices = { 0 };
+	/// @brief Store bootstrap rotation keys level-truncated on the device (memory saving, see docs/level_truncated_keys.md).
+	bool truncate_keys = true;
+	/// @brief Safety margin (levels) added on top of the computed usage level of truncated keys.
+	int key_level_margin = 1;
+	/// @brief Device bytes currently held by key-switching keys on the loaded context.
+	size_t GetKeyDeviceBytes() const;
+	/// @brief Number of truncated keys that had to be grown at runtime (0 == level plan was sufficient).
+	int GetGrownKeyCount() const;
 	/// @brief Whether plaintexts should be automatically loaded to the device upon encryption.
 	bool auto_load_plaintexts = false;
 	/// @brief Whether ciphertexts should be automatically loaded to the device upon creation.

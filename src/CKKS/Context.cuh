@@ -174,6 +174,17 @@ class ContextData {
 	void clearAutomorphismKeys(const KeyHash& KeyID = {});
 	void clearEvalMultKeys(const KeyHash& KeyID = {});
 	void clearBootPrecomputation(int slots = -1);
+
+	// ---- Level-truncated key storage (docs/level_truncated_keys.md) ----
+	/** Master switch. When false every key is loaded complete (legacy behaviour). Also settable via env FIDESLIB_KEY_TRUNCATION=0. */
+	bool truncateKeys = true;
+	/** Extra levels kept above the computed usage level of a truncated key. 1 absorbs a deferred FLEXIBLEAUTO rescale. */
+	int keyLevelMargin = 1;
+	/** Total device bytes held by rotation keys (+ eval key) for `keyID` (all keys if keyID is empty). */
+	size_t keyDeviceBytes(const KeyHash& keyID = "") const;
+	/** Number of keys that had to be grown at runtime (ensureLevel) - should be 0 with a correct level plan. */
+	int grownKeyCount(const KeyHash& keyID = "") const;
+	void printKeyMemoryReport(std::ostream& os) const;
 	void clearParamSwitchKeys(const KeyHash& KeyID = {});
 
 	friend Context GenCryptoContextGPU(const Parameters& param, const std::vector<int>& devs);

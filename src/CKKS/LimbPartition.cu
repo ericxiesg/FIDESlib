@@ -273,13 +273,100 @@ void LimbPartition::generateAllDecompLimb(uint64_t* pInt, size_t offset) {
 
 */
 
-void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset) {
+/**
+ * Level-truncated key storage (see docs/level_truncated_keys.md).
+ *
+ * A hybrid key-switching key stores, for every digit i:
+ *   DECOMP[i] : the Q-limbs that belong to digit i           (ids ascending, see generateDecompMeta)
+ *   DIGIT[i]  : all special limbs, then every Q-limb NOT in digit i (ids ascending, see generateDigitMeta)
+ * The key-switching kernels (dotKSK, hoistedRotateDotKSKBatched___, ...) only ever touch the limbs whose
+ * prime id is <= the ciphertext level, plus the special limbs, and they stop iterating digits once the
+ * digit start offset exceeds the ciphertext limb count. Hence a key that will only ever be applied to
+ * ciphertexts of level <= maxLevel needs only the *prefix* of each record list that satisfies
+ *     id > cc.L  (special limb)   ||   id <= maxLevel.
+ * Because both record lists are ordered (specials first, then Q ids ascending) this prefix is contiguous,
+ * so the existing generate() machinery (which extends [limbs.size(), pos]) can be reused unchanged.
+ */
+static inline bool keyLimbNeeded(const LimbRecord& r, const int L, const int maxLevel) {
+	return maxLevel < 0 || r.id > L || r.id <= maxLevel;
+}
+
+/** Index of the last record in `records` that must be allocated for maxLevel, or -1 if none. */
+static inline int lastNeededPos(const std::vector<LimbRecord>& records, const int L, const int maxLevel) {
+	int pos = -1;
+	for (size_t j = 0; j < records.size(); ++j) {
+		if (keyLimbNeeded(records[j], L, maxLevel))
+			pos = (int)j;
+		else
+			break; // prefix property: once a record is not needed, none after it is.
+	}
+	return pos;
+}
+
+void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset, int maxLevel) {
 	cudaSetDevice(device);
 	DIGITlimb.resize(DIGITmeta.size());
 	for (size_t i = 0; i < DIGITmeta.size(); ++i) {
-		generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], (int)DIGITmeta[i].size() - 1, nullptr /*&DIGITauxptr[i]*/, pInt, offset, nullptr, 0);
+		// Unused pointer-table entries must never be dereferenced; zero them so a bug shows up as a
+		// null-pointer fault instead of silent garbage.
+		if (maxLevel >= 0 && DIGITlimbptr[i].size > 0)
+			cudaMemsetAsync(DIGITlimbptr[i].data, 0, DIGITlimbptr[i].size * sizeof(void*), s.ptr());
+		const int pos = lastNeededPos(DIGITmeta[i], cc.L, maxLevel);
+		if (pos >= 0)
+			generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], pos, nullptr /*&DIGITauxptr[i]*/, pInt, offset, nullptr, 0);
 		offset += cc.N * DIGITmeta.at(i).size();
 	}
+}
+
+void LimbPartition::growDecompAndDigitToLevel(int maxLevel) {
+	cudaSetDevice(device);
+	assert(DECOMPlimb.size() == DECOMPmeta.size());
+	assert(DIGITlimb.size() == DIGITmeta.size());
+
+	// DECOMP limbs: allocated one record at a time (mirrors generateAllDecompAndDigit).
+	for (size_t i = 0; i < DECOMPmeta.size(); ++i) {
+		const int pos = lastNeededPos(DECOMPmeta[i], cc.L, maxLevel);
+		bool changed  = false;
+		for (int j = (int)DECOMPlimb[i].size(); j <= pos; ++j) {
+			generate(DECOMPmeta[i], DECOMPlimb[i], DECOMPlimbptr[i], j, nullptr, nullptr, 0, nullptr, 0, true);
+			changed = true;
+		}
+		if (changed) {
+			std::vector<void*> cpu_ptr(DECOMPmeta.at(i).size(), nullptr);
+			for (uint32_t j = 0; j < DECOMPlimb[i].size(); ++j) {
+				cpu_ptr[j] = DECOMPlimb[i][j].index() == U32 ? (void*)std::get<U32>(DECOMPlimb[i][j]).v.data : (void*)std::get<U64>(DECOMPlimb[i][j]).v.data;
+			}
+			cudaMemcpyAsync(DECOMPlimbptr[i].data, cpu_ptr.data(), DECOMPmeta.at(i).size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+		}
+	}
+	// DIGIT limbs: generate() extends [limbs.size(), pos] and writes the new pointer-table entries itself.
+	for (size_t i = 0; i < DIGITmeta.size(); ++i) {
+		const int pos = lastNeededPos(DIGITmeta[i], cc.L, maxLevel);
+		if (pos >= (int)DIGITlimb[i].size())
+			generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], pos, nullptr, nullptr, 0, nullptr, 0);
+	}
+	CudaCheckErrorModNoSync;
+}
+
+int LimbPartition::decompDigitMaxLevel() const {
+	int lvl = -1;
+	for (auto& d : DECOMPlimb)
+		for (auto& l : d)
+			lvl = std::max(lvl, PRIMEID(l));
+	// A key generated with maxLevel = -1 owns every Q limb, i.e. level cc.L.
+	return lvl;
+}
+
+size_t LimbPartition::decompDigitDeviceBytes() const {
+	size_t bytes = 0;
+	auto add = [&](const LimbImpl& l) { bytes += (size_t)cc.N * (l.index() == U32 ? sizeof(uint32_t) : sizeof(uint64_t)); };
+	for (auto& d : DECOMPlimb)
+		for (auto& l : d)
+			add(l);
+	for (auto& d : DIGITlimb)
+		for (auto& l : d)
+			add(l);
+	return bytes;
 }
 
 void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_communication) {
@@ -860,7 +947,9 @@ void LimbPartition::copySpecialLimb(const LimbPartition& p) {
 	p.getS().wait(s);
 }
 
-void LimbPartition::generateAllDecompAndDigit(bool iskey) {
+void LimbPartition::generateAllDecompAndDigit(bool iskey, int maxLevel) {
+	if (!iskey)
+		maxLevel = -1; // truncation is a key-only feature; ciphertext digits are always complete.
 	cudaSetDevice(device);
 	if ((!(iskey || cc.GPUid.size() == 1) && bufferGATHER == nullptr) || ((iskey || cc.GPUid.size() == 1) && DECOMPlimb[0].size() == 0)) {
 		int decomp_limbs = 0;
@@ -894,7 +983,11 @@ void LimbPartition::generateAllDecompAndDigit(bool iskey) {
 		generateGatherLimb(iskey);
 		DECOMPlimb.resize(DECOMPmeta.size());
 		for (size_t i = 0; i < DECOMPmeta.size(); ++i) {
+			if (maxLevel >= 0 && DECOMPmeta.at(i).size() * sizeof(void*) > 0)
+				cudaMemsetAsync(DECOMPlimbptr[i].data, 0, DECOMPmeta.at(i).size() * sizeof(void*), s.ptr());
 			for (size_t j = 0; j < DECOMPmeta.at(i).size(); ++j) {
+				if (!keyLimbNeeded(DECOMPmeta.at(i).at(j), cc.L, maxLevel))
+					break; // prefix property, see generateAllDigitLimb.
 				int pos = 0;
 				for (size_t k = 0; k < cc.meta.size(); ++k) {
 					for (size_t l = 0; l < cc.meta[k].size(); ++l) {
@@ -914,7 +1007,7 @@ void LimbPartition::generateAllDecompAndDigit(bool iskey) {
 				cudaMemcpyAsync(DECOMPlimbptr[i].data, cpu_ptr.data(), DECOMPmeta.at(i).size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
 		}
 		generateGatherLimb(iskey);
-		generateAllDigitLimb(bufferDECOMPandDIGIT, 0 /*cc.N * decomp_limbs*/);
+		generateAllDigitLimb(bufferDECOMPandDIGIT, 0 /*cc.N * decomp_limbs*/, maxLevel);
 	}
 }
 

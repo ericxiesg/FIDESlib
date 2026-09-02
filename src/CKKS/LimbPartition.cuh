@@ -183,12 +183,22 @@ class LimbPartition {
 
 	void generateAllDecompLimb(uint64_t* pInt, size_t offset);
 
-	void generateAllDigitLimb(uint64_t* pInt, size_t offset);
+	/**
+	 * @param maxLevel  -1: allocate every limb (legacy). Otherwise allocate only the Q-limbs with
+	 *                  prime id <= maxLevel (plus every special limb). Used for level-truncated keys.
+	 */
+	void generateAllDigitLimb(uint64_t* pInt, size_t offset, int maxLevel = -1);
 
 	void copyLimb(const LimbPartition& partition);
 	void copySpecialLimb(const LimbPartition& p);
 
-	void generateAllDecompAndDigit(bool iskey);
+	void generateAllDecompAndDigit(bool iskey, int maxLevel = -1);
+	/** Extend an already generated (possibly truncated) key partition so that it holds every limb with id <= maxLevel. */
+	void growDecompAndDigitToLevel(int maxLevel);
+	/** Largest Q-limb id currently allocated in the DECOMP/DIGIT limbs of this partition (-1 if none). */
+	int decompDigitMaxLevel() const;
+	/** Device bytes held by the DECOMP + DIGIT limbs (key material). */
+	size_t decompDigitDeviceBytes() const;
 
 	void mult1AddMult23Add4(const LimbPartition& partition1, const LimbPartition& partition2, const LimbPartition& partition3, const LimbPartition& partition4);
 

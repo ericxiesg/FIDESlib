@@ -8,6 +8,8 @@
 #include "Math.cuh"
 #include <bit>
 #include <cassert>
+#include <map>
+#include <set>
 using namespace lbcrypto;
 
 /**
@@ -796,6 +798,17 @@ FIDESlib::CKKS::GenRotationKeys(const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>& 
 }
 
 void FIDESlib::CKKS::AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPoly>& publicKey, FIDESlib::CKKS::Context& GPUcc, std::vector<int> indexes) {
+	AddRotationKeys(publicKey, GPUcc, std::move(indexes), std::map<int, int>{});
+}
+
+/** Normalize a rotation index the same way ContextData::AddRotationKey does, so plan lookups match. */
+static int NormalizeRotationIndex(int index, int N) {
+	while (index < 0)
+		index += N / 2;
+	return index;
+}
+
+void FIDESlib::CKKS::AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPoly>& publicKey, FIDESlib::CKKS::Context& GPUcc, std::vector<int> indexes, const std::map<int, int>& maxLevels) {
 	lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc = publicKey->GetCryptoContext();
 	std::set<int> indexes2(indexes.begin(), indexes.end());
 	std::vector<int> indexes3;
@@ -808,9 +821,86 @@ void FIDESlib::CKKS::AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPol
 		auto clave_rotacion = FIDESlib::CKKS::GetRotationKeySwitchKey(publicKey, i);
 		// std::cout << "Load rotation key " << i << std::endl;
 		FIDESlib::CKKS::KeySwitchingKey clave_rotacion_gpu(GPUcc);
-		clave_rotacion_gpu.Initialize(clave_rotacion);
+
+		int maxLevel = -1;
+		if (GPUcc->truncateKeys) {
+			auto it = maxLevels.find(NormalizeRotationIndex(i, GPUcc->N));
+			if (it != maxLevels.end())
+				maxLevel = it->second;
+		}
+		if (maxLevel >= 0) {
+			// The reloader re-reads the key from the OpenFHE context (which keeps every key in host RAM anyway),
+			// so growing a truncated key costs no extra host memory.
+			KeySwitchingKey::Reloader reload = [publicKey, i]() { return FIDESlib::CKKS::GetRotationKeySwitchKey(publicKey, i); };
+			clave_rotacion_gpu.Initialize(clave_rotacion, maxLevel, std::move(reload));
+		} else {
+			clave_rotacion_gpu.Initialize(clave_rotacion);
+		}
 		GPUcc->AddRotationKey(i, std::move(clave_rotacion_gpu));
 	}
+}
+
+std::map<int, int> FIDESlib::CKKS::GetBootstrapKeyLevelPlan(lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc, int slots, FIDESlib::CKKS::Context& GPUcc_) {
+	std::map<int, int> plan;
+	ContextData& GPUcc = *GPUcc_;
+	if (!GPUcc.truncateKeys)
+		return plan;
+
+	auto fhe = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE);
+	if (!fhe || fhe->m_bootPrecomMap.find(slots) == fhe->m_bootPrecomMap.end())
+		return plan;
+	auto precom = fhe->m_bootPrecomMap.find(slots)->second;
+
+	const uint32_t lb_e = precom->m_paramsEnc.lvlb;
+	const uint32_t lb_d = precom->m_paramsDec.lvlb;
+	if (lb_e == 1 && lb_d == 1)
+		return plan; // single linear-transform path (LT) - not analysed, keep keys complete.
+
+	auto ckksParams = std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(cc->GetCryptoParameters());
+	if (!ckksParams)
+		return plan;
+	const lbcrypto::SecretKeyDist dist = ckksParams->GetSecretKeyDist();
+
+	// Total levels consumed by bootstrapping = approxMod depth + lb_e + lb_d (OpenFHE FHECKKSRNS::GetBootstrapDepth).
+	const uint32_t bootDepth = lbcrypto::FHECKKSRNS::GetBootstrapDepth({ lb_e, lb_d }, dist);
+
+	// FIDESlib level = index of the top limb; a fresh ciphertext sits at GPUcc.L, after bootstrapping at L - bootDepth.
+	// StC starts lb_d levels above that. keyLevelMargin covers a deferred (FLEXIBLEAUTO) rescale.
+	const int stcTop = (int)GPUcc.L - (int)bootDepth + (int)lb_d + GPUcc.keyLevelMargin;
+	if (stcTop < 0 || stcTop >= (int)GPUcc.L)
+		return plan; // nothing to gain (or inconsistent parameters) - keep keys complete.
+
+	BootstrapPrecomputation tmp;
+	std::vector<int> all = GetBootstrapIndexes(cc, slots, &tmp);
+
+	// Mark the keys used by the StC linear transform (rotIn per layer, rotOut[1] per layer, final accumulated offset).
+	std::set<int> stc;
+	for (auto& layer : tmp.StC) {
+		for (int j : layer.rotIn)
+			stc.insert(NormalizeRotationIndex(j, GPUcc.N));
+		if (layer.rotOut.size() > 1)
+			stc.insert(NormalizeRotationIndex(layer.rotOut[1], GPUcc.N));
+		if (!layer.rotOut.empty())
+			stc.insert(NormalizeRotationIndex(layer.rotOut[0], GPUcc.N)); // acc_offset key (set in GetBootstrapIndexes)
+	}
+	// Every other bootstrap key (Accumulate, CtS, conjugate) runs at the top level -> complete.
+	std::set<int> full;
+	for (auto& layer : tmp.CtS) {
+		for (int j : layer.rotIn)
+			full.insert(NormalizeRotationIndex(j, GPUcc.N));
+		for (int j : layer.rotOut)
+			full.insert(NormalizeRotationIndex(j, GPUcc.N));
+	}
+	for (int j : all) {
+		const int n = NormalizeRotationIndex(j, GPUcc.N);
+		if (n == 0)
+			continue;
+		if (stc.contains(n) && !full.contains(n))
+			plan[n] = stcTop;
+		else
+			plan[n] = -1;
+	}
+	return plan;
 }
 
 void FIDESlib::CKKS::GenAndAddRotationKeys(lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
@@ -1091,6 +1181,7 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
 
 	ContextData& GPUcc		 = *GPUcc_;
 	std::vector<int> indexes = GetBootstrapIndexes(cc, slots, nullptr);
+	std::map<int, int> plan	 = GetBootstrapKeyLevelPlan(cc, slots, GPUcc_);
 
 	// std::cout << "Add eval key" << std::endl;
 	{
@@ -1109,7 +1200,7 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
 	}
 	// std::cout << "Add rotation keys" << std::endl;
 
-	AddRotationKeys(publicKey, GPUcc_, indexes);
+	AddRotationKeys(publicKey, GPUcc_, indexes, plan);
 
 	if (GPUcc.param.raw->sparse_encaps) {
 		auto cc_switch = CKKS::createSwitchableContextBasedOnContext(cc, 1, 1, cc->GetRingDimension() / 2);
@@ -1146,8 +1237,9 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
 	}
 
 	std::cout << "Rotation keys loaded: " << GPUcc.precom.keys.begin()->second.rot_keys.size() << " ~ "
-			  << 2 * ((long long)GPUcc.precom.keys.begin()->second.rot_keys.size() * GPUcc.dnum * (GPUcc.L + GPUcc.K + 1) * GPUcc.N * 8 / (1 << 20)) << "MB"
+			  << 2 * ((long long)GPUcc.precom.keys.begin()->second.rot_keys.size() * GPUcc.dnum * (GPUcc.L + GPUcc.K + 1) * GPUcc.N * 8 / (1 << 20)) << "MB (untruncated estimate)"
 			  << std::endl;
+	GPUcc.printKeyMemoryReport(std::cout);
 }
 
 void FIDESlib::CKKS::AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc, int slots, FIDESlib::CKKS::Context& GPUcc_, FIDESlib::CKKS::BootstrapPrecomputation& result) {

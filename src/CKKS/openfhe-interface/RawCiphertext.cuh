@@ -4,6 +4,7 @@
 
 #include "CKKS/forwardDefs.cuh"
 #include <cinttypes>
+#include <map>
 #include <vector>
 // #include "CKKS/BootstrapPrecomputation.cuh"
 #include <openfhe.h>
@@ -125,6 +126,20 @@ std::shared_ptr<std::map<uint32_t, lbcrypto::EvalKey<lbcrypto::DCRTPoly>>> GenRo
 std::shared_ptr<std::map<uint32_t, lbcrypto::EvalKey<lbcrypto::DCRTPoly>>> GenRotationKeys(const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>& keys, std::vector<int> indexes);
 
 void AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPoly>& publicKey, FIDESlib::CKKS::Context& GPUcc, std::vector<int> indexes);
+
+/**
+ * Same as above but with a per-index level plan: maxLevels[index] is the highest ciphertext level the
+ * rotation key will ever be applied to (-1 / absent = keep the key complete). Keys are loaded level-truncated
+ * (see KeySwitchingKey::maxLevel) and can grow on demand through a reloader that re-reads the OpenFHE key map.
+ */
+void AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPoly>& publicKey, FIDESlib::CKKS::Context& GPUcc, std::vector<int> indexes, const std::map<int, int>& maxLevels);
+
+/**
+ * Compute the level plan for the bootstrap rotation keys of `slots`: StC keys are only used after EvalMod,
+ * i.e. at levels <= L - GetBootstrapDepth + levelBudget[1] (+ keyLevelMargin). Everything else stays complete.
+ * Returns an empty map when truncation is disabled or the depth cannot be determined.
+ */
+std::map<int, int> GetBootstrapKeyLevelPlan(lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc, int slots, FIDESlib::CKKS::Context& GPUcc_);
 
 /** Used in AddBootstrapPrecomputation */
 void AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc, int slots, FIDESlib::CKKS::Context& GPUcc_, FIDESlib::CKKS::BootstrapPrecomputation& result);

@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "CryptoContext.hpp"
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/ApproxModEval.cuh"
@@ -223,6 +224,12 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 	FIDESlib::CKKS::Context c           = FIDESlib::CKKS::GenCryptoContextGPU(params, this->devices);
 
 	auto& pkImpl = std::any_cast<const lbcrypto::PublicKey<lbcrypto::DCRTPoly>&>(publicKey->pimpl);
+
+	// Level-truncated key storage knobs (see docs/level_truncated_keys.md). Env vars override these.
+	if (std::getenv("FIDESLIB_KEY_TRUNCATION") == nullptr)
+		c->truncateKeys = this->truncate_keys;
+	if (std::getenv("FIDESLIB_KEY_LEVEL_MARGIN") == nullptr)
+		c->keyLevelMargin = this->key_level_margin;
 
 	// Multiplicative key switching key.
 	auto& keyMap = context->GetAllEvalMultKeys(); // lbcrypto::CryptoContextImpl<lbcrypto::DCRTPoly>::s_evalMultKeyMap;
@@ -2007,3 +2014,16 @@ std::vector<int> CryptoContextImpl<DCRTPoly>::GetConvolutionTransformRotationInd
 }
 
 } // namespace fideslib
+size_t CryptoContextImpl<DCRTPoly>::GetKeyDeviceBytes() const {
+	if (!this->loaded)
+		return 0;
+	auto& context_gpu = std::any_cast<const FIDESlib::CKKS::Context&>(this->gpu);
+	return context_gpu->keyDeviceBytes();
+}
+
+int CryptoContextImpl<DCRTPoly>::GetGrownKeyCount() const {
+	if (!this->loaded)
+		return 0;
+	auto& context_gpu = std::any_cast<const FIDESlib::CKKS::Context&>(this->gpu);
+	return context_gpu->grownKeyCount();
+}

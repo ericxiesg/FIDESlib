@@ -144,15 +144,18 @@ void RNSPoly::generateSpecialLimbs(const bool zero_out, const bool for_communica
 	}
 }
 
-void RNSPoly::generateDecompAndDigit(bool iskey) {
+void RNSPoly::generateDecompAndDigit(bool iskey, int maxLevel) {
 
 	if (!GPU[0].DECOMPlimb[0].empty())
 		return;
 
+	if (cc.GPUid.size() > 1)
+		maxLevel = -1; // level truncation is only implemented for the single-GPU key layout.
+
 #pragma omp parallel for num_threads(cc.GPUid.size())
 	for (size_t i = 0; i < cc.GPUid.size(); ++i) {
 		assert(omp_get_num_threads() == (int)cc.GPUid.size());
-		GPU[i].generateAllDecompAndDigit(iskey);
+		GPU[i].generateAllDecompAndDigit(iskey, maxLevel);
 	}
 
 	/** To support peer access kernels we only need to change the pointers to the other libs*/
@@ -196,6 +199,27 @@ void RNSPoly::loadDecompDigit(const std::vector<std::vector<std::vector<uint64_t
 		assert(omp_get_num_threads() == (int)cc.GPUid.size());
 		GPU.at(i).loadDecompDigit(data, moduli);
 	}
+}
+
+void RNSPoly::growDecompAndDigitToLevel(int maxLevel) {
+	assert(cc.GPUid.size() == 1 && "growDecompAndDigitToLevel: single-GPU key layout only");
+	for (size_t i = 0; i < cc.GPUid.size(); ++i) {
+		GPU[i].growDecompAndDigitToLevel(maxLevel);
+	}
+}
+
+int RNSPoly::decompDigitMaxLevel() const {
+	int lvl = cc.L;
+	for (auto& g : GPU)
+		lvl = std::min(lvl, g.decompDigitMaxLevel());
+	return lvl;
+}
+
+size_t RNSPoly::decompDigitDeviceBytes() const {
+	size_t bytes = 0;
+	for (auto& g : GPU)
+		bytes += g.decompDigitDeviceBytes();
+	return bytes;
 }
 
 void RNSPoly::store(std::vector<std::vector<uint64_t>>& data) {

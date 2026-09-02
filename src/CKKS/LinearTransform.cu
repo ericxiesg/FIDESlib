@@ -1207,6 +1207,7 @@ void FIDESlib::CKKS::LinearTransformPt(FIDESlib::CKKS::Plaintext& ptxt, FIDESlib
 	for (int i = 1; i < bStep; ++i) {
 		fastRotationPtr.push_back(&fastRotation[i - 1]);
 		keys.push_back(&cc.GetRotationKey(i * stride));
+		keys.back()->ensureLevel(ptxt.c0.getLevel());
 		indexes.push_back(i * stride);
 	}
 	ptxt.rotate_hoisted(indexes, fastRotationPtr);
