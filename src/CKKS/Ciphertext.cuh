@@ -8,6 +8,7 @@
 #include "RNSPoly.cuh"
 #include "forwardDefs.cuh"
 #include "openfhe-interface/RawCiphertext.cuh"
+#include <memory>
 #include <source_location>
 
 namespace FIDESlib::CKKS {
@@ -46,6 +47,25 @@ class Ciphertext {
 	ContextData& cc;
 	/** @brief The two polynomial components of the ciphertext (c0 and c1). */
 	RNSPoly c0, c1;
+	/**
+	 * @brief Optional third component (degree-2 ciphertext produced by multNoRelin / squareNoRelin).
+	 * Present only between a lazy multiplication and relinearize(). Linear operations (add, sub, multPt,
+	 * multScalar, rescale, dropToLevel, copy) act on it as well; key-switching operations require degree 1.
+	 */
+	std::unique_ptr<RNSPoly> c2;
+
+	/** @brief True when the ciphertext carries a c2 component (degree 2). */
+	[[nodiscard]] bool isDegree2() const { return static_cast<bool>(c2); }
+	/**
+	 * @brief Homomorphic multiplication WITHOUT relinearisation (lazy relinearisation, THOR style).
+	 * Produces (c0*d0, c0*d1 + c1*d0, c1*d1) and leaves the c1*d1 term in `c2`. Several such products can be
+	 * accumulated with add()/sub() and key-switched once with relinearize(). Same scale/level bookkeeping as mult().
+	 */
+	void multNoRelin(const Ciphertext& b);
+	/** @brief Squaring without relinearisation (see multNoRelin). */
+	void squareNoRelin();
+	/** @brief Key-switch the c2 component back onto (c0, c1) with the evaluation key and drop it. No-op if degree 1. */
+	void relinearize();
 	/** @brief Accumulated noise factor for this ciphertext. */
 	double NoiseFactor = 0;
 	/** @brief Discrete noise level indicator. */

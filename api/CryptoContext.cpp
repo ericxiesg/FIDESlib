@@ -239,12 +239,29 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 		eval_ksk.Initialize(raw_eval_ksk);
 		c->AddEvalKey(std::move(eval_ksk));
 	}
-	// Rotational key switching keys.
-	for (const auto& step : this->rotation_indexes) {
-		auto raw_rot_ksk = FIDESlib::CKKS::GetRotationKeySwitchKey(pkImpl, step);
-		FIDESlib::CKKS::KeySwitchingKey rot_ksk(c);
-		rot_ksk.Initialize(raw_rot_ksk);
-		c->AddRotationKey(step, std::move(rot_ksk));
+	// Rotational key switching keys (level-truncated when a plan was given, see SetRotationKeyLevels).
+	{
+		std::map<int, int> plan;
+		for (const auto& [index, remaining] : this->rotation_key_levels) {
+			int maxLevel = static_cast<int>(remaining) + c->keyLevelMargin; // FIDESlib level == remaining levels (limbs - 1)
+			int norm	 = index;
+			while (norm < 0)
+				norm += static_cast<int>(c->N) / 2; // same normalisation as ContextData::AddRotationKey
+			plan[norm] = (maxLevel >= c->L) ? -1 : maxLevel;
+		}
+		FIDESlib::CKKS::AddRotationKeys(pkImpl, c, this->rotation_indexes, plan);
+	}
+	// Conjugation key, if the CPU context has one and no bootstrap precomputation will load it.
+	{
+		auto& autoKeys	   = context->GetAllEvalAutomorphismKeys();
+		const uint32_t idx = 2 * context->GetRingDimension() - 1;
+		if (this->slots_bootstrap.empty() && autoKeys.find(pkImpl->GetKeyTag()) != autoKeys.end() &&
+			autoKeys[pkImpl->GetKeyTag()]->find(idx) != autoKeys[pkImpl->GetKeyTag()]->end()) {
+			auto raw_conj = FIDESlib::CKKS::GetConjugateKeySwitchKey(pkImpl);
+			FIDESlib::CKKS::KeySwitchingKey conj_ksk(c);
+			conj_ksk.Initialize(raw_conj);
+			c->AddRotationKey(idx, std::move(conj_ksk));
+		}
 	}
 	// Bootstrapping keys.
 	for (const auto& slot : this->slots_bootstrap) {
@@ -2026,4 +2043,169 @@ int CryptoContextImpl<DCRTPoly>::GetGrownKeyCount() const {
 		return 0;
 	auto& context_gpu = std::any_cast<const FIDESlib::CKKS::Context&>(this->gpu);
 	return context_gpu->grownKeyCount();
+}
+
+// ---- THOR-style primitives ----
+
+void CryptoContextImpl<DCRTPoly>::SetRotationKeyLevels(const std::map<int32_t, uint32_t>& maxRemainingLevels) {
+	if (this->loaded)
+		OPENFHE_THROW("SetRotationKeyLevels must be called before LoadContext");
+	this->rotation_key_levels = maxRemainingLevels;
+}
+
+void CryptoContextImpl<DCRTPoly>::EvalConjugateKeyGen(const PrivateKey<DCRTPoly>& sk) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (!this->devices.empty() && this->loaded)
+		OPENFHE_THROW("EvalConjugateKeyGen must be called before LoadContext");
+	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	auto& skImpl  = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(sk->pimpl);
+	// Conjugation == automorphism with index 2N-1; OpenFHE's EvalAutomorphismKeyGen accepts raw indices.
+	const uint32_t idx = 2 * context->GetRingDimension() - 1;
+	auto keys		   = context->EvalAutomorphismKeyGen(skImpl, { idx });
+	context->InsertEvalAutomorphismKey(keys, skImpl->GetKeyTag());
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalConjugate(const Ciphertext<DCRTPoly>& ct) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context	   = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& ctImpl	   = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		const uint32_t idx = 2 * context->GetRingDimension() - 1;
+		auto& keyMap	   = context->GetEvalAutomorphismKeyMap(ctImpl->GetKeyTag());
+		auto res		   = context->EvalAutomorphism(ctImpl, idx, keyMap);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto src_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	res_gpu->conjugate(*src_gpu);
+	return result;
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMultByI(const Ciphertext<DCRTPoly>& ct) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& ctImpl  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		auto res	  = context->GetScheme()->MultByMonomial(ctImpl, context->GetRingDimension() / 2);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	res_gpu->multMonomial(static_cast<int>(this->GetRingDimension() / 2));
+	return result;
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMultByInteger(const Ciphertext<DCRTPoly>& ct, uint64_t k) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& ctImpl  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		auto res	  = context->GetScheme()->MultByInteger(ctImpl, k);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	FIDESlib::CKKS::multIntScalar(*res_gpu, k);
+	return result;
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalLevelReduce(const Ciphertext<DCRTPoly>& ct, uint32_t levels) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (levels == 0)
+		return ct;
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& ctImpl  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		// LevelReduce is a no-op under FLEXIBLEAUTO*; Compress drops towers unconditionally.
+		const uint32_t towers = ctImpl->GetElements()[0].GetNumOfElements();
+		if (levels >= towers)
+			OPENFHE_THROW("EvalLevelReduce would drop every RNS limb");
+		auto res					= context->Compress(ctImpl, towers - levels);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	const int target			= res_gpu->getLevel() - static_cast<int>(levels);
+	if (target < 0)
+		OPENFHE_THROW("EvalLevelReduce would drop every RNS limb");
+	res_gpu->dropToLevel(target);
+	return result;
+}
+
+uint32_t CryptoContextImpl<DCRTPoly>::GetRemainingLevels(const Ciphertext<DCRTPoly>& ct) const {
+	if (this->devices.empty() || ct->gpu == 0) {
+		auto& ctImpl = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		return ctImpl->GetElements()[0].GetNumOfElements() - 1;
+	}
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(const_cast<CryptoContextImpl<DCRTPoly>*>(this)->GetDeviceCiphertext(ct->gpu));
+	return static_cast<uint32_t>(ct_gpu->getLevel());
+}
+
+// ---- Lazy relinearisation ----
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMultNoRelin(const Ciphertext<DCRTPoly>& ct1, const Ciphertext<DCRTPoly>& ct2) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& a		  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct1->cpu);
+		auto& b		  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct2->cpu);
+		auto res	  = context->EvalMultNoRelin(a, b);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct1));
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct2));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct1);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	auto b_gpu					= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct2->gpu));
+	res_gpu->multNoRelin(*b_gpu);
+	return result;
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSquareNoRelin(const Ciphertext<DCRTPoly>& ct) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& a		  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		auto res	  = context->EvalMultNoRelin(a, a);
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	res_gpu->squareNoRelin();
+	return result;
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalRelinearize(const Ciphertext<DCRTPoly>& ct) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (this->devices.empty()) {
+		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& a		  = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		auto res	  = (a->GetElements().size() > 2) ? context->Relinearize(a) : a;
+		Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
+		result->cpu					= std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
+		return result;
+	}
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
+	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	res_gpu->relinearize();
+	return result;
 }

@@ -66,7 +66,7 @@ std::map<OPS, int> op_count;
 
 Ciphertext::Ciphertext(Ciphertext&& ct_moved) noexcept
 	: my_range(std::move(ct_moved.my_range)), keyID(std::move(ct_moved.keyID)), cc_(ct_moved.cc_), cc(*cc_), c0(std::move(ct_moved.c0)),
-	  c1(std::move(ct_moved.c1)),
+	  c1(std::move(ct_moved.c1)), c2(std::move(ct_moved.c2)),
 	  NoiseFactor(ct_moved.NoiseFactor), NoiseLevel(ct_moved.NoiseLevel), slots(ct_moved.slots) {
 }
 
@@ -199,6 +199,19 @@ void Ciphertext::add(const Ciphertext& b) {
 
 	c0.add(b.c0);
 	c1.add(b.c1);
+	if (b.c2) {
+		if (!c2) {
+			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			c2->grow(b.c2->getLevel());
+			c2->dropToLevel(b.c2->getLevel());
+			c2->SetModUp(false);
+			c2->copy(*b.c2);
+		} else {
+			if (c2->getLevel() > b.c2->getLevel())
+				c2->dropToLevel(b.c2->getLevel());
+			c2->add(*b.c2);
+		}
+	}
 
 	this->addMetadata(*this, b);
 }
@@ -235,6 +248,24 @@ void Ciphertext::sub(const Ciphertext& b) {
 
 	c0.sub(b.c0);
 	c1.sub(b.c1);
+	if (b.c2) {
+		if (!c2) {
+			// 0 - b.c2
+			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			c2->grow(b.c2->getLevel());
+			c2->dropToLevel(b.c2->getLevel());
+			c2->SetModUp(false);
+			c2->copy(*b.c2);
+			std::vector<uint64_t> minusOne(c2->getLevel() + 1);
+			for (int i = 0; i <= c2->getLevel(); ++i)
+				minusOne[i] = cc.prime[i].p - 1; // -1 mod q_i
+			c2->multScalar(minusOne);
+		} else {
+			if (c2->getLevel() > b.c2->getLevel())
+				c2->dropToLevel(b.c2->getLevel());
+			c2->sub(*b.c2);
+		}
+	}
 
 	this->addMetadata(*this, b);
 }
@@ -415,6 +446,8 @@ void Ciphertext::multPt(const Plaintext& b, bool rescale, bool ignore_scale) {
 
 	c0.multPt(b.c0, rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL);
 	c1.multPt(b.c0, rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL);
+	if (c2)
+		c2->multPt(b.c0, rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL);
 
 	this->multMetadata(*this, b);
 	if (rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL) {
@@ -440,6 +473,8 @@ void Ciphertext::rescale() {
 		c0.rescale();
 		c1.rescale();
 	}
+	if (c2)
+		c2->rescale();
 
 	// Manage metadata
 	NoiseLevel -= 1;
@@ -676,6 +711,64 @@ void Ciphertext::mult(const Ciphertext& b, bool rescale, const bool moddown) {
 	Out(KEYSWITCH, " finish ");
 }
 
+void Ciphertext::multNoRelin(const Ciphertext& b) {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	CKKS::SetCurrentContext(cc_);
+	assert(keyID == b.keyID);
+	assert(!c2 && !b.c2 && "multNoRelin: operands must be degree-1 ciphertexts");
+	if (cc.rescaleTechnique == FIXEDAUTO || cc.rescaleTechnique == FLEXIBLEAUTO || cc.rescaleTechnique == FLEXIBLEAUTOEXT) {
+		if (!adjustForMult(b)) {
+			Ciphertext b_(cc_);
+			b_.copy(b);
+			if (b_.adjustForMult(*this))
+				multNoRelin(b_);
+			else
+				assert(false);
+			return;
+		}
+	}
+	assert(NoiseLevel == 1);
+	assert(NoiseLevel == b.NoiseLevel);
+	op_count[OPS::MULT]++;
+
+	const bool square = (&b == this);
+	if (!c2) {
+		c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+		c2->SetModUp(false);
+	}
+	c2->grow(c1.getLevel());
+	c2->dropToLevel(c1.getLevel());
+	// c2 <- c1 * d1 ; (c0, c1) <- (c0*d0, c0*d1 + c1*d0). `moddown = true` keeps every component in the plain basis.
+	c0.binomialMult(c1, *c2, b.c0, b.c1, true, square);
+
+	this->multMetadata(*this, b);
+}
+
+void Ciphertext::squareNoRelin() {
+	multNoRelin(*this);
+}
+
+void Ciphertext::relinearize() {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	CKKS::SetCurrentContext(cc_);
+	if (!c2)
+		return;
+	assert(c2->getLevel() == c1.getLevel());
+	op_count[OPS::KEYSWITCH]++;
+
+	KeySwitchingKey& kskEval = cc.GetEvalKey(keyID);
+	kskEval.ensureLevel(c1.getLevel());
+
+	// The key-switch core needs the context's auxiliary polynomial (digit/gather limbs pre-generated).
+	RNSPoly& in = cc.getKeySwitchAux();
+	in.setLevel(c1.getLevel());
+	in.copy(*c2);
+	RNSPoly& aux = MGPUkeySwitchCore(in, kskEval, true);
+	c0.add(aux);
+	c1.add(in);
+	c2.reset();
+}
+
 void Ciphertext::square(bool rescale) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
@@ -752,6 +845,8 @@ void Ciphertext::multScalarNoPrecheck(const double c, bool rescale) {
 	auto elem = cc.ElemForEvalMult(c0.getLevel(), c);
 	c0.multScalar(elem);
 	c1.multScalar(elem);
+	if (c2)
+		c2->multScalar(elem);
 
 	// Manage metadata
 	NoiseLevel += 1;
@@ -1161,6 +1256,8 @@ void Ciphertext::dropToLevel(const int level, bool skip_adjust) {
 		} else {
 			c0.dropToLevel(level);
 			c1.dropToLevel(level);
+			if (c2)
+				c2->dropToLevel(level);
 		}
 	}
 }
@@ -1304,6 +1401,17 @@ void Ciphertext::copy(const Ciphertext& ciphertext) {
 	op_count[OPS::COPY]++;
 	c0.copy(ciphertext.c0);
 	c1.copy(ciphertext.c1);
+	if (ciphertext.c2) {
+		if (!c2) {
+			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			c2->SetModUp(false);
+		}
+		c2->grow(ciphertext.c2->getLevel());
+		c2->dropToLevel(ciphertext.c2->getLevel());
+		c2->copy(*ciphertext.c2);
+	} else {
+		c2.reset();
+	}
 	this->copyMetadata(ciphertext);
 }
 

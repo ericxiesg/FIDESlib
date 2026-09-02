@@ -2,6 +2,7 @@
 #define API_CRYPTOCONTEXT_HPP
 
 #include <any>
+#include <map>
 #include <complex>
 #include <cstdint>
 #include <functional>
@@ -163,6 +164,34 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	void EvalSquareInPlace(Ciphertext<DCRTPoly>& ct);
 	Ciphertext<DCRTPoly> EvalSquareMutable(Ciphertext<DCRTPoly>& ct);
 
+	// ---- THOR-style primitives (see docs/thor-engine-requirements.md) ----
+	/// @brief Generate the conjugation key (automorphism index 2N-1). EvalBootstrapKeyGen also generates it.
+	void EvalConjugateKeyGen(const PrivateKey<DCRTPoly>& sk);
+	/// @brief Complex conjugation of every slot (one key switch, no level consumed).
+	Ciphertext<DCRTPoly> EvalConjugate(const Ciphertext<DCRTPoly>& ct);
+	/// @brief Multiply every slot by the imaginary unit i (monomial X^{N/2}); free: no key switch, no level, no scale change.
+	Ciphertext<DCRTPoly> EvalMultByI(const Ciphertext<DCRTPoly>& ct);
+	/// @brief Multiply by a small integer without consuming a level or changing the scale (THOR's DeltaCiphertext trick).
+	Ciphertext<DCRTPoly> EvalMultByInteger(const Ciphertext<DCRTPoly>& ct, uint64_t k);
+	/// @brief Drop `levels` RNS limbs without rescaling (THOR's level_down).
+	Ciphertext<DCRTPoly> EvalLevelReduce(const Ciphertext<DCRTPoly>& ct, uint32_t levels);
+	/// @brief Remaining multiplicative levels of a ciphertext (0 = only q0 left).
+	uint32_t GetRemainingLevels(const Ciphertext<DCRTPoly>& ct) const;
+	/**
+	 * @brief Level plan for the rotation keys registered with EvalRotateKeyGen: index -> maximum number of
+	 * remaining levels the key will ever be applied at (THOR's `create_fixed_rotation_key(sk, delta, level)`).
+	 * Keys are stored level-truncated on the device; keys absent from the map are stored complete.
+	 * Must be called before LoadContext. key_level_margin is added on top.
+	 */
+	void SetRotationKeyLevels(const std::map<int32_t, uint32_t>& maxRemainingLevels);
+
+	/// @brief Multiplication without relinearisation (degree-2 result). Add/sub/pt-mult/rescale/level-reduce work on it; relinearise once.
+	Ciphertext<DCRTPoly> EvalMultNoRelin(const Ciphertext<DCRTPoly>& ct1, const Ciphertext<DCRTPoly>& ct2);
+	/// @brief Squaring without relinearisation.
+	Ciphertext<DCRTPoly> EvalSquareNoRelin(const Ciphertext<DCRTPoly>& ct);
+	/// @brief Key-switch the degree-2 component away (one key switch). Returns the input unchanged for degree-1 ciphertexts.
+	Ciphertext<DCRTPoly> EvalRelinearize(const Ciphertext<DCRTPoly>& ct);
+
 	Ciphertext<DCRTPoly> EvalRotate(const Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 	void EvalRotateInPlace(Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 
@@ -228,6 +257,8 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	uint32_t multiplicative_depth = 0;
 	/// @brief Rotation indexes for which rotation keys are available.
 	std::vector<int32_t> rotation_indexes;
+	/// @brief Rotation index -> max remaining levels (see SetRotationKeyLevels).
+	std::map<int32_t, uint32_t> rotation_key_levels;
 	/// @brief Bootstrap slots available.
 	std::vector<uint32_t> slots_bootstrap;
 	/// @brief Secret key distribution.
