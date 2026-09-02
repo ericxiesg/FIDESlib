@@ -43,6 +43,8 @@ template <> class CCParams<CryptoContextCKKSRNS> {
 	void SetKeySwitchTechnique(KeySwitchTechnique tech);
 	void SetSecretKeyDist(SecretKeyDist dist);
 	void SetSecurityLevel(SecurityLevel level);
+	/// @brief Select REAL (real part only) or COMPLEX (real+imag) CKKS slot encoding.
+	void SetCKKSDataType(CKKSDataType cdt);
 
 	// ---- Device Parameters ----
 

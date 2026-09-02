@@ -41,9 +41,10 @@ enum OPS {
 	CONJUGATE,
 	HOISTEDROTATE,
 	HOISTEDROTATEOUTS,
+	RELINEARIZE,
 };
 
-constexpr std::array<const char*, 18> opstr{ "                   Noop: ",
+constexpr std::array<const char*, 19> opstr{ "                   Noop: ",
                                              "                   HAdd: ",
                                              "                  AddPt: ",
                                              "                   Mult: ",
@@ -60,7 +61,8 @@ constexpr std::array<const char*, 18> opstr{ "                   Noop: ",
                                              "          WSum (inputs): ", // 15
                                              "              Conjugate: ",
                                              "          HoistedRotate: ",
-                                             "HoistedRotate (outputs): " };
+                                             "HoistedRotate (outputs): ",
+                                             "           Relinearize: " };
 
 std::map<OPS, int> op_count;
 
@@ -754,7 +756,7 @@ void Ciphertext::relinearize() {
 	if (!c2)
 		return;
 	assert(c2->getLevel() == c1.getLevel());
-	op_count[OPS::KEYSWITCH]++;
+	op_count[OPS::RELINEARIZE]++;
 
 	KeySwitchingKey& kskEval = cc.GetEvalKey(keyID);
 	kskEval.ensureLevel(c1.getLevel());

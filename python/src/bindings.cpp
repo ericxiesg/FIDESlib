@@ -74,6 +74,10 @@ PYBIND11_MODULE(_core, m) {
 	  .value("HEStd_256_classic", HEStd_256_classic)
 	  .value("HEStd_NotSet", HEStd_NotSet)
 	  .export_values();
+	py::enum_<CKKSDataType>(m, "CKKSDataType")
+	  .value("REAL", REAL)
+	  .value("COMPLEX", COMPLEX)
+	  .export_values();
 
 	py::class_<CCParams<CryptoContextCKKSRNS>>(m, "CCParams")
 	  .def(py::init<>())
@@ -88,6 +92,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("SetKeySwitchTechnique", &CCParams<CryptoContextCKKSRNS>::SetKeySwitchTechnique)
 	  .def("SetSecretKeyDist", &CCParams<CryptoContextCKKSRNS>::SetSecretKeyDist)
 	  .def("SetSecurityLevel", &CCParams<CryptoContextCKKSRNS>::SetSecurityLevel)
+	  .def("SetCKKSDataType", &CCParams<CryptoContextCKKSRNS>::SetCKKSDataType)
 	  .def("SetDevices", [](CCParams<CryptoContextCKKSRNS>& p, std::vector<int> devs) { p.SetDevices(std::move(devs)); })
 	  .def("SetPlaintextAutoload", &CCParams<CryptoContextCKKSRNS>::SetPlaintextAutoload)
 	  .def("SetCiphertextAutoload", &CCParams<CryptoContextCKKSRNS>::SetCiphertextAutoload)

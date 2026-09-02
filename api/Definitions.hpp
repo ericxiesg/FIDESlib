@@ -86,6 +86,12 @@ enum SecurityLevel {
     HEStd_NotSet,
 };
 
+/// @brief CKKS plaintext data type: REAL keeps only the real part of each slot, COMPLEX encodes both halves.
+enum CKKSDataType {
+    REAL = 0,
+    COMPLEX = 1,
+};
+
 } // namespace fideslib
 
 #endif

@@ -62,6 +62,7 @@ class Engine:
         p.SetFirstModSize(first_mod_bits)
         p.SetScalingTechnique(scaling_technique)
         p.SetMultiplicativeDepth(depth)
+        p.SetCKKSDataType(_core.COMPLEX)
         p.SetDevices(list(self.devices))
         self.cc = _core.GenCryptoContext(p)
         for f in (_core.PKE, _core.KEYSWITCH, _core.LEVELEDSHE, _core.ADVANCEDSHE, _core.FHE):
