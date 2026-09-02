@@ -1116,7 +1116,6 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSub(double scalar, const C
 	auto res_gpu                = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
 	res_gpu->multScalar(-1.0);
 	res_gpu->addScalar(scalar);
-	res_gpu->multScalar(-1.0);
 
 	return result;
 }
@@ -1241,7 +1240,7 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(const Ciphertext<DCRT
 
 		auto& context                   = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 		auto& ct1Impl                   = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct1->cpu);
-		auto& ptImpl                    = std::any_cast<const lbcrypto::ConstPlaintext&>(pt->cpu);
+		auto& ptImpl                    = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 		auto ct                         = context->EvalMult(ct1Impl, ptImpl);
 		Ciphertext<DCRTPoly> ciphertext = std::make_shared<CiphertextImpl<DCRTPoly>>(this->self_reference.lock());
 		ciphertext->cpu                 = std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(ct);
@@ -1302,7 +1301,7 @@ void CryptoContextImpl<DCRTPoly>::EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, Pla
 		auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 		EnsureMutableCpuCiphertext(ct1);
 		auto& ct1Impl = std::any_cast<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct1->cpu);
-		auto& ptImpl  = std::any_cast<const lbcrypto::ConstPlaintext&>(pt->cpu);
+		auto& ptImpl  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 		auto res      = context->EvalMult(ct1Impl, ptImpl);
 		ct1->cpu      = std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(res);
 		return;
@@ -2030,7 +2029,6 @@ std::vector<int> CryptoContextImpl<DCRTPoly>::GetConvolutionTransformRotationInd
 	return FIDESlib::CKKS::GetConvolutionTransformRotationIndices(rowSize, bStep, stride, gStep);
 }
 
-} // namespace fideslib
 size_t CryptoContextImpl<DCRTPoly>::GetKeyDeviceBytes() const {
 	if (!this->loaded)
 		return 0;
@@ -2209,3 +2207,4 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalRelinearize(const Cipherte
 	res_gpu->relinearize();
 	return result;
 }
+} // namespace fideslib

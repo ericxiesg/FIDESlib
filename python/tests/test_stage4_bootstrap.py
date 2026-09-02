@@ -8,7 +8,7 @@ import pyfideslib as pf
 
 DEVICES = [d.strip() for d in os.environ.get("PYFIDESLIB_DEVICES", "cpu,cuda:0").split(",") if d.strip()]
 BOOT = dict(log_n=int(os.environ.get("PYFIDESLIB_BOOT_LOGN", "13")), depth=int(os.environ.get("PYFIDESLIB_BOOT_DEPTH", "25")),
-            scaling_bits=50, first_mod_bits=55, dnum=3)
+            scaling_bits=59, first_mod_bits=60, dnum=3)
 
 
 @pytest.fixture(scope="module", params=DEVICES)
