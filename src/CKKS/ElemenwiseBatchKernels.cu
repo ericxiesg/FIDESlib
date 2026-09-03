@@ -157,6 +157,24 @@ __global__ void broadcastLimb0_mgpu_(void** a, const __grid_constant__ int prime
 	}
 }
 
+__global__ void expandCentredCoeffs_(void** limbs, const int64_t* coeffs, const __grid_constant__ int primeid_init) {
+	const int idx	  = threadIdx.x + blockIdx.x * blockDim.x;
+	const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+	const uint64_t q  = C_.primes[primeid];
+
+	// Coefficients are centred (|c| < q0/2 <= 2^62) but not necessarily smaller than this limb's prime,
+	// so a full signed remainder is needed. One 64-bit division per coefficient is negligible next to
+	// the NTT that follows.
+	const int64_t r	 = coeffs[idx] % (int64_t)q;
+	const uint64_t v = (uint64_t)(r < 0 ? r + (int64_t)q : r);
+
+	if (ISU64(primeid)) {
+		((uint64_t*)limbs[blockIdx.y])[idx] = v;
+	} else {
+		((uint32_t*)limbs[blockIdx.y])[idx] = (uint32_t)v;
+	}
+}
+
 __global__ void copy_(void** src, void** dst) {
 	int idx = threadIdx.x + blockIdx.x * blockDim.x;
 

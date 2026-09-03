@@ -14,7 +14,7 @@ RMSE 1.34e-3 on real BERT-base/MRPC layer 0, HEStd_NotSet).
 | 3 | `create_fixed_rotation_key(sk, delta, level)` (~250 keys, levels 8..14) | rotations | `EvalRotateKeyGen` + **`SetRotationKeyLevels({delta: level})`** -> level-truncated device keys | added (uses level-truncated key storage) |
 | 4 | `create_bootstrap_key(size=large/medium)`; `bootstrap_deltas` reusable for rotation | bootstrap | `EvalBootstrapSetup/KeyGen`; bootstrap rotation keys are usable by `EvalRotate` (same map) | exists |
 | 5 | `add / add_inplace / subtract` (ct, pt, float) | everywhere | `EvalAdd*/EvalSub*` | exists |
-| 6 | `multiply(ct, light_pt)` after `prepare_for_multiply = ntt(rescale(ct))` | PC-MM, masks | `EvalMult(ct, Plaintext)`; ntt/intt are no-ops (FIDESlib keeps NTT form) | exists; **light plaintext = GAP (see 2.2)** |
+| 6 | `multiply(ct, light_pt)` after `prepare_for_multiply = ntt(rescale(ct))` | PC-MM, masks | `EvalMult(ct, LightPlaintext)`; ntt/intt are no-ops (FIDESlib keeps NTT form) | done (2.2) |
 | 7 | `multiply(ct, ct)` / `square(ct)` returning a *non-relinearised* ciphertext, `add` on them, one `relinearize` | CC-MM (Alg. 2 lines 16-17), Stockmeyer, Goldschmidt | none: `mult` always key-switches | **GAP (see 2.1)** |
 | 8 | `multiply(ct, float)` (consumes a level), `multiply(ct, int)` (free) | DeltaCiphertext bookkeeping | `EvalMult(ct,double)`, **`EvalMultByInteger`** | added |
 | 9 | `multiply_imaginary_integer(ct, 1)` | complexification (free) | **`EvalMultByI`** (monomial X^{N/2}) | added |
@@ -24,7 +24,7 @@ RMSE 1.34e-3 on real BERT-base/MRPC layer 0, HEStd_NotSet).
 | 13 | `level_down(ct, by)` | level alignment | **`EvalLevelReduce`** | added |
 | 14 | `ct.level`, `level_available`, `engine.max_level` | scheduling | **`GetRemainingLevels`** | added |
 | 15 | `encode(msg, level)`, `encrypt(msg, sk, level)`, `decrypt` | I/O, masks | `MakeCKKSPackedPlaintext(v, 1, level, nullptr, slots)`, `Encrypt`, `Decrypt` | exists |
-| 16 | `read_light_plaintext(path)` (110 GB on disk for 12 layers) | weights, biases, masks | **`LightPlaintext` (GAP, see 2.2)** | to do |
+| 16 | `read_light_plaintext(path)` (110 GB on disk for 12 layers) | weights, biases, masks | `LightPlaintextImpl::Load` / `Engine.read_light_plaintext` | done (2.2) |
 | 17 | `bootstrap(ct)` on a *complex* full-slot ciphertext, output at 14 levels | 35 bootstraps/layer | `EvalBootstrap` then `EvalLevelReduce` to the schedule's level | exists; verify complex-slot precision |
 
 Everything in he.py's stage_01..stage_18 is expressible with the rows above; the Python orchestration can
@@ -42,17 +42,20 @@ multiply the key-switch count of CC-MM by ~16. Required:
 FIDESlib's `Ciphertext::mult` already computes the tensor product and immediately key-switches; the
 change is to split it and to give `Ciphertext` an optional `c2` RNSPoly.
 
-### 2.2 Light plaintexts (weights on demand)
+### 2.2 Light plaintexts (weights on demand) - DONE, see docs/light_plaintext.md
 desilofhe's "light plaintext" is the encoded polynomial in a compact non-RNS form (the 110 GB / ~221k
 plaintexts figure gives ~0.5 MB each = one 64-bit coefficient vector for N=2^16), expanded to RNS limbs
 (reduce mod q_i + NTT) when multiplied. This is exactly the "plaintexts on demand" memory lever:
 weights for a whole stage fit on the device in light form (stage_12: 6144 x 0.5 MB = 3 GB) and are
-expanded in batches. Required:
-* `LightPlaintext { level, scale, std::vector<int64_t> coeffs }` + encoder (FFT encode, round to int64;
-  fits when scaling <= 2^50 and |m|*Delta < 2^63)
-* GPU expansion kernel: per limb i, `coeffs mod q_i` (signed) then FIDESlib NTT; small expanded-plaintext
-  cache keyed by (light id, level)
-* `EvalMult(ct, LightPlaintext)`.
+expanded in batches. Implemented as:
+* `fideslib::LightPlaintextImpl { coeffs, scale, slots, noise_scale_deg, level_hint, uid }` +
+  `MakeLightPlaintext`, which reuses OpenFHE's encoder and centre-lifts tower 0 rather than
+  re-implementing the special IFFT. Rejects messages whose coefficients do not fit one tower.
+* GPU expansion: `expandCentredCoeffs_` (signed `coeffs mod q_i` per limb) then FIDESlib's forward NTT,
+  through `RNSPoly::loadCentredCoefficients` / `Plaintext::loadLight`. Only N*8 bytes cross PCIe.
+* `EvalMult(ct, LightPlaintext)` / `EvalAdd(ct, LightPlaintext)`, expanding at the ciphertext's level
+  through a FIFO cache keyed by (uid, level).
+* Files: `LightPlaintextImpl::Save/Load` ("FLPT0001", 32-byte header + N int64).
 
 ### 2.3 Bootstrap output level contract
 he.py assumes bootstrap returns exactly 14 levels; the draft's `KeepRemainingLevels` drops surplus

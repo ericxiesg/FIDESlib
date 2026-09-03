@@ -192,6 +192,13 @@ class LimbPartition {
 	void copyLimb(const LimbPartition& partition);
 	void copySpecialLimb(const LimbPartition& p);
 
+	/**
+	 * Fill this partition's limbs (up to the poly level) with `d_coeffs[j] mod q_i`, where `d_coeffs`
+	 * points to N centred int64 coefficients already resident on this partition's device. Coefficient
+	 * domain on exit; the caller must NTT. Used to expand a light plaintext (docs/light_plaintext.md).
+	 */
+	void loadCentredCoefficients(const int64_t* d_coeffs);
+
 	void generateAllDecompAndDigit(bool iskey, int maxLevel = -1);
 	/** Free the DECOMP/DIGIT limbs of a key partition and blank its pointer tables (device must be synchronised). */
 	void resetDecompAndDigit();

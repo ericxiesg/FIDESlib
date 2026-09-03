@@ -927,6 +927,35 @@ void RNSPoly::load(const std::vector<std::vector<uint64_t>>& data, const std::ve
 		this->setLevel(level + 1);
 }
 
+void RNSPoly::loadCentredCoefficients(const std::vector<int64_t>& coeffs, int newLevel) {
+	assert((int)coeffs.size() == cc.N);
+	assert(newLevel >= 0 && newLevel <= cc.L);
+
+	// grow(..., constant = false): the forward NTT below writes through each limb's auxiliary buffer
+	// (ApplyNTT passes auxptr), which the constant limbs loadConstant() uses do not have.
+	if (level < newLevel)
+		grow(newLevel, false, false);
+	else if (level > newLevel)
+		dropToLevel(newLevel);
+	assert(level == newLevel);
+
+	// Every partition reduces the whole coefficient vector, so each device needs its own copy. N * 8 bytes
+	// (0.5 MiB at N = 2^16) instead of the (level + 1) * N * 8 an expanded plaintext would cost to upload.
+	for (size_t g = 0; g < GPU.size(); ++g) {
+		LimbPartition& p = GPU[g];
+		cudaSetDevice(p.device);
+		int64_t* d_coeffs = nullptr;
+		cudaMallocAsync(&d_coeffs, coeffs.size() * sizeof(int64_t), p.getS().ptr());
+		cudaMemcpyAsync(d_coeffs, coeffs.data(), coeffs.size() * sizeof(int64_t), cudaMemcpyHostToDevice, p.getS().ptr());
+		p.loadCentredCoefficients(d_coeffs);
+		cudaFreeAsync(d_coeffs, p.getS().ptr());
+	}
+
+	// Coefficient -> evaluation domain. INTT/NTT are exact inverses here, and FIDESlib's evaluation
+	// layout is OpenFHE's (RawCiphertext.cuh: REVERSE == false), so no reordering is needed either side.
+	NTT<ALGO_SHOUP>(1, true);
+}
+
 void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli) {
 	int limbsize  = 0;
 	int Slimbsize = 0;

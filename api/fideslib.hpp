@@ -7,6 +7,7 @@
 #include "Definitions.hpp"
 #include "GenCryptoContext.hpp"
 #include "KeyPair.hpp"
+#include "LightPlaintext.hpp"
 #include "Plaintext.hpp"
 #include "PrivateKey.hpp"
 #include "PublicKey.hpp"

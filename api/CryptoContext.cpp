@@ -21,6 +21,7 @@
 #include "lattice/hal/lat-backend.h"
 
 #include <any>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -2152,6 +2153,176 @@ uint32_t CryptoContextImpl<DCRTPoly>::GetRemainingLevels(const Ciphertext<DCRTPo
 	}
 	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(const_cast<CryptoContextImpl<DCRTPoly>*>(this)->GetDeviceCiphertext(ct->gpu));
 	return static_cast<uint32_t>(ct_gpu->getLevel());
+}
+
+// ---- Light plaintexts (docs/light_plaintext.md) ----
+
+namespace {
+
+/** Process-wide identity for light plaintexts, used to key the expansion cache. */
+std::atomic<uint64_t> g_light_plaintext_uid{ 1 };
+
+/** Representative of `v` mod `q` in [0, q), for a centred (possibly negative) `v` of any magnitude. */
+inline uint64_t ReduceCentred(int64_t v, uint64_t q) {
+	const int64_t r = v % static_cast<int64_t>(q);
+	return static_cast<uint64_t>(r < 0 ? r + static_cast<int64_t>(q) : r);
+}
+
+} // namespace
+
+LightPlaintext CryptoContextImpl<DCRTPoly>::MakeLightPlaintext(const std::vector<std::complex<double>>& value, uint32_t slots, int32_t levelHint) {
+	FIDESlib::CudaNvtxRange r("API");
+	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+
+	// Encode once. OpenFHE does the special IFFT and the rounding; we keep only the integer result.
+	// Level 0 keeps every tower, which is what the single-tower cross-check below wants.
+	const uint32_t encodeLevel = levelHint >= 0 ? static_cast<uint32_t>(levelHint) : 0u;
+	lbcrypto::Plaintext pt	   = context->MakeCKKSPackedPlaintext(value, 1, encodeLevel, nullptr, slots);
+
+	lbcrypto::DCRTPoly poly = pt->GetElement<lbcrypto::DCRTPoly>();
+	poly.SetFormat(Format::COEFFICIENT);
+
+	const auto& t0		= poly.GetElementAtIndex(0);
+	const uint64_t q0	= t0.GetModulus().ConvertToInt<uint64_t>();
+	const uint64_t half = q0 >> 1;
+	const uint32_t N	= poly.GetRingDimension();
+
+	LightPlaintext lp = std::make_shared<LightPlaintextImpl>();
+	lp->coeffs.resize(N);
+	for (uint32_t j = 0; j < N; ++j) {
+		const uint64_t v = t0.GetValues()[j].ConvertToInt();
+		lp->coeffs[j]	 = v > half ? static_cast<int64_t>(v) - static_cast<int64_t>(q0) : static_cast<int64_t>(v);
+	}
+
+	// The compact form only works because an encoded coefficient fits in one tower: |c| < q0/2. If the
+	// message times Delta is larger, tower 0 holds a wrapped value and the other towers disagree with it.
+	// Checking the next tower catches exactly that, for one modulo per coefficient.
+	if (poly.GetNumOfElements() > 1) {
+		const auto& t1	  = poly.GetElementAtIndex(1);
+		const uint64_t q1 = t1.GetModulus().ConvertToInt<uint64_t>();
+		for (uint32_t j = 0; j < N; ++j) {
+			if (ReduceCentred(lp->coeffs[j], q1) != t1.GetValues()[j].ConvertToInt()) {
+				OPENFHE_THROW("MakeLightPlaintext: encoded coefficient " + std::to_string(j) +
+							  " does not fit in a single RNS tower - the message is too large for the scaling factor, "
+							  "so it has no compact (light) form");
+			}
+		}
+	}
+
+	lp->scale			= pt->GetScalingFactor();
+	lp->slots			= static_cast<uint32_t>(pt->GetSlots());
+	lp->noise_scale_deg = static_cast<uint32_t>(pt->GetNoiseScaleDeg());
+	lp->level_hint		= levelHint;
+	lp->uid				= g_light_plaintext_uid++;
+	return lp;
+}
+
+LightPlaintext CryptoContextImpl<DCRTPoly>::MakeLightPlaintext(const std::vector<double>& value, uint32_t slots, int32_t levelHint) {
+	std::vector<std::complex<double>> complexValue(value.begin(), value.end());
+	return MakeLightPlaintext(complexValue, slots, levelHint);
+}
+
+Plaintext CryptoContextImpl<DCRTPoly>::ExpandLightPlaintext(const LightPlaintext& lp, uint32_t level) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (!lp)
+		OPENFHE_THROW("ExpandLightPlaintext: null light plaintext");
+
+	auto& context			= std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	const auto cryptoParams = std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(context->GetCryptoParameters());
+	const auto technique	= cryptoParams->GetScalingTechnique();
+	const bool levelDependentScale = technique == lbcrypto::FLEXIBLEAUTO || technique == lbcrypto::FLEXIBLEAUTOEXT;
+	if (levelDependentScale && lp->level_hint >= 0 && static_cast<uint32_t>(lp->level_hint) != level) {
+		OPENFHE_THROW("ExpandLightPlaintext: under FLEXIBLE scaling the coefficients carry the scaling factor of level " +
+					  std::to_string(lp->level_hint) + " and cannot be expanded at level " + std::to_string(level));
+	}
+
+	if (this->devices.empty()) {
+		// CPU: rebuild the RNS towers and let OpenFHE do the NTT.
+		Plaintext plaintext = this->MakeCKKSPackedPlaintext(std::vector<double>(lp->slots, 0.0), lp->noise_scale_deg, level, nullptr, lp->slots);
+		auto& ptImpl		= std::any_cast<lbcrypto::Plaintext&>(plaintext->cpu);
+
+		const auto elemParams = ptImpl->GetElement<lbcrypto::DCRTPoly>().GetParams();
+		const uint32_t N	  = elemParams->GetRingDimension();
+		if (lp->coeffs.size() != N)
+			OPENFHE_THROW("ExpandLightPlaintext: coefficient count does not match the ring dimension");
+
+		std::vector<lbcrypto::DCRTPoly::PolyType> towers;
+		towers.reserve(elemParams->GetParams().size());
+		for (const auto& tp : elemParams->GetParams()) {
+			lbcrypto::DCRTPoly::PolyType tower(tp, Format::COEFFICIENT, true);
+			const uint64_t q = tp->GetModulus().ConvertToInt<uint64_t>();
+			for (uint32_t j = 0; j < N; ++j)
+				tower[j] = lbcrypto::NativeInteger(ReduceCentred(lp->coeffs[j], q));
+			towers.push_back(std::move(tower));
+		}
+
+		lbcrypto::DCRTPoly poly(towers);
+		poly.SetFormat(Format::EVALUATION);
+		ptImpl->GetElement<lbcrypto::DCRTPoly>() = std::move(poly);
+		return plaintext;
+	}
+
+	// GPU: never materialise the towers on the host - upload the coefficients and expand on the device.
+	auto& context_gpu  = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	const int gpuLevel = static_cast<int>(context_gpu->L) - static_cast<int>(level);
+	if (gpuLevel < 0)
+		OPENFHE_THROW("ExpandLightPlaintext: level " + std::to_string(level) + " exceeds the context depth");
+
+	auto gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
+	gpu_pt->loadLight(lp->coeffs, gpuLevel, lp->scale, static_cast<int>(lp->noise_scale_deg), static_cast<int>(lp->slots));
+
+	Plaintext plaintext = std::make_shared<PlaintextImpl>(this->self_reference.lock());
+	plaintext->gpu		= this->RegisterDevicePlaintext(std::move(gpu_pt));
+	plaintext->loaded	= true;
+	return plaintext;
+}
+
+Plaintext CryptoContextImpl<DCRTPoly>::GetExpandedLightPlaintext(const LightPlaintext& lp, uint32_t level) {
+	const auto key = std::make_pair(lp->uid, level);
+	if (auto it = this->light_plaintext_cache.find(key); it != this->light_plaintext_cache.end())
+		return it->second;
+
+	Plaintext pt = this->ExpandLightPlaintext(lp, level);
+	if (this->light_plaintext_cache_capacity == 0)
+		return pt;
+
+	while (this->light_plaintext_cache_order.size() >= this->light_plaintext_cache_capacity) {
+		this->light_plaintext_cache.erase(this->light_plaintext_cache_order.front());
+		this->light_plaintext_cache_order.erase(this->light_plaintext_cache_order.begin());
+	}
+	this->light_plaintext_cache.emplace(key, pt);
+	this->light_plaintext_cache_order.push_back(key);
+	return pt;
+}
+
+uint32_t CryptoContextImpl<DCRTPoly>::GetConsumedLevels(const Ciphertext<DCRTPoly>& ct) const {
+	if (this->devices.empty() || ct->gpu == 0) {
+		auto& ctImpl = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		return static_cast<uint32_t>(ctImpl->GetLevel());
+	}
+	auto& context_gpu = std::any_cast<const FIDESlib::CKKS::Context&>(this->gpu);
+	return static_cast<uint32_t>(context_gpu->L) - this->GetRemainingLevels(ct);
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(const Ciphertext<DCRTPoly>& ct, const LightPlaintext& lp) {
+	FIDESlib::CudaNvtxRange r("API");
+	Plaintext pt = this->GetExpandedLightPlaintext(lp, this->GetConsumedLevels(ct));
+	return this->EvalMult(ct, pt);
+}
+
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalAdd(const Ciphertext<DCRTPoly>& ct, const LightPlaintext& lp) {
+	FIDESlib::CudaNvtxRange r("API");
+	Plaintext pt = this->GetExpandedLightPlaintext(lp, this->GetConsumedLevels(ct));
+	return this->EvalAdd(ct, pt);
+}
+
+void CryptoContextImpl<DCRTPoly>::ClearLightPlaintextCache() {
+	this->light_plaintext_cache.clear();
+	this->light_plaintext_cache_order.clear();
+}
+
+size_t CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize() const {
+	return this->light_plaintext_cache.size();
 }
 
 // ---- Lazy relinearisation ----

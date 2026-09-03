@@ -82,6 +82,16 @@ void Plaintext::load(const RawPlainText& raw) {
 	slots       = raw.slots;
 }
 
+void Plaintext::loadLight(const std::vector<int64_t>& coeffs, int level, double scale, int noiseLevel, int slots_) {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	CKKS::SetCurrentContext(cc_);
+	c0.loadCentredCoefficients(coeffs, level);
+
+	NoiseFactor = scale;
+	NoiseLevel	= noiseLevel;
+	slots		= slots_;
+}
+
 void Plaintext::store(RawPlainText& raw) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);

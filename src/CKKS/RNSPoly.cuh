@@ -29,6 +29,15 @@ class RNSPoly {
 
 	void load(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli);
 
+	/**
+	 * Expand a light plaintext into this polynomial at `newLevel`: every limb q_i gets
+	 * `coeffs[j] mod q_i` (signed remainder of the centred coefficient), then a forward NTT puts the
+	 * polynomial in the evaluation domain the rest of the library works in.
+	 * `coeffs` holds N coefficients in the natural (non bit-reversed) coefficient order, i.e. the order
+	 * OpenFHE's DCRTPoly uses in Format::COEFFICIENT. See docs/light_plaintext.md.
+	 */
+	void loadCentredCoefficients(const std::vector<int64_t>& coeffs, int newLevel);
+
 	void store(std::vector<std::vector<uint64_t>>& data);
 
 	bool isModUp() const;

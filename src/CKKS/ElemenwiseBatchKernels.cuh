@@ -27,6 +27,13 @@ __global__ void square_(void** l, void** l1, const __grid_constant__ int primeid
 __global__ void binomial_square_fold_(void** c0_res, void** c2_key_switched_0, void** c1, void** c2_key_switched_1, const __grid_constant__ int primeid_init);
 template <ALGO algo> __global__ void Scalar_mult_(void** a, const uint64_t* b, const __grid_constant__ int primeid, const uint64_t* shoup_mu);
 
+/**
+ * Expand a light plaintext: reduce N centred int64 coefficients into one RNS limb each.
+ * `limbs[blockIdx.y]` is the limb whose prime is `C_.primeid_flattened[primeid_init + blockIdx.y]`.
+ * The result is still in the coefficient domain; the caller NTTs it.
+ */
+__global__ void expandCentredCoeffs_(void** limbs, const int64_t* coeffs, const __grid_constant__ int primeid_init);
+
 __global__ void broadcastLimb0_(void** a);
 __global__ void broadcastLimb0_mgpu_(void** a, const __grid_constant__ int primeid_init, void** limb0);
 __global__ void copy_(void** src, void** dst);

@@ -14,6 +14,7 @@
 #include "CCParams.hpp"
 #include "Ciphertext.hpp"
 #include "Definitions.hpp"
+#include "LightPlaintext.hpp"
 #include "KeyPair.hpp"
 #include "Plaintext.hpp"
 #include "PublicKey.hpp"
@@ -177,6 +178,38 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalLevelReduce(const Ciphertext<DCRTPoly>& ct, uint32_t levels);
 	/// @brief Remaining multiplicative levels of a ciphertext (0 = only q0 left).
 	uint32_t GetRemainingLevels(const Ciphertext<DCRTPoly>& ct) const;
+
+	// ---- Light plaintexts (docs/light_plaintext.md) ----
+	/**
+	 * @brief Encode a message into its compact, level-agnostic form: the N centred integer coefficients
+	 * of round(Delta * IFFT(message)) instead of the (L+1) RNS towers. 0.5 MiB instead of 16 MiB at
+	 * N = 2^16, L = 30. THOR's `encode_to_light_plaintext`.
+	 *
+	 * Requires a scaling technique whose Delta does not depend on the level (FIXEDMANUAL / FIXEDAUTO);
+	 * under FLEXIBLE* the coefficients are only valid at `level_hint` and expanding elsewhere throws.
+	 * @param levelHint Level the plaintext is intended for, recorded for that check. -1: any level.
+	 */
+	LightPlaintext MakeLightPlaintext(const std::vector<std::complex<double>>& value, uint32_t slots = 0, int32_t levelHint = -1);
+	/// @brief Real-valued overload of MakeLightPlaintext.
+	LightPlaintext MakeLightPlaintext(const std::vector<double>& value, uint32_t slots = 0, int32_t levelHint = -1);
+	/**
+	 * @brief Expand a light plaintext into a usable plaintext at `level` (consumed levels, OpenFHE
+	 * convention). On the GPU backend the towers are built on the device from the coefficient vector,
+	 * so only N * 8 bytes cross PCIe.
+	 */
+	Plaintext ExpandLightPlaintext(const LightPlaintext& lp, uint32_t level);
+	/// @brief Multiply by a light plaintext, expanding it at the ciphertext's level (cached).
+	Ciphertext<DCRTPoly> EvalMult(const Ciphertext<DCRTPoly>& ct, const LightPlaintext& lp);
+	/// @brief Add a light plaintext, expanding it at the ciphertext's level (cached).
+	Ciphertext<DCRTPoly> EvalAdd(const Ciphertext<DCRTPoly>& ct, const LightPlaintext& lp);
+	/// @brief Drop every cached expansion (call between stages to bound device memory).
+	void ClearLightPlaintextCache();
+	/// @brief Number of expansions currently cached.
+	size_t GetLightPlaintextCacheSize() const;
+	/// @brief ExpandLightPlaintext through the FIFO cache.
+	Plaintext GetExpandedLightPlaintext(const LightPlaintext& lp, uint32_t level);
+	/// @brief Levels a ciphertext has already consumed, i.e. the `level` MakeCKKSPackedPlaintext expects.
+	uint32_t GetConsumedLevels(const Ciphertext<DCRTPoly>& ct) const;
 	/**
 	 * @brief Level plan for the rotation keys registered with EvalRotateKeyGen: index -> maximum number of
 	 * remaining levels the key will ever be applied at (THOR's `create_fixed_rotation_key(sk, delta, level)`).
@@ -261,6 +294,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	std::vector<int32_t> rotation_indexes;
 	/// @brief Rotation index -> max remaining levels (see SetRotationKeyLevels).
 	std::map<int32_t, uint32_t> rotation_key_levels;
+	/// @brief How many expanded light plaintexts to keep around (FIFO). 0 disables caching.
+	size_t light_plaintext_cache_capacity = 64;
+	/// @brief (light plaintext uid, level) -> expanded plaintext.
+	std::map<std::pair<uint64_t, uint32_t>, Plaintext> light_plaintext_cache;
+	/// @brief Insertion order of light_plaintext_cache, for FIFO eviction.
+	std::vector<std::pair<uint64_t, uint32_t>> light_plaintext_cache_order;
 	/// @brief Bootstrap slots available.
 	std::vector<uint32_t> slots_bootstrap;
 	/// @brief Secret key distribution.

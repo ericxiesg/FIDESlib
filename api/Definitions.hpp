@@ -34,6 +34,12 @@ class PlaintextImpl;
 /// @brief Shared pointer alias for PlaintextImpl.
 using Plaintext = std::shared_ptr<PlaintextImpl>;
 
+/// @brief Compact, level-agnostic plaintext representation (see LightPlaintext.hpp).
+class LightPlaintextImpl;
+
+/// @brief Shared pointer alias for LightPlaintextImpl.
+using LightPlaintext = std::shared_ptr<LightPlaintextImpl>;
+
 /// @brief Enumeration of supported PKE scheme features.
 enum PKESchemeFeature {
 	PKE			 = 0x01,

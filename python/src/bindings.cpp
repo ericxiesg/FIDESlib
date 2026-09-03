@@ -11,6 +11,7 @@
 
 #include <fideslib.hpp>
 
+#include <algorithm>
 #include <complex>
 #include <map>
 #include <memory>
@@ -23,6 +24,7 @@ using namespace fideslib;
 using CC = CryptoContext<DCRTPoly>;
 using CT = Ciphertext<DCRTPoly>;
 using PT = Plaintext;
+using LPT = LightPlaintext;
 
 namespace {
 
@@ -106,6 +108,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def_readonly("secretKey", &KeyPair<DCRTPoly>::secretKey);
 
 	py::class_<PlaintextImpl, PT>(m, "Plaintext")
+	  .def_readonly("loaded", &PlaintextImpl::loaded)
 	  .def("SetLength", &PlaintextImpl::SetLength)
 	  .def("GetLevel", &PlaintextImpl::GetLevel)
 	  .def("GetLogPrecision", &PlaintextImpl::GetLogPrecision)
@@ -114,6 +117,19 @@ PYBIND11_MODULE(_core, m) {
 		  auto v = p.GetRealPackedValue();
 		  py::array_t<double> out(v.size());
 		  std::copy(v.begin(), v.end(), out.mutable_data());
+		  return out;
+	  });
+
+	py::class_<LightPlaintextImpl, LPT>(m, "LightPlaintext")
+	  .def_readonly("scale", &LightPlaintextImpl::scale)
+	  .def_readonly("slots", &LightPlaintextImpl::slots)
+	  .def_readonly("level_hint", &LightPlaintextImpl::level_hint)
+	  .def("nbytes", &LightPlaintextImpl::Bytes, "Bytes the compact form occupies")
+	  .def("save", &LightPlaintextImpl::Save, py::arg("path"))
+	  .def_static("load", &LightPlaintextImpl::Load, py::arg("path"))
+	  .def("coefficients", [](const LightPlaintextImpl& lp) {
+		  py::array_t<int64_t> out(lp.coeffs.size());
+		  std::copy(lp.coeffs.begin(), lp.coeffs.end(), out.mutable_data());
 		  return out;
 	  });
 
@@ -145,6 +161,18 @@ PYBIND11_MODULE(_core, m) {
 	  .def("GetGrownKeyCount", &CryptoContextImpl<DCRTPoly>::GetGrownKeyCount)
 	  // ---- encoding / encryption (numpy bridge) ----
 	  .def(
+		"MakeLightPlaintext",
+		[](CryptoContextImpl<DCRTPoly>& cc, const py::array& value, uint32_t slots, int32_t level_hint) {
+			return cc.MakeLightPlaintext(ToComplexVector(value), slots, level_hint);
+		},
+		py::arg("value"), py::arg("slots") = 0, py::arg("level_hint") = -1,
+		"Encode into the compact coefficient form (THOR encode_to_light_plaintext)")
+	  .def("ExpandLightPlaintext", &CryptoContextImpl<DCRTPoly>::ExpandLightPlaintext, py::arg("light"), py::arg("level"))
+	  .def("ClearLightPlaintextCache", &CryptoContextImpl<DCRTPoly>::ClearLightPlaintextCache)
+	  .def("GetLightPlaintextCacheSize", &CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize)
+	  .def_readwrite("light_plaintext_cache_capacity", &CryptoContextImpl<DCRTPoly>::light_plaintext_cache_capacity)
+	  .def("GetConsumedLevels", &CryptoContextImpl<DCRTPoly>::GetConsumedLevels)
+	  .def(
 		"MakeCKKSPackedPlaintext",
 		[](CryptoContextImpl<DCRTPoly>& cc, const py::array& value, size_t noiseScaleDeg, uint32_t level, uint32_t slots) {
 			return cc.MakeCKKSPackedPlaintext(ToComplexVector(value), noiseScaleDeg, level, nullptr, slots);
@@ -165,6 +193,7 @@ PYBIND11_MODULE(_core, m) {
 	  // ---- arithmetic ----
 	  .def("EvalAdd", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
 	  .def("EvalAddPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
+	  .def("EvalAddLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
 	  .def("EvalAddScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
 	  .def("EvalAddInPlace", py::overload_cast<CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAddInPlace))
 	  .def("EvalSub", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub))
@@ -174,6 +203,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("EvalNegate", &CryptoContextImpl<DCRTPoly>::EvalNegate)
 	  .def("EvalMult", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
 	  .def("EvalMultPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
+	  .def("EvalMultLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
 	  .def("EvalMultScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalMult))
 	  .def("EvalSquare", &CryptoContextImpl<DCRTPoly>::EvalSquare)
 	  .def("EvalMultNoRelin", &CryptoContextImpl<DCRTPoly>::EvalMultNoRelin)

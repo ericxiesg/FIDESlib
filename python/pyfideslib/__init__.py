@@ -47,6 +47,7 @@ class Engine:
         rotation_indexes: dict[int, int] | list[int] | None = None,
         truncate_keys: bool = True,
         allow_key_grow: bool = False,
+        light_plaintext_cache: int = 64,
     ):
         self.devices = parse_device(device)
         #: level-truncated keys only exist on the GPU backend; OpenFHE always keeps complete keys.
@@ -74,6 +75,8 @@ class Engine:
         # A truncated key used above its declared level means the (delta -> level) table is wrong; by default
         # that raises instead of silently reloading the key on every call.
         self.cc.allow_key_grow = allow_key_grow
+        # How many expanded light plaintexts to keep on the device between calls.
+        self.cc.light_plaintext_cache_capacity = light_plaintext_cache
 
         self.keys = self.cc.KeyGen()
         self.cc.EvalMultKeyGen(self.keys.secretKey)
@@ -115,6 +118,8 @@ class Engine:
     def add(self, x, y):
         if isinstance(y, (int, float)):
             return self.cc.EvalAddScalar(x, float(y))
+        if isinstance(y, _core.LightPlaintext):
+            return self.cc.EvalAddLightPt(x, y)
         if isinstance(y, _core.Plaintext):
             return self.cc.EvalAddPt(x, y)
         return self.cc.EvalAdd(x, y)
@@ -141,6 +146,8 @@ class Engine:
         if isinstance(y, np.ndarray):
             pt = self.encode(y, level=self.depth - self.level(x))
             return self.cc.EvalMultPt(x, pt)
+        if isinstance(y, _core.LightPlaintext):
+            return self.cc.EvalMultLightPt(x, y)
         if isinstance(y, _core.Plaintext):
             return self.cc.EvalMultPt(x, y)
         return self.cc.EvalMult(x, y) if relin else self.cc.EvalMultNoRelin(x, y)
@@ -177,6 +184,32 @@ class Engine:
             if surplus > 0:
                 out = self.cc.EvalLevelReduce(out, surplus)
         return out
+
+    # ---- light plaintexts (THOR weight storage, docs/light_plaintext.md) ----
+    def encode_to_light_plaintext(self, msg, level: int | None = None):
+        """Compact, level-agnostic encoding: N int64 coefficients instead of the (L+1) RNS towers.
+
+        `level` is THOR's remaining-level convention (the level the weight is used at) and is only a
+        recorded hint under FIXEDMANUAL; pass it so a FLEXIBLE* context can reject a wrong expansion.
+        """
+        arr = np.asarray(msg)
+        if arr.ndim != 1:
+            arr = arr.reshape(-1)
+        hint = -1 if level is None else self.depth - int(level)
+        return self.cc.MakeLightPlaintext(arr, self.slots, hint)
+
+    def write_light_plaintext(self, light, path: str):
+        light.save(str(path))
+
+    def read_light_plaintext(self, path: str):
+        return _core.LightPlaintext.load(str(path))
+
+    def expand_light_plaintext(self, light, level: int):
+        """Materialise `light` as a normal plaintext at `level` remaining levels."""
+        return self.cc.ExpandLightPlaintext(light, self.depth - int(level))
+
+    def clear_light_plaintext_cache(self):
+        self.cc.ClearLightPlaintextCache()
 
     # ntt/intt are identity: fideslib keeps ciphertexts in the NTT domain.
     def ntt(self, x):

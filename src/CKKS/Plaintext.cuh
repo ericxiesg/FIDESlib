@@ -114,6 +114,20 @@ class Plaintext {
 	 *       cause deserialization errors in consumers written in other languages (e.g., Python bindings).
 	 */
 	void store(RawPlainText& raw);
+
+	/**
+	 * @brief Expand a light plaintext straight onto the device.
+	 *
+	 * @param coeffs      N centred integer coefficients of round(scale * IFFT(message)), natural order.
+	 * @param level       Target level (top limb index); the plaintext gets limbs q_0..q_level.
+	 * @param scale       Scaling factor the coefficients carry (becomes NoiseFactor).
+	 * @param noiseLevel  Noise scale degree (1 for a freshly encoded plaintext).
+	 * @param slots       Number of CKKS slots the message occupied.
+	 *
+	 * Unlike @ref load this never materialises the (level + 1) RNS towers on the host: only the
+	 * coefficient vector crosses PCIe. See docs/light_plaintext.md.
+	 */
+	void loadLight(const std::vector<int64_t>& coeffs, int level, double scale, int noiseLevel, int slots);
 	/**
 	 * @brief Deep copy of another plaintext.
 	 *

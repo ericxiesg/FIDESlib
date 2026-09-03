@@ -2252,6 +2252,21 @@ void LimbPartition::modupInto(LimbPartition& partition, LimbPartition& aux_parti
 	partition.getS().wait(s);
 }
 
+void LimbPartition::loadCentredCoefficients(const int64_t* d_coeffs) {
+	cudaSetDevice(device);
+	const int limbsize = getLimbSize(*level);
+
+	for (int i = 0; i < limbsize; i += cc.batch) {
+		STREAM(limb[i]).wait(s);
+		uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+		expandCentredCoeffs_<<<dim3{ (uint32_t)cc.N / 128, num_limbs }, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i, d_coeffs, PARTITION(id, i));
+	}
+	for (int i = 0; i < limbsize; i += cc.batch) {
+		s.wait(STREAM(limb[i]));
+	}
+	CudaCheckErrorModNoSync;
+}
+
 void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
 	cudaSetDevice(device);
 	/*
