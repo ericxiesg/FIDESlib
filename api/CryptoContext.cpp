@@ -132,8 +132,6 @@ CryptoContextImpl<DCRTPoly>::~CryptoContextImpl() {
 		FIDESlib::CKKS::DeregisterCryptoContextGPU(context_gpu);
 		this->gpu = std::any();
 	}
-	lbcrypto::CryptoContextImpl<lbcrypto::DCRTPolyImpl<bigintdyn::mubintvec<bigintdyn::ubint<unsigned long>>>>::ClearEvalMultKeys();
-	lbcrypto::CryptoContextImpl<lbcrypto::DCRTPolyImpl<bigintdyn::mubintvec<bigintdyn::ubint<unsigned long>>>>::ClearEvalAutomorphismKeys();
 }
 
 // ---- Enable features ----

@@ -37,7 +37,7 @@ static RunResult RunBootstrap(bool truncateKeys, int logN, uint32_t numSlots, ui
 	parameters.SetRingDim(1 << logN);
 	parameters.SetNumLargeDigits(dnum);
 	parameters.SetKeySwitchTechnique(HYBRID);
-	parameters.SetDevices(devices);
+	parameters.SetDevices(std::move(devices));
 	parameters.SetScalingModSize(59);
 	parameters.SetScalingTechnique(FLEXIBLEAUTO);
 	parameters.SetFirstModSize(60);

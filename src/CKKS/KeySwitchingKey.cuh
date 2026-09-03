@@ -25,7 +25,7 @@ class KeySwitchingKey {
 	using Reloader = std::function<RawKeySwitchKey()>;
 
 	KeyHash keyID;
-	Context& cc;
+	Context cc;
 	RNSPoly a;
 	RNSPoly b;
 	// std::vector<RNSPoly> mgpu_a;
