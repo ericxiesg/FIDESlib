@@ -4,9 +4,16 @@
 // complete keys - and compares (a) the bootstrapping error against the input, (b) the device memory held
 // by the keys and (c) how many truncated keys had to be grown at runtime (must be 0 for a correct plan).
 //
-// Usage: key-truncation [logN=13] [slots=logN-1 bits] [depth=25] [dnum=3] [lb_e=3] [lb_d=3]
+// Usage: key-truncation [logN=13] [slots=logN-2 bits] [depth=25] [dnum=3] [lb_e=3] [lb_d=3]
 // Exit code 0 on success, 1 if the truncated run is less precise than the full run by more than a tolerance
 // or if keys had to be grown.
+//
+// The slot count matters. GetBootstrapKeyLevelPlan can only truncate a key that StC uses and CtS does
+// not, and at slots = N/2 the two linear transforms use the *same* rotation indices - so a full-slot
+// bootstrap truncates nothing, however good the plan is. The default here is therefore N/4 slots, where
+// the two index sets differ. THOR itself bootstraps at full slots, so this lever buys it nothing; its
+// memory saving comes from SetRotationKeyLevels on the ~250 THOR rotation keys instead
+// (docs/level_truncated_keys.md).
 
 #include <chrono>
 #include <cmath>
@@ -97,7 +104,7 @@ static RunResult RunBootstrap(bool truncateKeys, int logN, uint32_t numSlots, ui
 
 int main(int argc, char* argv[]) {
 	int logN				 = argc > 1 ? std::atoi(argv[1]) : 13;
-	uint32_t numSlots		 = argc > 2 ? (1u << std::atoi(argv[2])) : (1u << (logN - 1));
+	uint32_t numSlots		 = argc > 2 ? (1u << std::atoi(argv[2])) : (1u << (logN - 2));
 	uint32_t depth			 = argc > 3 ? std::atoi(argv[3]) : 25;
 	uint32_t dnum			 = argc > 4 ? std::atoi(argv[4]) : 3;
 	uint32_t lb_e			 = argc > 5 ? std::atoi(argv[5]) : 3;
@@ -132,7 +139,9 @@ int main(int argc, char* argv[]) {
 		rc = 1;
 	}
 	if (trunc.keyBytes >= full.keyBytes) {
-		std::cerr << "FAIL: truncation did not reduce key memory\n";
+		std::cerr << "FAIL: truncation did not reduce key memory. At slots = N/2 this is expected - StC "
+					 "and CtS then share every rotation index, so no key can be truncated; rerun with "
+					 "fewer slots (argv[2] = logN-2).\n";
 		rc = 1;
 	}
 	std::cout << (rc == 0 ? "PASS" : "FAIL") << std::endl;

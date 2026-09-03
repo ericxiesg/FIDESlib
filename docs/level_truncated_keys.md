@@ -78,7 +78,20 @@ allocation path that drifts from the first produces silent out-of-bounds device 
    `limbsize + special`, so truncation is safe as long as `level <= maxLevel` (guaranteed by ensureLevel).
 5. Multi-GPU contexts force `maxLevel = -1`.
 
+## How much this actually saves, and where
+
+Measured on a GV100 (see `bugs/FIX-commit-6316173-bugs.md`): with `slots = N/2` the plan truncates
+**zero** bootstrap keys. `GetBootstrapKeyLevelPlan` can only truncate a key that StC uses and CtS does
+not, and at full slots the two linear transforms use the same 46 rotation indices. THOR bootstraps at
+full slots, so *this* lever buys the project nothing.
+
+The saving that does matter is the other consumer of the same machinery: `SetRotationKeyLevels` on
+THOR's ~250 fixed rotation keys, each of which is used at one known level. `python/thorfhe`'s
+`plan_rotation_keys` derives that table from a dry run of the stages (docs/thor_port.md), so it stays
+correct as the port grows.
+
 ## Next steps (same design, more savings)
-* CtS layer `i` keys can be truncated to `L - i` (small gain).
+* CtS layer `i` keys can be truncated to `L - i`. This is the only way the bootstrap keys can be
+  truncated at full slots, since every StC index is also a CtS index there.
 * Seed-expanded `a` component (halves every key) - needs the patched OpenFHE key generation.
 * On-demand generation of the CtS/StC diagonal plaintexts (currently ~2-3 GiB resident for N=2^16).
