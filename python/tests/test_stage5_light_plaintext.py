@@ -16,13 +16,14 @@ def test_encode_expand_roundtrip(engine):
     light = engine.encode_to_light_plaintext(x)
     # 0.5 MiB at N = 2^16 regardless of depth; a plain encoding is (depth + 1) times that.
     assert light.nbytes() == engine.slots * 2 * 8
-    pt = engine.expand_light_plaintext(light, engine.depth)
-    if engine.on_gpu:
-        # A device-expanded plaintext has no host copy to decode; test_multiply_matches_dense_encoding
-        # is what checks its contents on CUDA.
-        assert pt.loaded
-    else:
-        assert np.max(np.abs(np.real(pt.GetCKKSPackedValue()[: engine.slots]) - x)) < 1e-8
+
+    # An expanded light plaintext is checked through the element, not through GetCKKSPackedValue():
+    # on CUDA it has no host copy at all, and on CPU CKKSPackedEncoding's cached packed message is not
+    # refreshed when the element is replaced (docs/light_plaintext.md). Multiplying by 1 reads the
+    # element, which is the thing that has to be right.
+    ones = engine.encrypt(np.ones(engine.slots))
+    out = engine.rescale(engine.multiply(ones, engine.expand_light_plaintext(light, engine.depth)))
+    assert np.max(np.abs(engine.decrypt_real(out) - x)) < 1e-6
 
 
 def test_multiply_matches_dense_encoding(engine):

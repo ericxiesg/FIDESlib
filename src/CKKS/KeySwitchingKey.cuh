@@ -25,6 +25,16 @@ class KeySwitchingKey {
 	using Reloader = std::function<RawKeySwitchKey()>;
 
 	KeyHash keyID;
+	/**
+	 * Held by value, not by reference: CryptoContextImpl::LoadContext moves its local Context into a
+	 * std::any, so a reference member would dangle as soon as LoadContext returned.
+	 *
+	 * Note that keys normally live inside ContextData::precom.keys, so this shared_ptr closes a cycle
+	 * and the ContextData is not freed when DeregisterCryptoContextGPU drops it from the global cache.
+	 * That is deliberate for now (a process uses one context and its keys until it exits); to actually
+	 * reclaim the device memory, clear the keys first with ContextData::clearAutomorphismKeys() /
+	 * clearEvalMultKeys() / clearBootPrecomputation(), which breaks the cycle.
+	 */
 	Context cc;
 	RNSPoly a;
 	RNSPoly b;

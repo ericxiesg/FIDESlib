@@ -80,22 +80,35 @@ scaling factor differs per level, so the coefficients are only valid at the leve
 for; `ExpandLightPlaintext` throws when `level_hint` is set and does not match. This project runs
 FIXEDMANUAL (see HANDOFF), so the restriction only matters if someone switches the engine over.
 
-## Things to verify on real hardware (could not be compiled here)
+## Verified on hardware (GV100, CUDA 12.9)
 
-1. **The NTT input ordering.** `RNSPoly::loadCentredCoefficients` feeds natural-order coefficients to
-   FIDESlib's forward NTT. That is correct if FIDESlib's coefficient domain is OpenFHE's — which
-   follows from `REVERSE == false` in `openfhe-interface/RawCiphertext.cuh` (the evaluation layouts
-   already agree) plus `INTT`/`NTT` being exact inverses inside FIDESlib. If it is wrong,
-   `test_multiply_matches_dense_encoding` fails **on CUDA only while passing on CPU**, and the fix is
-   a `bit_reverse_vector` on the coefficients before upload. Check this before suspecting anything else.
-2. OpenFHE spellings used by `ExpandLightPlaintext`: `lbcrypto::DCRTPoly::PolyType`, the
-   `DCRTPoly(const std::vector<PolyType>&)` constructor, `NativePoly::operator[]` assignment, and
-   `PlaintextImpl::GetElement<DCRTPoly>()` as an lvalue. All are used elsewhere in the tree or in the
-   OpenFHE reference snippet in `Ciphertext.cpp`, but the patched 1.5.1.1 may differ.
-3. `MakeLightPlaintext`'s single-tower check reads `t1.GetValues()[j].ConvertToInt()`; the same idiom
-   is in `GetRawArray`.
-4. Cost of the expansion kernel: one 64-bit signed remainder per coefficient per limb. If it shows up
-   in a profile next to the NTT, replace `%` with a Barrett reduction against `C_.prime_better_barret_mu`.
+The coefficient ordering assumption held: `RNSPoly::loadCentredCoefficients` feeds natural-order
+coefficients straight to FIDESlib's forward NTT, no bit reversal on either side. `REVERSE == false`
+in `openfhe-interface/RawCiphertext.cuh` (the evaluation layouts already agree) plus `INTT`/`NTT`
+being exact inverses inside FIDESlib is the reason, and
+`test_stage5_light_plaintext.py::test_multiply_matches_dense_encoding` passes on **both** backends —
+which is what would have caught a mismatch, since CPU goes through OpenFHE's NTT and CUDA through
+FIDESlib's. All 8 stage-5 tests pass on CPU and CUDA.
+
+## Known limitation: the expansion's cached packed value
+
+`CKKSPackedEncoding` keeps the packed message it was encoded from in a cached `value` member.
+`ExpandLightPlaintext`'s CPU branch builds the skeleton plaintext by encoding zeros and then replaces
+its *element*, and there is no way to refresh that cache: `CKKSPackedEncoding::Decode()` assumes a
+single-tower post-decryption `Poly` and destroys a `DCRTPoly` element.
+
+So `GetCKKSPackedValue()` on an expanded light plaintext reports the skeleton's zeros, while
+`EvalMult` / `EvalAdd` — which read the element — are correct. On CUDA the question does not arise:
+the expansion has no host copy at all. **Inspect a light plaintext by multiplying and decrypting, not
+by decoding its expansion.** No THOR path decodes a weight plaintext, so this stays a wart rather than
+a gap; fixing it properly would mean a `Decode` variant that reads multi-tower RNS without consuming
+the element.
+
+## Cost
+
+One 64-bit signed remainder per coefficient per limb, then the existing NTT. If the remainder ever
+shows up next to the NTT in a profile, replace `%` with a Barrett reduction against
+`C_.prime_better_barret_mu`.
 
 ## Next steps
 

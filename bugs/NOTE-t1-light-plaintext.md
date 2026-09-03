@@ -1,5 +1,11 @@
 # T1 light plaintext —— 新功能，需要在真机上验证
 
+> **2026-09-03 结项**：远程已在 GV100 上验证（见 `FIX-commit-6316173-bugs.md`）。
+> 下面那个"最需要盯的一点：NTT 的输入次序"**推断正确**，不需要 bit reverse——stage5 的 8 个用例
+> CPU/CUDA 全过。OpenFHE 拼写也都对。唯一遗留是 CPU 侧 `GetCKKSPackedValue()` 读的是
+> `CKKSPackedEncoding` 的缓存值（换 element 不会刷新缓存），已把测试改成用乘法验证并写进
+> `docs/light_plaintext.md`，THOR 路径不受影响。本文件其余内容保留作记录。
+
 和 `RESPONSE-gpu-key-grow.md` 是同一批推送里的两件事，这一件是**新功能**不是 bug 修复。
 同样，本机没有 GPU，**一行都没编译过**。设计和取舍写在 `docs/light_plaintext.md`，这里只讲怎么验。
 

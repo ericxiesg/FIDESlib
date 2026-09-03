@@ -132,6 +132,10 @@ CryptoContextImpl<DCRTPoly>::~CryptoContextImpl() {
 		FIDESlib::CKKS::DeregisterCryptoContextGPU(context_gpu);
 		this->gpu = std::any();
 	}
+	// Deliberately does NOT call ClearEvalMultKeys() / ClearEvalAutomorphismKeys(): those no-argument
+	// overloads wipe OpenFHE's *global* static key maps, i.e. every other context's keys as well.
+	// OpenFHE's own CryptoContextImpl has no such destructor. Callers who want the host key memory back
+	// can use the per-context overloads ClearEvalMultKeys(cc) / ClearEvalAutomorphismKeys(cc).
 }
 
 // ---- Enable features ----
@@ -2236,6 +2240,14 @@ Plaintext CryptoContextImpl<DCRTPoly>::ExpandLightPlaintext(const LightPlaintext
 
 	if (this->devices.empty()) {
 		// CPU: rebuild the RNS towers and let OpenFHE do the NTT.
+		//
+		// The skeleton plaintext supplies the element parameters and the scaling factor for `level`; only
+		// its element is replaced. CKKSPackedEncoding caches the packed message it was encoded from and
+		// there is no way to refresh that cache without CKKSPackedEncoding::Decode(), which assumes a
+		// single-tower post-decryption Poly and destroys a DCRTPoly element. So GetCKKSPackedValue() on an
+		// expanded light plaintext reports the skeleton's zeros, while EvalMult/EvalAdd - which read the
+		// element - are correct. Inspect a light plaintext by multiplying and decrypting, not by decoding
+		// its expansion (see docs/light_plaintext.md).
 		Plaintext plaintext = this->MakeCKKSPackedPlaintext(std::vector<double>(lp->slots, 0.0), lp->noise_scale_deg, level, nullptr, lp->slots);
 		auto& ptImpl		= std::any_cast<lbcrypto::Plaintext&>(plaintext->cpu);
 

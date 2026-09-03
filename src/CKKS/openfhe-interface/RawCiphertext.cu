@@ -8,8 +8,10 @@
 #include "Math.cuh"
 #include <bit>
 #include <cassert>
+#include <iostream>
 #include <map>
 #include <set>
+#include <string>
 using namespace lbcrypto;
 
 /**
@@ -847,19 +849,27 @@ std::map<int, int> FIDESlib::CKKS::GetBootstrapKeyLevelPlan(lbcrypto::CryptoCont
 	if (!GPUcc.truncateKeys)
 		return plan;
 
+	// Every path that gives up returns an empty plan, which AddRotationKeys reads as "all keys complete".
+	// Say which one it was: the example reports how much memory truncation saved and a silent 0 is not
+	// distinguishable from a genuine "nothing to truncate here".
+	const auto giveUp = [&plan](const char* why) {
+		std::cerr << "[FIDESlib] bootstrap key level plan: keeping every key complete (" << why << ")" << std::endl;
+		return plan;
+	};
+
 	auto fhe = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE);
 	if (!fhe || fhe->m_bootPrecomMap.find(slots) == fhe->m_bootPrecomMap.end())
-		return plan;
+		return giveUp("no bootstrap precomputation for this slot count");
 	auto precom = fhe->m_bootPrecomMap.find(slots)->second;
 
 	const uint32_t lb_e = precom->m_paramsEnc.lvlb;
 	const uint32_t lb_d = precom->m_paramsDec.lvlb;
 	if (lb_e == 1 && lb_d == 1)
-		return plan; // single linear-transform path (LT) - not analysed, keep keys complete.
+		return giveUp("single linear-transform path (levelBudget {1,1}), not analysed");
 
 	auto ckksParams = std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(cc->GetCryptoParameters());
 	if (!ckksParams)
-		return plan;
+		return giveUp("not a CKKS context");
 	const lbcrypto::SecretKeyDist dist = ckksParams->GetSecretKeyDist();
 
 	// Total levels consumed by bootstrapping = approxMod depth + lb_e + lb_d (OpenFHE FHECKKSRNS::GetBootstrapDepth).
@@ -868,8 +878,12 @@ std::map<int, int> FIDESlib::CKKS::GetBootstrapKeyLevelPlan(lbcrypto::CryptoCont
 	// FIDESlib level = index of the top limb; a fresh ciphertext sits at GPUcc.L, after bootstrapping at L - bootDepth.
 	// StC starts lb_d levels above that. keyLevelMargin covers a deferred (FLEXIBLEAUTO) rescale.
 	const int stcTop = (int)GPUcc.L - (int)bootDepth + (int)lb_d + GPUcc.keyLevelMargin;
-	if (stcTop < 0 || stcTop >= (int)GPUcc.L)
-		return plan; // nothing to gain (or inconsistent parameters) - keep keys complete.
+	if (stcTop < 0 || stcTop >= (int)GPUcc.L) {
+		return giveUp((std::string("StC top level ") + std::to_string(stcTop) + " is outside [0, L=" + std::to_string(GPUcc.L) +
+					   ") for bootstrap depth " + std::to_string(bootDepth) + ", levelBudget {" + std::to_string(lb_e) + "," + std::to_string(lb_d) +
+					   "}, margin " + std::to_string(GPUcc.keyLevelMargin))
+						.c_str());
+	}
 
 	BootstrapPrecomputation tmp;
 	std::vector<int> all = GetBootstrapIndexes(cc, slots, &tmp);
@@ -892,15 +906,21 @@ std::map<int, int> FIDESlib::CKKS::GetBootstrapKeyLevelPlan(lbcrypto::CryptoCont
 		for (int j : layer.rotOut)
 			full.insert(NormalizeRotationIndex(j, GPUcc.N));
 	}
+	int truncated = 0;
 	for (int j : all) {
 		const int n = NormalizeRotationIndex(j, GPUcc.N);
 		if (n == 0)
 			continue;
-		if (stc.contains(n) && !full.contains(n))
+		if (stc.contains(n) && !full.contains(n)) {
 			plan[n] = stcTop;
-		else
+			truncated++;
+		} else {
 			plan[n] = -1;
+		}
 	}
+	std::cerr << "[FIDESlib] bootstrap key level plan: " << truncated << " of " << plan.size() << " keys truncated to level " << stcTop << " (L=" << GPUcc.L
+			  << ", bootstrap depth " << bootDepth << ", levelBudget {" << lb_e << "," << lb_d << "}, margin " << GPUcc.keyLevelMargin << "); "
+			  << stc.size() << " StC indexes, " << full.size() << " CtS indexes, " << all.size() << " in total" << std::endl;
 	return plan;
 }
 
