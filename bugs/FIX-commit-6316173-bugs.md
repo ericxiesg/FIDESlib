@@ -237,7 +237,37 @@ max |err| truncated : 1.097e-05
 max |err| complete  : 9.254e-06
 ```
 Runs and bootstraps correctly, but reports "FAIL: truncation did not reduce
-key memory" (0 keys truncated).  This is a parameter/planning issue, not a
-crash — the `GetBootstrapKeyLevelPlan` logic marks all bootstrap keys as
-complete (`-1`) for these parameters.  Needs investigation of the level-plan
-computation, not a code bug.
+key memory" (0 keys truncated).
+
+**Investigation (debug-instrumented `GetBootstrapKeyLevelPlan`):**
+```
+lb_e=3 lb_d=3
+GPUcc.L=25 bootDepth=16 lb_d=3 margin=1 stcTop=13
+plan size=45 stc size=46 full size=46 all size=104
+truncated keys in plan: 0
+```
+
+The level plan logic (`RawCiphertext.cu:902-909`) truncates only keys that
+are in `stc` **and not** in `full`:
+```cpp
+if (stc.contains(n) && !full.contains(n))
+    plan[n] = stcTop;   // truncate
+else
+    plan[n] = -1;       // complete
+```
+
+With `slots = N/2 = 4096` (full-slot bootstrap), the StC and CtS linear
+transforms use the **same** set of rotation indices (`stc.size() == full.size() == 46`),
+so every StC key is also a CtS key and must remain complete.  The truncation
+optimization only helps when `slots < N/2` (partial slots), where StC and
+CtS use different rotation indices.
+
+This is a **parameter/design issue**, not a code bug:
+- The `key-truncation` example should either use partial slots
+  (e.g. `slots=2048` with `logN=13`) to demonstrate truncation, or
+- The level plan could be extended to truncate CtS keys that are only used
+  at specific levels within the CtS transform (currently all CtS keys are
+  assumed to run at the top level).
+
+Bootstrap precision is correct: `1.097e-05` (truncated) vs `9.254e-06`
+(complete), both within the expected ~1e-5 range for a 59/60-bit bootstrap.
