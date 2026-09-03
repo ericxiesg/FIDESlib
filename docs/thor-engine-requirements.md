@@ -82,11 +82,14 @@ model; the GPU budget is dominated by keys, which is why level truncation was th
 device-switchable engine. Plan:
 1. Finish the two gaps (2.1, 2.2) inside FIDESlib so both backends expose the same 22 primitives.
 2. pybind11 module over the fideslib API (`thorengine`), `Engine(device="cpu"|"cuda:0")`.
-3. Port `he.py` stage by stage onto `thorengine` (mechanical replacement of desilofhe calls; ntt/intt
-   become no-ops; `read_light_plaintext` reads the FIDESlib light format written by a ported
-   `encode_weights`).
-4. Validate each stage against the draft's C++/OpenFHE v21 outputs (same slot layout and error metrics),
-   first on CPU (bit-for-bit the same backend), then on CUDA.
+3. Port `he.py` stage by stage onto `pyfideslib` (`python/thorfhe/`, see docs/thor_port.md). Stages
+   01-05 are done. Three divergences from `he.py` are documented there and are *not* mechanical:
+   desilofhe rotates the opposite way, it takes the plaintext operand first, and it manages CKKS
+   scales automatically where fideslib runs FIXEDMANUAL.
+4. Validate each stage. The draft's C++/OpenFHE v21 outputs are not in this checkout, so stages 01-05
+   are validated against the linear algebra itself (`decode(stage_03(x)) == x @ w.T + 2b`, exactly, in
+   numpy at BERT geometry and at a 4096-slot one) and the FHE run is compared against that numpy
+   mirror, first on CPU then on CUDA.
 
 ## 5. Verification checklist for the new API calls (not compiled here)
 * `context->EvalAutomorphismKeyGen(sk, {2N-1})` + `InsertEvalAutomorphismKey(keys, tag)` for the
