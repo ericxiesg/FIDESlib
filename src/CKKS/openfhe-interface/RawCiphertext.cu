@@ -828,6 +828,7 @@ void FIDESlib::CKKS::AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPol
 			if (it != maxLevels.end())
 				maxLevel = it->second;
 		}
+		clave_rotacion_gpu.index = i;
 		if (maxLevel >= 0) {
 			// The reloader re-reads the key from the OpenFHE context (which keeps every key in host RAM anyway),
 			// so growing a truncated key costs no extra host memory.

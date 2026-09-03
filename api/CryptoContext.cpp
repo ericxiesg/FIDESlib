@@ -230,6 +230,8 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 		c->truncateKeys = this->truncate_keys;
 	if (std::getenv("FIDESLIB_KEY_LEVEL_MARGIN") == nullptr)
 		c->keyLevelMargin = this->key_level_margin;
+	if (std::getenv("FIDESLIB_KEY_GROW") == nullptr)
+		c->allowKeyGrow = this->allow_key_grow;
 
 	// Multiplicative key switching key.
 	auto& keyMap = context->GetAllEvalMultKeys(); // lbcrypto::CryptoContextImpl<lbcrypto::DCRTPoly>::s_evalMultKeyMap;

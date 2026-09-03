@@ -13,7 +13,10 @@ BOOT = dict(log_n=int(os.environ.get("PYFIDESLIB_BOOT_LOGN", "13")), depth=int(o
 
 @pytest.fixture(scope="module", params=DEVICES)
 def boot_engine(request):
-    return pf.Engine(request.param, bootstrap_level_budget=(3, 3), secret_key_dist=pf.SPARSE_TERNARY, **BOOT)
+    # allow_key_grow: this test *measures* GetBootstrapKeyLevelPlan rather than relying on it, so a key used
+    # above its plan must be reloaded and counted (asserted 0 below) instead of aborting the bootstrap.
+    return pf.Engine(request.param, bootstrap_level_budget=(3, 3), secret_key_dist=pf.SPARSE_TERNARY,
+                     allow_key_grow=True, **BOOT)
 
 
 def test_bootstrap_complex_and_keep_levels(boot_engine):
@@ -26,4 +29,5 @@ def test_bootstrap_complex_and_keep_levels(boot_engine):
     err = np.max(np.abs(e.decrypt(out) - z))
     print("bootstrap max err", err, "keys grown", e.cc.GetGrownKeyCount())
     assert err < 1e-2
+    # 0 == the bootstrap level plan was exact; a non-zero count names the offending keys on stderr.
     assert e.cc.GetGrownKeyCount() == 0

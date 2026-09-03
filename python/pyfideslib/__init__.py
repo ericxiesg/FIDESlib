@@ -46,8 +46,11 @@ class Engine:
         bootstrap_level_budget: tuple[int, int] | None = None,
         rotation_indexes: dict[int, int] | list[int] | None = None,
         truncate_keys: bool = True,
+        allow_key_grow: bool = False,
     ):
         self.devices = parse_device(device)
+        #: level-truncated keys only exist on the GPU backend; OpenFHE always keeps complete keys.
+        self.on_gpu = bool(self.devices)
         self.slots = 1 << (log_n - 1)
         self.depth = depth
 
@@ -68,6 +71,9 @@ class Engine:
         for f in (_core.PKE, _core.KEYSWITCH, _core.LEVELEDSHE, _core.ADVANCEDSHE, _core.FHE):
             self.cc.Enable(f)
         self.cc.truncate_keys = truncate_keys
+        # A truncated key used above its declared level means the (delta -> level) table is wrong; by default
+        # that raises instead of silently reloading the key on every call.
+        self.cc.allow_key_grow = allow_key_grow
 
         self.keys = self.cc.KeyGen()
         self.cc.EvalMultKeyGen(self.keys.secretKey)

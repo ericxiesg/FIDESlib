@@ -243,6 +243,8 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	bool truncate_keys = true;
 	/// @brief Safety margin (levels) added on top of the computed usage level of truncated keys.
 	int key_level_margin = 1;
+	/// @brief Reload a truncated key when it is used above its plan level instead of throwing (env FIDESLIB_KEY_GROW=1).
+	bool allow_key_grow = false;
 	/// @brief Device bytes currently held by key-switching keys on the loaded context.
 	size_t GetKeyDeviceBytes() const;
 	/// @brief Number of truncated keys that had to be grown at runtime (0 == level plan was sufficient).

@@ -1,8 +1,10 @@
 """Stage 2: add/sub/scalar, plaintext mult + rescale, rotate (level-truncated keys), conjugate, mult-by-i,
 level_down, integer scalar (level-free)."""
 import numpy as np
+import pytest
 
-from conftest import rand
+import pyfideslib as pf
+from conftest import SMALL, rand
 
 
 def test_add_sub_scalar(engine):
@@ -38,19 +40,46 @@ def test_mult_int_is_level_free(engine):
 
 
 def test_rotate(engine):
+    # indexes 1 and 16 are declared for the top level, so their keys are complete
     x = rand(engine, 16)
     cx = engine.encrypt(x)
-    for d in (1, 2, -3, 16):
+    for d in (1, 16):
         assert np.max(np.abs(engine.decrypt_real(engine.rotate(cx, d)) - np.roll(x, -d))) < 1e-6
 
 
-def test_rotate_truncated_key_low_level(engine):
-    # key for index 2 was declared at max remaining level 5: use it at level 5 and below
-    x = rand(engine, 17)
-    cx = engine.encrypt(x, level=engine.depth - 5)
-    assert engine.level(cx) == 5
-    assert np.max(np.abs(engine.decrypt_real(engine.rotate(cx, 2)) - np.roll(x, -2))) < 1e-6
+def test_rotate_truncated_key_inside_plan(engine):
+    # keys for 2 and -3 were declared at max remaining levels 5 and 3: use them there and below
+    for d, declared in ((2, 5), (-3, 3)):
+        x = rand(engine, 17 + d)
+        for level in (declared, declared - 2):
+            cx = engine.encrypt(x, level=engine.depth - level)
+            assert engine.level(cx) == level
+            assert np.max(np.abs(engine.decrypt_real(engine.rotate(cx, d)) - np.roll(x, -d))) < 1e-6
     assert engine.cc.GetGrownKeyCount() == 0
+
+
+def test_rotate_truncated_key_above_plan_raises(engine):
+    # Using a key above its declared level means the level plan is wrong: it must be reported, not papered over.
+    # OpenFHE has no truncated keys, so this is a GPU-only contract.
+    if not engine.on_gpu:
+        pytest.skip("level-truncated keys are a GPU-backend feature")
+    cx = engine.encrypt(rand(engine, 21))  # level 12 > the 5 declared for index 2
+    with pytest.raises(RuntimeError, match="truncated to level"):
+        engine.rotate(cx, 2)
+    assert engine.cc.GetGrownKeyCount() == 0
+
+
+def test_rotate_truncated_key_grows_when_allowed(device):
+    # Opt-in fallback: the key is reloaded from the OpenFHE context and rebuilt at the higher level.
+    e = pf.Engine(device, rotation_indexes={2: 5}, allow_key_grow=True, **SMALL)
+    x = rand(e, 22)
+    cx = e.encrypt(x)
+    assert e.level(cx) == e.depth
+    assert np.max(np.abs(e.decrypt_real(e.rotate(cx, 2)) - np.roll(x, -2))) < 1e-6
+    assert e.cc.GetGrownKeyCount() == (1 if e.on_gpu else 0)
+    # once grown the key is complete, so a second rotation neither reloads nor loses precision
+    assert np.max(np.abs(e.decrypt_real(e.rotate(cx, 2)) - np.roll(x, -2))) < 1e-6
+    assert e.cc.GetGrownKeyCount() == (1 if e.on_gpu else 0)
 
 
 def test_conjugate_and_mult_by_i(engine):

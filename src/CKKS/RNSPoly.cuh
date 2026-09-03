@@ -68,8 +68,10 @@ class RNSPoly {
 
 	/** maxLevel >= 0 only allowed for keys: allocate DECOMP/DIGIT limbs with prime id <= maxLevel (+ specials). */
 	void generateDecompAndDigit(bool iskey, int maxLevel = -1);
-	/** Extend a level-truncated key polynomial to hold every limb with id <= maxLevel (no-op if already there). */
-	void growDecompAndDigitToLevel(int maxLevel);
+	/** Free the DECOMP/DIGIT limbs of a key polynomial so generateDecompAndDigit() can rebuild it. */
+	void resetDecompAndDigit();
+	/** Highest ciphertext level this (possibly truncated) key polynomial can key-switch. */
+	int decompDigitLevelCovered() const;
 	/** Highest Q-limb id allocated in the key digits (min over partitions). */
 	int decompDigitMaxLevel() const;
 	size_t decompDigitDeviceBytes() const;

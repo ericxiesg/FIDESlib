@@ -193,8 +193,10 @@ class LimbPartition {
 	void copySpecialLimb(const LimbPartition& p);
 
 	void generateAllDecompAndDigit(bool iskey, int maxLevel = -1);
-	/** Extend an already generated (possibly truncated) key partition so that it holds every limb with id <= maxLevel. */
-	void growDecompAndDigitToLevel(int maxLevel);
+	/** Free the DECOMP/DIGIT limbs of a key partition and blank its pointer tables (device must be synchronised). */
+	void resetDecompAndDigit();
+	/** Highest ciphertext level this (possibly truncated) key partition can key-switch. */
+	int decompDigitLevelCovered() const;
 	/** Largest Q-limb id currently allocated in the DECOMP/DIGIT limbs of this partition (-1 if none). */
 	int decompDigitMaxLevel() const;
 	/** Device bytes held by the DECOMP + DIGIT limbs (key material). */

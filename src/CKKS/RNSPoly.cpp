@@ -201,11 +201,18 @@ void RNSPoly::loadDecompDigit(const std::vector<std::vector<std::vector<uint64_t
 	}
 }
 
-void RNSPoly::growDecompAndDigitToLevel(int maxLevel) {
-	assert(cc.GPUid.size() == 1 && "growDecompAndDigitToLevel: single-GPU key layout only");
+void RNSPoly::resetDecompAndDigit() {
+	assert(cc.GPUid.size() == 1 && "resetDecompAndDigit: single-GPU key layout only");
 	for (size_t i = 0; i < cc.GPUid.size(); ++i) {
-		GPU[i].growDecompAndDigitToLevel(maxLevel);
+		GPU[i].resetDecompAndDigit();
 	}
+}
+
+int RNSPoly::decompDigitLevelCovered() const {
+	int covered = cc.L;
+	for (auto& g : GPU)
+		covered = std::min(covered, g.decompDigitLevelCovered());
+	return covered;
 }
 
 int RNSPoly::decompDigitMaxLevel() const {

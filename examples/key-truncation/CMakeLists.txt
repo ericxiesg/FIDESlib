@@ -33,11 +33,12 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FIDESLIB_CXX_FLAGS}")
 # Executable definition.
 
 set (SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-file (GLOB_RECURSE CXX_SOURCE_FILES ${SOURCE_DIR}/*.cpp ${SOURCE_DIR}/*.hpp)
-set_source_files_properties(${CXX_SOURCE_FILES} PROPERTIES LANGUAGE CXX)
 
-add_executable (key-truncation)
-
-target_sources(key-truncation PRIVATE ${CXX_SOURCE_FILES})
-
-target_link_libraries (key-truncation PRIVATE fideslib::fideslib)
+# One executable per source file: each is a self-contained main().
+foreach (EXAMPLE key-truncation key-grow-repro)
+    string (REPLACE "-" "_" EXAMPLE_SOURCE ${EXAMPLE})
+    set (EXAMPLE_SOURCE ${SOURCE_DIR}/${EXAMPLE_SOURCE}.cpp)
+    set_source_files_properties(${EXAMPLE_SOURCE} PROPERTIES LANGUAGE CXX)
+    add_executable (${EXAMPLE} ${EXAMPLE_SOURCE})
+    target_link_libraries (${EXAMPLE} PRIVATE fideslib::fideslib)
+endforeach ()

@@ -15,9 +15,15 @@ def device(request):
     return request.param
 
 
+# rotation index -> maximum remaining level the key is ever used at (THOR's create_fixed_rotation_key table).
+# A declared level >= depth-1 keeps the key complete; 2 and -3 are deliberately truncated so the tests cover
+# both a truncated key used inside its plan and one used outside it.
+ROTATIONS = {1: SMALL["depth"], 2: 5, -3: 3, 16: SMALL["depth"]}
+
+
 @pytest.fixture(scope="session")
 def engine(device):
-    return pf.Engine(device, rotation_indexes={1: SMALL["depth"] - 1, 2: 5, -3: 3, 16: 7}, **SMALL)
+    return pf.Engine(device, rotation_indexes=ROTATIONS, **SMALL)
 
 
 def rand(engine, seed, scale=1.0, complex_=False):

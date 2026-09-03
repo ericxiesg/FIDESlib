@@ -140,6 +140,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("LoadContext", &CryptoContextImpl<DCRTPoly>::LoadContext)
 	  .def_readwrite("truncate_keys", &CryptoContextImpl<DCRTPoly>::truncate_keys)
 	  .def_readwrite("key_level_margin", &CryptoContextImpl<DCRTPoly>::key_level_margin)
+	  .def_readwrite("allow_key_grow", &CryptoContextImpl<DCRTPoly>::allow_key_grow)
 	  .def("GetKeyDeviceBytes", &CryptoContextImpl<DCRTPoly>::GetKeyDeviceBytes)
 	  .def("GetGrownKeyCount", &CryptoContextImpl<DCRTPoly>::GetGrownKeyCount)
 	  // ---- encoding / encryption (numpy bridge) ----

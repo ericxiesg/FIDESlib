@@ -318,34 +318,59 @@ void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset, int maxL
 	}
 }
 
-void LimbPartition::growDecompAndDigitToLevel(int maxLevel) {
+/**
+ * Release every DECOMP/DIGIT limb of a key partition and blank the device pointer tables, so that a
+ * following generateAllDecompAndDigit() rebuilds the key exactly like a fresh Initialize() would.
+ *
+ * Growing a truncated key *in place* (appending the missing limb records) used to be an independent
+ * second implementation of the allocation logic; it has to stay bit-for-bit consistent with the
+ * generation path for the key-switching kernels - which index DECOMP/DIGIT/limbptr through the
+ * device-side C_.pos_in_digit tables - to read the right pointers. Rebuilding is a few hundred
+ * microseconds more expensive but goes through the one code path that is exercised by every key, so
+ * there is no second layout to keep in sync. Key growth is a fallback for a wrong level plan, not a
+ * hot path (see ContextData::allowKeyGrow).
+ *
+ * The caller must have synchronised the device: the limbs being freed may still be referenced by
+ * pointer tables that queued kernels are about to read.
+ */
+void LimbPartition::resetDecompAndDigit() {
 	cudaSetDevice(device);
-	assert(DECOMPlimb.size() == DECOMPmeta.size());
-	assert(DIGITlimb.size() == DIGITmeta.size());
+	cudaStreamSynchronize(s.ptr());
 
-	// DECOMP limbs: allocated one record at a time (mirrors generateAllDecompAndDigit).
-	for (size_t i = 0; i < DECOMPmeta.size(); ++i) {
-		const int pos = lastNeededPos(DECOMPmeta[i], cc.L, maxLevel);
-		bool changed  = false;
-		for (int j = (int)DECOMPlimb[i].size(); j <= pos; ++j) {
-			generate(DECOMPmeta[i], DECOMPlimb[i], DECOMPlimbptr[i], j, nullptr, nullptr, 0, nullptr, 0, true);
-			changed = true;
-		}
-		if (changed) {
-			std::vector<void*> cpu_ptr(DECOMPmeta.at(i).size(), nullptr);
-			for (uint32_t j = 0; j < DECOMPlimb[i].size(); ++j) {
-				cpu_ptr[j] = DECOMPlimb[i][j].index() == U32 ? (void*)std::get<U32>(DECOMPlimb[i][j]).v.data : (void*)std::get<U64>(DECOMPlimb[i][j]).v.data;
-			}
-			cudaMemcpyAsync(DECOMPlimbptr[i].data, cpu_ptr.data(), DECOMPmeta.at(i).size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-		}
-	}
-	// DIGIT limbs: generate() extends [limbs.size(), pos] and writes the new pointer-table entries itself.
-	for (size_t i = 0; i < DIGITmeta.size(); ++i) {
-		const int pos = lastNeededPos(DIGITmeta[i], cc.L, maxLevel);
-		if (pos >= (int)DIGITlimb[i].size())
-			generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], pos, nullptr, nullptr, 0, nullptr, 0);
-	}
+	for (auto& d : DECOMPlimb)
+		d.clear();
+	for (auto& d : DIGITlimb)
+		d.clear();
+
+	// Blank every pointer table the key owns: a stale entry would be read as a valid limb.
+	for (auto& d : DECOMPlimbptr)
+		if (d.size > 0)
+			cudaMemsetAsync(d.data, 0, (size_t)d.size * sizeof(void*), s.ptr());
+	for (auto& d : DIGITlimbptr)
+		if (d.size > 0)
+			cudaMemsetAsync(d.data, 0, (size_t)d.size * sizeof(void*), s.ptr());
+	if (limbptr.size > 0)
+		cudaMemsetAsync(limbptr.data, 0, (size_t)MAXP * sizeof(void*), s.ptr());
+	cudaStreamSynchronize(s.ptr());
 	CudaCheckErrorModNoSync;
+}
+
+int LimbPartition::decompDigitLevelCovered() const {
+	// A key covers level m iff every DECOMP/DIGIT record with prime id <= m is resident. Both record
+	// lists are prefixes (see keyLimbNeeded), so the covered level is the smallest top id over all lists.
+	int covered = cc.L;
+	for (size_t i = 0; i < DECOMPmeta.size(); ++i) {
+		if (DECOMPlimb[i].size() < DECOMPmeta[i].size()) {
+			// The first missing record of this digit is the first level this key cannot serve.
+			covered = std::min(covered, DECOMPmeta[i][DECOMPlimb[i].size()].id - 1);
+		}
+	}
+	for (size_t i = 0; i < DIGITmeta.size(); ++i) {
+		if (DIGITlimb[i].size() < DIGITmeta[i].size()) {
+			covered = std::min(covered, DIGITmeta[i][DIGITlimb[i].size()].id - 1);
+		}
+	}
+	return covered;
 }
 
 int LimbPartition::decompDigitMaxLevel() const {

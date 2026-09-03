@@ -180,6 +180,13 @@ class ContextData {
 	bool truncateKeys = true;
 	/** Extra levels kept above the computed usage level of a truncated key. 1 absorbs a deferred FLEXIBLEAUTO rescale. */
 	int keyLevelMargin = 1;
+	/**
+	 * What to do when a level-truncated key is needed above the level it was loaded for (KeySwitchingKey::ensureLevel).
+	 * false (default): throw a diagnostic naming the key and the two levels - a level plan that is wrong is a bug in the
+	 * caller and silently reloading it hides both the cost and the mistake. true: rebuild the key at the higher level
+	 * (needs a reloader). Also settable via env FIDESLIB_KEY_GROW=1.
+	 */
+	bool allowKeyGrow = false;
 	/** Total device bytes held by rotation keys (+ eval key) for `keyID` (all keys if keyID is empty). */
 	size_t keyDeviceBytes(const KeyHash& keyID = "") const;
 	/** Number of keys that had to be grown at runtime (ensureLevel) - should be 0 with a correct level plan. */

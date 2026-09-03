@@ -51,6 +51,9 @@ ContextData::ContextData(const Parameters& param_, const std::vector<int>& devs,
 	if (const char* env = std::getenv("FIDESLIB_KEY_LEVEL_MARGIN")) {
 		keyLevelMargin = std::max(0, std::atoi(env));
 	}
+	if (const char* env = std::getenv("FIDESLIB_KEY_GROW")) {
+		allowKeyGrow = !(env[0] == '0' || env[0] == 'f' || env[0] == 'F');
+	}
 #ifndef NCCL
 	if (GPUid.size() > 1) {
 		std::cerr << "MGPU requested but no NCCL linked, aborting" << std::endl;

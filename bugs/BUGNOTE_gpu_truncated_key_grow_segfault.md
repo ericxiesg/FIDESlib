@@ -3,6 +3,13 @@
 ## Status
 **Severe — blocks CUDA path of the level-truncated-key feature.** Stopped per instructions.
 
+> **2026-09-03 update:** answered in `RESPONSE-gpu-key-grow.md` — the in-place grow was replaced by a
+> reload-and-rebuild through the same path `Initialize` uses, `ensureLevel` was hoisted out of the
+> enqueued region of every rotate, growth is now opt-in (`FIDESLIB_KEY_GROW=1`) and there is a
+> Python-free reproducer (`key-grow-repro`). Read that file for what to re-test and in what order.
+> The root-cause analysis below (grow vs. generate asymmetry) did not hold up on a line-by-line reading;
+> the layouts the two paths produce are the same.
+
 ## Environment
 - GPU: Quadro GV100 (sm_70), CUDA 12.9 toolkit (CUDA 13.3 cannot target sm_70).
 - OpenFHE: patched 1.5.1.1 at /home/zhiyuan/workspace/THOR-FIDE/openfhe-install.

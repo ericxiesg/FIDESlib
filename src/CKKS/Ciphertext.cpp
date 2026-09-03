@@ -954,6 +954,12 @@ void Ciphertext::rotate(const int index__, const bool moddown) {
 		//c0.moddown();
 		*/
 
+		// Resolve (and if necessary reload) the key *before* any work is queued: ensureLevel can free and
+		// reallocate the key limbs and synchronises the device, which must not happen with a mod-up in flight.
+		int32_t actual_index;
+		auto& ksk = cc.GetRotationKey(index, keyID, slots, actual_index);
+		ksk.ensureLevel(getLevel());
+
 		auto& in0 = cc.getKeySwitchAux2();
 		auto& in1 = cc.getKeySwitchAux();
 		in1.copy(c1);
@@ -970,9 +976,6 @@ void Ciphertext::rotate(const int index__, const bool moddown) {
 			{
 				c0_out.push_back(&c0);
 				c1_out.push_back(&c1);
-				int32_t actual_index;
-				auto& ksk = cc.GetRotationKey(index, keyID, slots, actual_index);
-				ksk.ensureLevel(getLevel());
 				ksk_a.push_back(&ksk.a);
 				ksk_b.push_back(&ksk.b);
 				index_.push_back(actual_index);
@@ -998,6 +1001,12 @@ void Ciphertext::conjugate(const Ciphertext& c) {
 	op_count[OPS::CONJUGATE]++;
 
 	int index = 2 * cc.N - 1;
+
+	// See Ciphertext::rotate: resolve the key before queueing the mod-up.
+	int actual_index;
+	auto& ksk = cc.GetRotationKey(index, c.keyID, slots, actual_index);
+	ksk.ensureLevel(c.getLevel());
+
 	// auto& in0 = cc.getKeySwitchAux2();
 	auto& in1 = cc.getKeySwitchAux();
 	in1.copy(c.c1);
@@ -1014,9 +1023,6 @@ void Ciphertext::conjugate(const Ciphertext& c) {
 		{
 			c0_out.push_back(&c0);
 			c1_out.push_back(&c1);
-			int actual_index;
-			auto& ksk = cc.GetRotationKey(index, c.keyID, slots, actual_index);
-			ksk.ensureLevel(c.getLevel());
 			ksk_a.push_back(&ksk.a);
 			ksk_b.push_back(&ksk.b);
 			index_.push_back(actual_index);
@@ -1049,6 +1055,15 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 
 	constexpr bool PRINT = false;
 	assert(indexes.size() == results.size());
+
+	// Resolve every key up front: ensureLevel may reload and reallocate a level-truncated key, which must
+	// not happen once the shared mod-up auxiliary polynomial holds this ciphertext (see Ciphertext::rotate).
+	for (int i : indexes) {
+		if (i != 0) {
+			int actual_index;
+			cc.GetRotationKey(i, keyID, slots, actual_index).ensureLevel(getLevel());
+		}
+	}
 
 	bool grow_full = false;
 	for (auto& i : results) {
@@ -1091,7 +1106,6 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 				} else {
 					int actual_index;
 					auto& ksk_i = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
-					ksk_i.ensureLevel(getLevel());
 					RNSPoly& aux0 = results[i]->c1.dotKSKInPlaceFrom(cc.getKeySwitchAux(), ksk_i, &c1);
 					// results[i]->c0.dropToLevel(getLevel());
 					// results[i]->c1.dropToLevel(getLevel());
@@ -1129,7 +1143,6 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 				} else {
 					int actual_index;
 					auto& ksk_i = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
-					ksk_i.ensureLevel(getLevel());
 					RNSPoly& aux0 = in.dotKSKInPlace(ksk_i, &c1);
 					// results[i]->c0.dropToLevel(getLevel());
 					// results[i]->c1.dropToLevel(getLevel());
@@ -1196,7 +1209,6 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 				c1_out.push_back(&results[i]->c1);
 				int actual_index;
 				auto& ksk = cc.GetRotationKey(indexes[i], keyID, slots, actual_index);
-				ksk.ensureLevel(getLevel());
 				ksk_a.push_back(&ksk.a);
 				ksk_b.push_back(&ksk.b);
 				index.push_back(actual_index);

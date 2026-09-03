@@ -53,6 +53,9 @@ static RunResult RunBootstrap(bool truncateKeys, int logN, uint32_t numSlots, ui
 	// Knobs under test (env vars FIDESLIB_KEY_TRUNCATION / FIDESLIB_KEY_LEVEL_MARGIN take precedence).
 	cc->truncate_keys	 = truncateKeys;
 	cc->key_level_margin = 1;
+	// This example *measures* how good the level plan is, so a key used above its plan must be reloaded and
+	// counted rather than reported as an error. Production code should leave this off (see key-grow-repro).
+	cc->allow_key_grow = true;
 
 	auto keyPair = cc->KeyGen();
 	cc->EvalMultKeyGen(keyPair.secretKey);
