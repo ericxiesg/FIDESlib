@@ -43,10 +43,15 @@ desilofhe 的 `rotate(ct, delta)` 是把 slot `i` 搬到 `i + delta`；OpenFHE /
 `ClearEngine` 会严格检查 level 和 scale，不匹配就抛 `ScaleMismatch`，所以这类错误在毫秒级测试里
 就会暴露，不用等 GPU 上的噪声。
 
-**但更省事的路可能是把引擎换成 FIXEDAUTO**：自动 rescale，Δ 仍然与 level 无关（light plaintext 照样
-成立），`he.py` 就能逐字照抄。做 stage_06 之后分歧只会更多，所以值得早点定。
-麻烦你在真机上试一下：把 `python/tests/conftest.py` 的 `scaling_technique` 换成 `_core.FIXEDAUTO`
-跑一遍现有测试，看 stage1–5 是否还过、bootstrap 是否还过。结果写进 report，我按结果决定要不要切。
+**已定：继续用 FIXEDMANUAL**，不切 FIXEDAUTO。所以上面那两处改写是长期方案，stage_06 及以后
+也按同样的规矩写：
+
+- 明文乘法之后必须 rescale 才能和别的 canonical 密文相加/相减；
+- 需要"掩掉一部分"时用 `mask` 和 `1-mask` 各乘一次，不要 `x - mask*x`；
+- `he.py` 里对 canonical 密文的 `rescale` 是 desilofhe 的延迟结算，移植时删掉；
+- `level_down` 照抄（那是 THOR 主动的 level 调度，不是 scale 记账）。
+
+`ClearEngine` 会把违反上面规矩的地方抛 `ScaleMismatch`，所以先在 numpy 层跑通再上 FHE。
 
 ## 本地已经跑通的部分（numpy，无引擎）
 

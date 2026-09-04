@@ -89,9 +89,17 @@ ciphertext from an unmasked one. fideslib runs FIXEDMANUAL, where a ciphertext i
   desilofhe.
 
 `ClearEngine` enforces the contract (`ScaleMismatch` on mismatched level or scale), so a slip fails a
-millisecond test instead of surfacing as noise after a GPU run. **This is worth re-examining if the
-engine ever moves to FIXEDAUTO**, which would restore automatic rescaling while keeping the constant
-`Delta` that light plaintexts need - see "open questions".
+millisecond test instead of surfacing as noise after a GPU run.
+
+**FIXEDMANUAL is the decision, not a placeholder.** Moving to FIXEDAUTO would restore desilofhe's
+automatic rescaling and let the stages read exactly like `he.py`, but the explicit discipline is what
+makes the level schedule - the thing the whole memory budget rests on - visible and checkable. So the
+rules below apply to every stage still to be ported:
+
+* rescale after a plaintext multiply before adding the result to anything canonical;
+* to mask off part of a ciphertext, multiply by `mask` and by `1 - mask`, never `x - mask * x`;
+* drop `he.py`'s rescales of already-canonical ciphertexts (they are desilofhe settling a deferred
+  product), but keep every `level_down` (those are THOR scheduling levels on purpose).
 
 ## Level schedule and rotation keys
 
@@ -129,11 +137,6 @@ is independent of both implementations.
 
 ## Open questions
 
-* **FIXEDAUTO.** The evidence that desilofhe auto-manages scales is indirect but consistent (`he.py`
-  rescales a canonical ciphertext, and subtracts across a scale boundary). If the engine moved to
-  FIXEDAUTO the two rewrites above could go away and the port would read exactly like `he.py`. Light
-  plaintexts stay valid under FIXEDAUTO (`Delta` is still level-independent). Worth measuring before
-  stage 06 onwards makes the divergence bigger.
 * **Layer >= 1 input.** `stage_01_complexify_x` has a second branch, for the `2 * n_input_ciphertexts`
   real/imaginary ciphertexts a previous layer produces, which folds in a rotation by `n_blocks // 2`.
   It is ported but only reachable once stage 16 exists, so it is untested.
