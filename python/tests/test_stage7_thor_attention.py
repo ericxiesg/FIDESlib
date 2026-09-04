@@ -208,3 +208,97 @@ def test_he_py_accumulator_table_is_wrong(masks, score_masks):
     # and it is wrong only where the two rules disagree: the middle two output ciphertexts of each half
     per_ciphertext = [np.abs(got[i] - expect[i]).max() for i in range(8)]
     assert [i for i, e in enumerate(per_ciphertext) if e > 1e-12] == [1, 2, 5, 6]
+
+
+# ---------------------------------------------------------------- stage 08: attention x values
+def test_attention_context_is_exactly_a_times_v(masks, score_masks):
+    """Stage 08 computes A V per head, packed the way the QKV projections were.
+
+    The two complex output ciphertexts carry four real diagonals: diagonal `ct*pack + group` in the
+    real part and `(ct+2)*pack + group` in the imaginary one, which is how the four value ciphertexts
+    were folded into two on the way in.
+    """
+    from thorfhe.attention import AttentionContext
+
+    rng = np.random.default_rng(31)
+    v = rng.normal(size=(G.dim, G.features)) * 0.1
+    a = rng.normal(size=(G.n_blocks, G.dim, G.dim)) * 0.05
+
+    (low, high), transpose, copies, attention = masks
+    engine = ClearEngine(G, depth=30)
+    stages = AttentionContext(engine, G, masks=low, complement_masks=high, transpose=transpose,
+                              copies=copies, attention=attention, ccmm=score_masks)
+
+    weights = []
+    for diagonal in range(G.dim):
+        msg = np.zeros(G.slot_count, dtype=complex)
+        for group in range(G.pack):
+            for tau in range(G.dim):
+                for block in range(G.n_blocks):
+                    msg[G.slot(group, tau, block)] = a[block, tau, (diagonal + tau) % G.dim]
+        weights.append(engine.encrypt(msg))
+
+    out = stages.stage_08_attention_context(encode_qkv_output(engine, v), np.array(weights, dtype=object))
+    assert out.shape == (2,)
+
+    context = np.zeros((G.dim, G.features))
+    for block in range(G.n_blocks):
+        columns = slice(G.n_out * block, G.n_out * (block + 1))
+        context[:, columns] = a[block] @ v[:, columns]
+
+    expect = np.zeros((2, G.slot_count), dtype=complex)
+    for ct in range(2):
+        for group in range(G.pack):
+            for tau in range(G.dim):
+                for block in range(G.n_blocks):
+                    real = (ct * G.pack + group + tau) % G.n_out
+                    imag = ((ct + 2) * G.pack + group + tau) % G.n_out
+                    expect[ct, G.slot(group, tau, block)] = (context[tau, G.n_out * block + real]
+                                                             + 1j * context[tau, G.n_out * block + imag])
+
+    got = np.stack([np.asarray(engine.decrypt(o), dtype=complex) for o in out])
+    assert np.abs(got - expect).max() < 1e-12
+
+
+def test_accumulator_routing_reproduces_he_py_stage_08(masks, score_masks):
+    """The parity rule must reproduce he.py's stage 08 tables entry for entry.
+
+    Those tables are the evidence that the rule is `(offset // out_dim) % 2` and not merely
+    `offset < 0`: with out_dim = 2 the offsets reach -4, so a double wrap happens and lands back in
+    columns 0-1 - which he.py's stage 08 does, unlike its stage 06.
+    """
+    from thorfhe.attention import AttentionContext
+
+    # transcribed from he.py stage_08_attention_context
+    j_zero = {
+        0: [((0, 0), (0, 0)), ((0, 1), (0, 1)), ((1, 0), (1, 0)), ((1, 1), (1, 1))],
+        1: [((0, 2), (1, 0)), ((0, 3), (1, 1)), ((1, 0), (0, 0)), ((1, 1), (0, 1))],
+        2: [((0, 2), (0, 0)), ((0, 3), (0, 1)), ((1, 2), (1, 0)), ((1, 3), (1, 1))],
+        3: [((0, 0), (1, 0)), ((0, 1), (1, 1)), ((1, 2), (0, 0)), ((1, 3), (0, 1))],
+    }
+    j_other = {
+        0: [((0, 2), (1, 2)), ((0, 3), (1, 3)), ((0, 0), (0, 0)), ((0, 1), (0, 1)),
+            ((1, 0), (0, 2)), ((1, 1), (0, 3)), ((1, 0), (1, 0)), ((1, 1), (1, 1))],
+        1: [((0, 2), (0, 2)), ((0, 3), (0, 3)), ((0, 2), (1, 0)), ((0, 3), (1, 1)),
+            ((1, 2), (1, 2)), ((1, 3), (1, 3)), ((1, 0), (0, 0)), ((1, 1), (0, 1))],
+        2: [((0, 0), (1, 2)), ((0, 1), (1, 3)), ((0, 2), (0, 0)), ((0, 3), (0, 1)),
+            ((1, 2), (0, 2)), ((1, 3), (0, 3)), ((1, 2), (1, 0)), ((1, 3), (1, 1))],
+        3: [((0, 0), (0, 2)), ((0, 1), (0, 3)), ((0, 0), (1, 0)), ((0, 1), (1, 1)),
+            ((1, 0), (1, 2)), ((1, 1), (1, 3)), ((1, 2), (0, 0)), ((1, 3), (0, 1))],
+    }
+
+    (low, high), transpose, copies, attention = masks
+    stages = AttentionContext(ClearEngine(G, depth=30), G, masks=low, complement_masks=high,
+                              transpose=transpose, copies=copies, attention=attention, ccmm=score_masks)
+    out_dim = stages.out_dim
+
+    for block in range(4):
+        for table, j in ((j_zero[block], 0), (j_other[block], 1)):
+            derived = []
+            for i in range(out_dim):
+                sources = [(i - block, 0)] if j == 0 else [(i - 1 - block, 2), (i - block, 0)]
+                for offset, first in sources:
+                    column = stages.accumulator_column(i, offset, j)
+                    derived.append(((i, column), (offset % out_dim, first)))
+                    derived.append(((i, column + 1), (offset % out_dim, first + 1)))
+            assert sorted(derived) == sorted(table), f"block={block} j={j}"

@@ -242,14 +242,21 @@ class AttentionScore(AttentionStages):
         #: ``{column: {n: mask}}`` from :func:`ccmm_masks`.
         self.ccmm = ccmm
 
+    #: how many ciphertexts the accumulator spans; 4 for the score, 2 for the context.
+    out_dim = 4
+
     def accumulator_column(self, out_index: int, offset: int, j: int) -> int:
         """Which pair of accumulator columns a contribution lands in.
 
-        Columns 2-3 when the source ciphertext index wrapped past zero, 0-1 otherwise. ``he.py`` uses
-        exactly this for ``j != 0`` but keys the ``j == 0`` case on ``out_index == 0`` instead, which
-        differs for ``block`` 2 and 3; overridable so a test can pin that difference down.
+        Columns 2-3 when the source index wrapped an odd number of times, 0-1 otherwise. Stage 08's
+        tables are what show this is the general rule: there ``out_dim`` is 2 and offsets reach -4, so
+        double wraps occur and land back in columns 0-1 - which those tables do, in every entry.
+
+        ``he.py`` uses this rule everywhere except the ``j == 0`` branch of the *score*, where it keys
+        on ``out_index == 0``; that agrees only when ``in_index // pack == 1``. Overridable so a test
+        can pin the difference down.
         """
-        return 2 if offset < 0 else 0
+        return 2 * ((offset // self.out_dim) % 2)
 
     def _key_as_complex(self, k):
         """Fold the transposed key and its group-rotated copy into one complex ciphertext."""
@@ -262,12 +269,14 @@ class AttentionScore(AttentionStages):
             out[index] = self.add(self.level_down(lower[index], 1), self.multiply_1j(rotated))
         return out
 
-    def stage_06_attention_score(self, q, k):
-        g = self.g
-        out_dim = 4
-        key = self._key_as_complex(k)
-        copies = self.make_copies(q)
+    def _accumulate_product(self, left, diagonals, in_dim: int):
+        """The shared body of both ciphertext-ciphertext products.
 
+        ``left`` is ``out_dim`` complex ciphertexts, ``diagonals`` is ``in_dim`` broadcast diagonals.
+        Returns the ``out_dim x 4`` accumulator, still degree-2 and at scale Delta^2.
+        """
+        g = self.g
+        out_dim = self.out_dim
         accumulator = np.full((out_dim, 4), None, dtype=object)
 
         def accumulate(index, value):
@@ -278,15 +287,15 @@ class AttentionScore(AttentionStages):
 
         # in_index 0 needs no rotation and no split; level_down aligns it with the rescaled rest.
         for i in range(out_dim):
-            accumulator[i, 0] = self.level_down(self.multiply(key[i], copies[0]), by=1)
+            accumulator[i, 0] = self.level_down(self.multiply(left[i], diagonals[0]), by=1)
 
-        for in_index in range(1, g.n_out):
+        for in_index in range(1, in_dim):
             block, j = divmod(in_index, g.pack)
             rotation = g.group_size * j - g.n_slot * in_index
 
             pieces = np.full((out_dim, 4), None, dtype=object)
             for i in range(out_dim):
-                product = self.multiply(self.rotate(key[i], rotation), copies[in_index])
+                product = self.multiply(self.rotate(left[i], rotation), diagonals[in_index])
                 rescaled = self.rescale(product)
                 for column in ((0, 1) if j == 0 else (0, 1, 2, 3)):
                     pieces[i, column] = self.multiply(self.ccmm[column][in_index], rescaled)
@@ -295,17 +304,56 @@ class AttentionScore(AttentionStages):
                 sources = [(i - block, 0)] if j == 0 else [(i - 1 - block, 2), (i - block, 0)]
                 for offset, first_column in sources:
                     column = self.accumulator_column(i, offset, j)
-                    accumulate((i, column), pieces[offset % 4, first_column])
-                    accumulate((i, column + 1), pieces[offset % 4, first_column + 1])
+                    accumulate((i, column), pieces[offset % out_dim, first_column])
+                    accumulate((i, column + 1), pieces[offset % out_dim, first_column + 1])
+        return accumulator
 
-        output = np.empty((2 * out_dim,), dtype=object)
-        for i in range(out_dim):
+    def _fold_accumulator(self, accumulator):
+        """Relinearise, realign the halves and fold the conjugate pair into one complex ciphertext."""
+        g = self.g
+        merged = np.empty((self.out_dim,), dtype=object)
+        for i in range(self.out_dim):
             parts = [self.relinearize(accumulator[i, c]) for c in range(4)]
             parts[1] = self.rotate(parts[1], g.group_size)
             parts[3] = self.rotate(parts[3], g.group_size)
             parts[2] = self.multiply_1j(self.conjugate(self.add(parts[2], parts[3])))
-            merged = self.add(self.add(parts[0], parts[1]), parts[2])
-            conjugated = self.conjugate(merged)
-            output[i] = self.rescale(self.add(merged, conjugated))
-            output[i + out_dim] = self.rescale(self.multiply_1j(self.subtract(conjugated, merged)))
+            merged[i] = self.add(self.add(parts[0], parts[1]), parts[2])
+        return merged
+
+    def stage_06_attention_score(self, q, k):
+        accumulator = self._accumulate_product(self._key_as_complex(k), self.make_copies(q), self.g.n_out)
+        merged = self._fold_accumulator(accumulator)
+
+        output = np.empty((2 * self.out_dim,), dtype=object)
+        for i in range(self.out_dim):
+            conjugated = self.conjugate(merged[i])
+            output[i] = self.rescale(self.add(merged[i], conjugated))
+            output[i + self.out_dim] = self.rescale(self.multiply_1j(self.subtract(conjugated, merged[i])))
         return output
+
+
+class AttentionContext(AttentionScore):
+    """Stage 08: the second ciphertext-ciphertext product, attention weights times values.
+
+    Same machinery as the score, with the operands swapped in shape: ``out_dim`` is 2 rather than 4 and
+    the inner dimension is ``dim`` (one term per key token) rather than ``n_out``. Computes
+
+        ``context[b][tau, d] = sum_j A[b][tau, j] * V[j, n_out*b + d]``
+
+    packed the way the QKV projections were, so stage 10's dense layer can consume it directly.
+
+    ``weights`` is ``dim`` broadcast diagonals of the per-head attention matrix - what
+    ``he_softmax`` produces, and the same shape :meth:`make_copies` produces for the score.
+    """
+
+    out_dim = 2
+
+    def _values_as_complex(self, v):
+        """Pack the four real value ciphertexts into two complex ones."""
+        return np.array([self.add(v[i], self.multiply_1j(v[i + self.out_dim])) for i in range(self.out_dim)],
+                        dtype=object)
+
+    def stage_08_attention_context(self, v, weights):
+        accumulator = self._accumulate_product(self._values_as_complex(v), weights, self.g.dim)
+        merged = self._fold_accumulator(accumulator)
+        return np.array([self.rescale(m) for m in merged], dtype=object)

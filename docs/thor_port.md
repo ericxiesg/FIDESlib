@@ -145,6 +145,7 @@ an exact operation with a stated formula (`thorfhe/attention.py`):
 | `transpose_upper_to_lower` | a permutation of the packed key: `out[ct][group, tau, b] = k[t, f]` with `ct*pack + group = (t - d) mod n_out` and `tau = d + n_out * ((d > t mod n_out) XOR (t // n_out))` |
 | `make_copies` | broadcasts every diagonal across all groups: `copies[l][group, t, b] = q[t, n_out*b + (l+t) mod n_out] / 2` |
 | `stage_06_attention_score` | `out[ct][group, tau, b] = (Q_b K_b^T)[tau, (ct*pack + group + tau) mod dim]` |
+| `stage_08_attention_context` | `out[ct][group, tau, b] = ctx[tau, n_out*b + (ct*pack+group+tau) mod n_out] + i * ctx[tau, n_out*b + ((ct+2)*pack+group+tau) mod n_out]`, `ctx = A_b V_b` |
 
 All three were derived by probing the numpy model with one-hot inputs, the same way the QKV layout was,
 and all three are checked against those formulas with zero tolerance.
@@ -161,6 +162,13 @@ The effect is not marginal: with `he.py`'s routing the score is off by ~32% of i
 output ciphertexts 1, 2, 5 and 6. With the other rule it is `Q K^T` to machine precision (3e-16). The
 port uses the correct rule, `AttentionScore.accumulator_column` is overridable, and
 `test_he_py_accumulator_table_is_wrong` pins the difference so a well-meaning revert fails.
+
+Stage 08 settles what the general rule is. There `out_dim` is 2 rather than 4, so offsets reach -4 and
+a source index can wrap *twice* and land back in columns 0-1 - which means the rule is the parity of
+the wrap count, `2 * ((offset // out_dim) % 2)`, not simply `offset < 0`. `he.py`'s stage 08 tables
+follow that in every one of their entries, in both branches; `test_accumulator_routing_reproduces_he_py_stage_08`
+checks all sixteen. So the same rule reproduces three of the four tables in `he.py` and only the score's
+`j == 0` table stands apart.
 
 This is worth double-checking against THOR's reported MRPC accuracy before treating it as settled -
 an error this size in the attention scores should be visible end to end, so either the artifact
