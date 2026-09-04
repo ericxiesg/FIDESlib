@@ -202,3 +202,64 @@ class DivisionMixin:
             a = DeltaCiphertext(self.multiply(a.ciphertext, factor), a.delta * factor)
             b = DeltaCiphertext(self.multiply(b.ciphertext, factor), b.delta * factor)
         return a, b
+
+
+class InverseSqrtMixin:
+    """Cubically-convergent inverse square root, as ``he.py``'s ``he_invsqrt``.
+
+    The iteration keeps two ciphertexts: ``a``, which is driven to 1, and ``b``, which accumulates
+    ``1 / sqrt(a_0)``. Each step picks ``k`` as the middle root of
+
+        ``(1 - e^3) k^2 + (6 e^2 - 6) k + (9 - 9 e) = 0``
+
+    which is the choice that makes ``e -> k e (3 - k e)^2 / 4`` converge fastest from the current lower
+    bound ``e``. Cubic convergence means five or six iterations cover a range of several decades, which
+    is why LayerNorm can afford it where a Newton iteration could not.
+
+    Everything is confined to ``mask``, the slots that carry the statistic; the scalars are folded into
+    that mask rather than applied separately, exactly as ``he.py`` does.
+    """
+
+    @staticmethod
+    def invsqrt_step(e: float) -> float:
+        """The ``k`` for the current lower bound, i.e. the middle root of the cubic's derivative."""
+        roots = np.roots([1 - e ** 3, 6 * e ** 2 - 6, 9 - 9 * e])
+        return float(np.real(roots[1]))
+
+    @classmethod
+    def invsqrt_iterations(cls, epsilon: float, alpha: float) -> int:
+        """How many iterations the loop runs; data-independent, so the level cost is known up front."""
+        error, count = epsilon, 0
+        while error < 1 - alpha:
+            k = cls.invsqrt_step(error)
+            error = k * error * (3 - k * error) ** 2 / 4
+            count += 1
+        return count
+
+    def he_invsqrt(self, denominator, ones, mask, epsilon: float, alpha: float):
+        """``1 / sqrt(denominator)`` for a denominator known to lie in ``[epsilon, 1]``.
+
+        ``ones`` is the encrypted indicator the accumulator starts from (THOR's ``masks["invsqrt_b"]``)
+        and ``mask`` the plaintext indicator of the same slots. Two levels per iteration.
+        """
+        a = denominator
+        b = ones
+        error = epsilon
+
+        while error < 1 - alpha:
+            k = self.invsqrt_step(error)
+            correction = self.subtract((3 / k) * mask, a)
+
+            scaled_b = self.rescale(self.multiply(b, (k ** 1.5 / 2) * mask))
+            left, right = self.align(scaled_b, correction)
+            next_b = self.rescale(self.relinearize(self.multiply(left, right)))
+
+            scaled_a = self.rescale(self.multiply(a, (k ** 3 / 4) * mask))
+            squared = self.rescale(self.relinearize(self.square(correction)))
+            left, right = self.align(scaled_a, squared)
+            a = self.rescale(self.relinearize(self.multiply(left, right)))
+
+            b = next_b
+            error = k * error * (3 - k * error) ** 2 / 4
+
+        return b

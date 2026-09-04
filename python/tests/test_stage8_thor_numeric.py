@@ -16,7 +16,7 @@ import pytest
 
 from thorfhe import SMALL, ClearEngine, Stages, block_diagonal_masks
 from thorfhe.numeric import (EXP1_COEFFICIENTS, EXP2_COEFFICIENTS, DivisionMixin,
-                             NumericMixin)
+                             InverseSqrtMixin, NumericMixin)
 
 DEPTH = 20
 
@@ -193,3 +193,41 @@ def test_he_inv_keeps_the_ciphertext_off_the_noise_floor(division):
 
     assert delta < 1e-2, "delta should have shrunk a long way"
     assert magnitude > 1e-3, "but the ciphertext itself must stay well above the noise floor"
+
+
+# ---------------------------------------------------------------- inverse square root
+class InverseSqrtStages(NumericMixin, InverseSqrtMixin, Stages):
+    pass
+
+
+@pytest.fixture
+def inverse_sqrt():
+    depth = 60
+    engine = ClearEngine(SMALL, depth=depth, bootstrap_level=depth)
+    low, high = block_diagonal_masks(SMALL)
+    return engine, InverseSqrtStages(engine, SMALL, masks=low, complement_masks=high), depth
+
+
+@pytest.mark.parametrize("epsilon,expected", [(0.015, 5), (0.0013, 6), (3e-4, 7)])
+def test_invsqrt_converges_cubically(epsilon, expected):
+    """Two more iterations cover fifty times the range - that is what buys LayerNorm its depth."""
+    assert InverseSqrtMixin.invsqrt_iterations(epsilon, 0.001) == expected
+
+
+def test_he_invsqrt_over_its_declared_range(inverse_sqrt):
+    engine, st, depth = inverse_sqrt
+    epsilon, alpha = 0.015, 0.001
+    rng = np.random.default_rng(81)
+    mask = used_slots().astype(float)
+    denominator = np.exp(rng.uniform(np.log(epsilon), 0.0, SMALL.slot_count)) * mask
+
+    out = st.he_invsqrt(engine.encrypt(denominator), engine.encrypt(mask), mask,
+                        epsilon=epsilon, alpha=alpha)
+
+    got = np.real(engine.decrypt(out))
+    used = mask > 0
+    relative = np.abs(got[used] - 1 / np.sqrt(denominator[used])) * np.sqrt(denominator[used])
+    assert relative.max() < alpha
+    # confined to the mask, which is what lets LayerNorm keep the statistic in a few slots per token
+    assert np.abs(got[~used]).max() == 0.0
+    assert engine.level(out) == depth - 2 * InverseSqrtMixin.invsqrt_iterations(epsilon, alpha)
