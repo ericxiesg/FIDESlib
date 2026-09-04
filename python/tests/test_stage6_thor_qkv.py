@@ -14,7 +14,6 @@ Layer 3 is the slow one, so it uses ``thorfhe.SMALL``: 4096 slots, still 128 tok
 import numpy as np
 import pytest
 
-import pyfideslib as pf
 import thorfhe
 from thorfhe import (SMALL, THOR_BERT, ClearEngine, LightWeights, ScaleMismatch, Stages,
                      block_diagonal_masks, decode_linear_output, encode_activations, encode_bias,
@@ -106,6 +105,9 @@ def test_rotation_plan_covers_every_rotation():
 # ---------------------------------------------------------------- 3. the FHE port
 @pytest.fixture(scope="module")
 def thor_engine(device):
+    # imported here, not at module scope: the checks above are numpy-only and must run without the
+    # compiled extension.
+    pf = pytest.importorskip("pyfideslib", reason="the pyfideslib extension is not built")
     plan = plan_rotation_keys(SMALL, depth=DEPTH)
     engine = pf.Engine(device, log_n=LOG_N, depth=DEPTH, scaling_bits=50, first_mod_bits=55, dnum=3,
                        rotation_indexes=plan)

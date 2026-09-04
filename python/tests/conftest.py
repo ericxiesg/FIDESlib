@@ -2,7 +2,11 @@ import os
 
 import pytest
 
-import pyfideslib as pf
+try:
+    import pyfideslib as pf
+except ImportError as exc:  # the pybind11 extension is not built
+    pf = None
+    _pyfideslib_error = exc
 
 DEVICES = [d.strip() for d in os.environ.get("PYFIDESLIB_DEVICES", "cpu,cuda:0").split(",") if d.strip()]
 
@@ -12,6 +16,9 @@ SMALL = dict(log_n=13, depth=12, scaling_bits=50, first_mod_bits=55, dnum=3)
 
 @pytest.fixture(scope="session", params=DEVICES)
 def device(request):
+    """Skips rather than errors when the extension is absent, so the numpy-only suites still run."""
+    if pf is None:
+        pytest.skip(f"pyfideslib is not built here: {_pyfideslib_error}")
     return request.param
 
 

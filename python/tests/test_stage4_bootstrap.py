@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 
-import pyfideslib as pf
+pf = pytest.importorskip("pyfideslib", reason="the pyfideslib extension is not built")
 
 DEVICES = [d.strip() for d in os.environ.get("PYFIDESLIB_DEVICES", "cpu,cuda:0").split(",") if d.strip()]
 BOOT = dict(log_n=int(os.environ.get("PYFIDESLIB_BOOT_LOGN", "13")), depth=int(os.environ.get("PYFIDESLIB_BOOT_DEPTH", "25")),

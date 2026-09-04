@@ -3,7 +3,7 @@ level_down, integer scalar (level-free)."""
 import numpy as np
 import pytest
 
-import pyfideslib as pf
+pf = pytest.importorskip("pyfideslib", reason="the pyfideslib extension is not built")
 from conftest import SMALL, rand
 
 
