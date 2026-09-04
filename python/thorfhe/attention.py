@@ -108,13 +108,6 @@ class AttentionStages(Stages):
                            self.rotate(self.multiply(low[delta], x), right))
         return self.rescale(rotated)
 
-    def interval_sum(self, x, interval: int):
-        """Fold the slot vector onto itself in steps of ``interval``, so every window holds the total."""
-        out = x
-        for step in range(int(np.log2(self.g.slot_count / interval))):
-            out = self.add(out, self.rotate(out, -interval * 2 ** step))
-        return out
-
     # ---------------------------------------------------------------- stage 06 data movement
     def transpose_upper_to_lower(self, upper):
         """Transpose the packed per-head matrices, so a ciphertext-ciphertext product can form ``Q K^T``.

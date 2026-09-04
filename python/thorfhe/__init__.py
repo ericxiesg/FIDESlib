@@ -21,6 +21,7 @@ from .encoding import (
 )
 from .geometry import SMALL, THOR_ATTENTION_DENSE, THOR_BERT, Geometry
 from .dense import DenseStages
+from .layernorm import LayerNormStages
 from .he import LightWeights, decrypt_ciphertexts, encrypt_activations, plan_rotation_keys
 from .stages import Stages
 from .weights_io import (
@@ -37,6 +38,7 @@ __all__ = [
     "ClearEngine",
     "DenseStages",
     "Geometry",
+    "LayerNormStages",
     "LightWeights",
     "ScaleMismatch",
     "SMALL",

@@ -101,6 +101,17 @@ class Stages:
         return tuple(ct if self.engine.level(ct) == target
                      else self.level_down(ct, self.engine.level(ct) - target) for ct in cts)
 
+    def interval_sum(self, x, interval: int):
+        """Fold the slot vector onto itself in steps of ``interval``, so every window holds the total.
+
+        The workhorse reduction: it is how a value spread over ``pack`` groups is summed, and how a
+        statistic is broadcast back. ``log2(slot_count / interval)`` rotations, no levels.
+        """
+        out = x
+        for step in range(int(np.log2(self.g.slot_count / interval))):
+            out = self.add(out, self.rotate(out, -interval * 2 ** step))
+        return out
+
     def prepare_for_multiply(self, x):
         """Identity under FIXEDMANUAL - see the module docstring for why ``he.py`` rescales here."""
         return x
