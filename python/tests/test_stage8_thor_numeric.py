@@ -15,7 +15,8 @@ import numpy as np
 import pytest
 
 from thorfhe import SMALL, ClearEngine, Stages, block_diagonal_masks
-from thorfhe.numeric import EXP1_COEFFICIENTS, EXP2_COEFFICIENTS, NumericMixin
+from thorfhe.numeric import (EXP1_COEFFICIENTS, EXP2_COEFFICIENTS, DivisionMixin,
+                             NumericMixin)
 
 DEPTH = 20
 
@@ -126,3 +127,69 @@ def test_he_exp2_is_the_wider_weaker_fit(stages):
     # recorded, not asserted tight: this is the accuracy THOR's own coefficients have over the wider
     # range layer 2 needs, and it is an order of magnitude worse than he_exp1's
     assert residual < 0.5
+
+
+# ---------------------------------------------------------------- Goldschmidt division
+class DivisionStages(NumericMixin, DivisionMixin, Stages):
+    pass
+
+
+@pytest.fixture
+def division():
+    depth = 60
+    engine = ClearEngine(SMALL, depth=depth, bootstrap_level=depth)
+    low, high = block_diagonal_masks(SMALL)
+    return engine, DivisionStages(engine, SMALL, masks=low, complement_masks=high), depth
+
+
+def used_slots():
+    return (np.arange(SMALL.slot_count) % SMALL.n_slot) < SMALL.n_blocks
+
+
+@pytest.mark.parametrize("epsilon,alpha,expected", [
+    (2 ** -11, 0.001, 8),
+    (2 ** -18, 0.001, 12),
+])
+def test_iteration_count_is_data_independent(epsilon, alpha, expected):
+    """The loop bound depends only on the declared range, so the level cost is known up front."""
+    assert DivisionMixin.goldschmidt_iterations(epsilon, alpha) == expected
+
+
+def test_he_inv_inverts_over_its_declared_range(division):
+    """1/D to within alpha for every D in [epsilon, 1], and nothing outside the used slots."""
+    engine, st, depth = division
+    epsilon, alpha = 2 ** -11, 0.001
+    rng = np.random.default_rng(51)
+    denominator = np.exp(rng.uniform(np.log(epsilon), 0.0, SMALL.slot_count))  # log-uniform
+    used = used_slots()
+
+    ones = engine.encrypt(used.astype(float))
+    out, delta, precision = st.he_inv(engine.encrypt(denominator * used), ones,
+                                      epsilon=epsilon, alpha=alpha)
+
+    value = np.real(engine.decrypt(out)) / delta
+    relative = np.abs(value[used] - 1.0 / denominator[used]) * denominator[used]
+    assert relative.max() < alpha
+    assert precision > 1 - alpha
+    # the `ones` operand is what confines the result; padding must stay exactly empty
+    assert np.abs(value[~used]).max() == 0.0
+    assert engine.level(out) == depth - DivisionMixin.goldschmidt_iterations(epsilon, alpha)
+
+
+def test_he_inv_keeps_the_ciphertext_off_the_noise_floor(division):
+    """The point of the delta bookkeeping: delta shrinks quadratically, the ciphertext must not.
+
+    Without the free integer rescaling and conjugate doubling, the plaintext would sink by ~2^-60 over
+    eight iterations and the result would be noise.
+    """
+    engine, st, _ = division
+    epsilon, alpha = 2 ** -11, 0.001
+    used = used_slots()
+    denominator = np.where(used, 0.5, 0.0)
+
+    out, delta, _ = st.he_inv(engine.encrypt(denominator), engine.encrypt(used.astype(float)),
+                              epsilon=epsilon, alpha=alpha)
+    magnitude = np.abs(np.real(engine.decrypt(out))).max()
+
+    assert delta < 1e-2, "delta should have shrunk a long way"
+    assert magnitude > 1e-3, "but the ciphertext itself must stay well above the noise floor"

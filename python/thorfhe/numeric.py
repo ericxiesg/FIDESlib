@@ -121,3 +121,90 @@ class NumericMixin:
 
     def he_exp2(self, x, min_x: float, max_x: float, n: int):
         return self.he_exp(x, min_x, max_x, n, wide=True)
+
+
+class DeltaCiphertext:
+    """A ciphertext together with the factor its plaintext has been scaled by.
+
+    The represented value is ``ciphertext / delta``. THOR carries this pair through the division so it
+    can rescale by *integers* - which cost no level - whenever the ciphertext's magnitude drifts too
+    far below the CKKS scale to keep its precision. Doubling via ``x + conj(x)`` is free in the same
+    way, and used for the same purpose.
+    """
+
+    __slots__ = ("ciphertext", "delta")
+
+    def __init__(self, ciphertext, delta: float):
+        self.ciphertext = ciphertext
+        self.delta = delta
+
+    def __repr__(self):
+        return f"DeltaCiphertext(delta={self.delta:g})"
+
+
+class DivisionMixin:
+    """Goldschmidt division, as ``he.py``'s ``he_inv``."""
+
+    #: keep the ciphertext's magnitude within this many bits of the scale before rescaling by an integer.
+    delta_headroom_bits = 8
+
+    @staticmethod
+    def goldschmidt_iterations(epsilon: float, alpha: float) -> int:
+        """How many iterations the loop runs. Data-independent, so the level cost is known up front."""
+        error, count = epsilon, 0
+        while error < 1 - alpha:
+            k = 2 / (error + 1)
+            error = k * error * (2 - k * error)
+            count += 1
+        return count
+
+    def he_inv(self, denominator, ones, epsilon: float, alpha: float, delta: float = 1.0):
+        """``1 / denominator`` for a denominator known to lie in ``[epsilon, 1]``.
+
+        ``ones`` is an encrypted indicator of the slots that carry data - THOR's ``masks["inv_a"]`` -
+        which is what the iteration starts from and what confines the result to those slots.
+
+        Returns ``(ciphertext, delta, precision)``: the value is ``ciphertext / delta``, and
+        ``precision`` is the achieved lower bound on the normalised denominator (it ends above
+        ``1 - alpha``). One level per iteration.
+        """
+        a = DeltaCiphertext(ones, delta)
+        b = DeltaCiphertext(self.bootstrap(denominator), delta)
+        error = epsilon
+        iterations = 0
+
+        while error < 1 - alpha:
+            iterations += 1
+            k = 2 / (error + 1)
+
+            # (2/k) * delta_b - b, i.e. Goldschmidt's `2 - k*value` carried in the scaled representation
+            correction = self.prepare_for_multiply(self.subtract(2 / k * b.delta, b.ciphertext))
+            a = DeltaCiphertext(self._times(a.ciphertext, correction), a.delta * b.delta / k ** 2)
+            b = DeltaCiphertext(self._times(b.ciphertext, correction), b.delta * b.delta / k ** 2)
+            error = k * error * (2 - k * error)
+
+            a, b = self._restore_magnitude(a, b)
+
+        return a.ciphertext, a.delta, error
+
+    def _times(self, x, y):
+        """Ciphertext product, relinearised and brought back to canonical scale."""
+        return self.rescale(self.relinearize(self.multiply(x, y)))
+
+    def _restore_magnitude(self, a: DeltaCiphertext, b: DeltaCiphertext):
+        """Scale both operands back up without spending a level.
+
+        ``delta`` shrinks quadratically each iteration, so the ciphertexts would sink into the CKKS
+        noise floor. Doubling through the conjugate and multiplying by an integer are both level-free,
+        so the value (``ciphertext / delta``) is untouched while the magnitude is restored.
+        """
+        headroom = 2 ** self.delta_headroom_bits
+        if int(1 / b.delta / headroom) > 1:
+            for scaled in (a, b):
+                scaled.ciphertext = self.add(scaled.ciphertext, self.conjugate(scaled.ciphertext))
+                scaled.delta *= 2
+        factor = max(int(1 / b.delta / headroom), 1)
+        if factor > 1:
+            a = DeltaCiphertext(self.multiply(a.ciphertext, factor), a.delta * factor)
+            b = DeltaCiphertext(self.multiply(b.ciphertext, factor), b.delta * factor)
+        return a, b
