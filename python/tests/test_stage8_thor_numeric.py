@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from thorfhe import SMALL, ClearEngine, Stages, block_diagonal_masks
-from thorfhe.numeric import (EXP1_COEFFICIENTS, EXP2_COEFFICIENTS, DivisionMixin,
-                             InverseSqrtMixin, NumericMixin)
+from thorfhe.numeric import (EXP1_COEFFICIENTS, EXP2_COEFFICIENTS, GELU_SCALE, DivisionMixin,
+                             GeluMixin, InverseSqrtMixin, NumericMixin)
 
 DEPTH = 20
 
@@ -46,8 +46,9 @@ def test_polynomial_evaluation_is_exact(stages, count):
 
 
 def test_polynomial_rejects_awkward_degrees(stages):
+    """Baby steps come in fours; anything else would need a different split."""
     _, st = stages
-    with pytest.raises(ValueError, match="power of two"):
+    with pytest.raises(ValueError, match="multiple of four"):
         st.evaluate_polynomial(None, np.zeros(6))
 
 
@@ -231,3 +232,68 @@ def test_he_invsqrt_over_its_declared_range(inverse_sqrt):
     # confined to the mask, which is what lets LayerNorm keep the statistic in a few slots per token
     assert np.abs(got[~used]).max() == 0.0
     assert engine.level(out) == depth - 2 * InverseSqrtMixin.invsqrt_iterations(epsilon, alpha)
+
+
+# ---------------------------------------------------------------- GELU
+class GeluStages(NumericMixin, GeluMixin, Stages):
+    pass
+
+
+@pytest.fixture
+def gelu_stages():
+    depth = 40
+    engine = ClearEngine(SMALL, depth=depth)
+    low, high = block_diagonal_masks(SMALL)
+    return engine, GeluStages(engine, SMALL, masks=low, complement_masks=high), depth
+
+
+def numpy_gelu(u):
+    return 0.5 * u * (1 + np.tanh(np.sqrt(2 / np.pi) * (u + 0.044715 * u ** 3)))
+
+
+def test_polynomial_accepts_any_multiple_of_four(stages):
+    """THOR's outer GELU polynomial has 28 coefficients; zero-padding to 32 is free and identical."""
+    engine, st = stages
+    rng = np.random.default_rng(102)
+    coefficients = rng.normal(size=28) * 0.01
+    x = rng.uniform(-0.5, 0.5, SMALL.slot_count)
+    out = st.evaluate_polynomial(engine.encrypt(x), coefficients)
+    assert np.abs(np.real(engine.decrypt(out)) - np.polyval(coefficients[::-1], x)).max() < 1e-9
+
+
+def test_gelu_matches_the_real_thing(gelu_stages):
+    """`gelu(64x)` for a ciphertext carrying the pre-activation divided by 64."""
+    engine, st, depth = gelu_stages
+    rng = np.random.default_rng(101)
+    pre_activation = rng.uniform(-GELU_SCALE, GELU_SCALE, SMALL.slot_count)
+
+    out = st.gelu(engine.encrypt(pre_activation / GELU_SCALE))
+    got = np.real(engine.decrypt(out))
+    want = numpy_gelu(pre_activation)
+
+    assert np.abs(got - want).max() < 1e-2
+    # the composite costs twelve levels and the final multiply one more
+    assert engine.level(out) == depth - 13
+
+
+def test_gelu_is_accurate_where_it_matters(gelu_stages):
+    """Relative accuracy on the values that survive the layer, not on the ones near zero."""
+    engine, st, _ = gelu_stages
+    rng = np.random.default_rng(103)
+    pre_activation = rng.uniform(-GELU_SCALE, GELU_SCALE, SMALL.slot_count)
+    got = np.real(engine.decrypt(st.gelu(engine.encrypt(pre_activation / GELU_SCALE))))
+    want = numpy_gelu(pre_activation)
+    large = np.abs(want) > 1.0
+    assert (np.abs(got - want)[large] / np.abs(want)[large]).max() < 1e-3
+
+
+def test_gelu_scale_is_a_convention_not_a_nicety(gelu_stages):
+    """Feed the composite an argument outside [-1, 1] and the degree-31 fit stops being a tanh."""
+    engine, st, _ = gelu_stages
+    outside = np.full(SMALL.slot_count, 3.0)  # the composite's own argument, not the pre-activation
+    tanh = np.real(engine.decrypt(st.he_tanh_for_gelu(engine.encrypt(outside))))
+    assert np.abs(tanh).max() > 1.0, "outside its range the composite is not bounded by 1/2"
+
+    inside = np.linspace(-1.0, 1.0, SMALL.slot_count)
+    tanh = np.real(engine.decrypt(st.he_tanh_for_gelu(engine.encrypt(inside))))
+    assert np.abs(tanh).max() < 0.51

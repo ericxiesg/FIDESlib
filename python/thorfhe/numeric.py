@@ -61,12 +61,18 @@ class NumericMixin:
     def evaluate_polynomial(self, x, coefficients):
         """Baby-step giant-step evaluation of ``sum_i coefficients[i] * x^i`` (low order first).
 
-        ``len(coefficients)`` must be a power of two of at least four. Costs
-        ``log2(len(coefficients)) + 1`` levels.
+        ``len(coefficients)`` must be a multiple of four; anything that is not a power of two is
+        zero-padded up to one. Costs ``ceil(log2(len(coefficients))) + 1`` levels.
         """
         count = len(coefficients)
-        if count < 4 or count & (count - 1):
-            raise ValueError(f"coefficient count must be a power of two >= 4, got {count}")
+        if count < 4 or count % 4:
+            raise ValueError(f"coefficient count must be a multiple of four and at least four, got {count}")
+        if count & (count - 1):
+            # zero-padding to a power of two is free: the extra babies evaluate to zero and the giant
+            # steps are the same ones THOR's uneven split would use.
+            padded = np.zeros(1 << int(np.ceil(np.log2(count))))
+            padded[:count] = coefficients
+            coefficients, count = padded, len(padded)
 
         giants = [4 * 2 ** k for k in range(int(np.log2(count // 4)))]
         basis = self.power_basis(x, [2, 3] + giants)
@@ -263,3 +269,51 @@ class InverseSqrtMixin:
             error = k * error * (3 - k * error) ** 2 / 4
 
         return b
+
+
+#: THOR's GELU: the inner polynomial of the two-stage tanh composite (degree 31, low order first).
+GELU_INNER = np.array([
+    -1.06240033e-05, 1.64454894e-04, -5.83533517e-04, -3.80912692e-04, 2.24431193e-03,
+    8.92295204e-03, -1.05277477e-02, -1.91827040e-02, -2.04634786e-01, 4.54014410e-01,
+    -5.40759203e-01, 5.67745523e00, -1.36433727e01, 1.82574621e01, -8.48849601e01,
+    1.28686741e02, 3.66720281e02, -1.01400159e03, -1.26278856e02, 2.21728878e03,
+    -9.95421415e02, -2.31059465e03, 1.73583957e03, 1.27394360e03, -1.27836230e03,
+    -3.66781716e02, 4.79663919e02, 4.94610178e01, -9.06754761e01, -2.36515790e00,
+    8.74311855e00, 1.62838703e-02,
+])[::-1].copy()
+
+#: The outer polynomial (degree 27), already carrying THOR's factor of a half.
+GELU_OUTER = np.array([
+    -1.70270667e02, 6.81076279e01, 1.79197364e03, -6.81621043e02, -8.49256169e03,
+    3.05629446e03, 2.39579397e04, -8.10435126e03, -4.48145152e04, 1.41297616e04,
+    5.86197512e04, -1.70371505e04, -5.51326382e04, 1.45532495e04, 3.77866438e04,
+    -8.87673890e03, -1.89514802e04, 3.84972853e03, 6.94169727e03, -1.16901058e03,
+    -1.84658407e03, 2.41693754e02, 3.54452276e02, -3.24499570e01, -4.91918227e01,
+    2.58122977e00, 5.78392852e00, -9.45171527e-02,
+])[::-1].copy() * 0.5
+
+#: GELU's argument is carried divided by this, so the composite's own range is about [-1, 1].
+GELU_SCALE = 64
+
+
+class GeluMixin:
+    """THOR's GELU: two polynomials in series, then one multiply.
+
+    A single minimax fit of ``tanh`` over the pre-activation range would need a degree far past what
+    is affordable, so THOR composes a degree-31 with a degree-27, which reaches the same accuracy for
+    twelve levels instead of a hopeless number. The composite approximates ``tanh(...) / 2``, and
+    ``64 * x * (t + 1/2)`` is then ``gelu(64 * x)`` to about 2e-4 relative.
+
+    The factor of 64 is a convention, not a nicety: the ciphertext carries the pre-activation divided
+    by 64 so that the composite's own argument lands in ``[-1, 1]``, which is where the fit is valid.
+    """
+
+    def he_tanh_for_gelu(self, x):
+        """``tanh(64 x * sqrt(2/pi) * (1 + ...)) / 2``, as the two-polynomial composite. Twelve levels."""
+        return self.evaluate_polynomial(self.evaluate_polynomial(x, GELU_INNER), GELU_OUTER)
+
+    def gelu(self, x):
+        """``gelu(64 x)``, for a ciphertext carrying the pre-activation divided by 64."""
+        shifted = self.add(self.he_tanh_for_gelu(x), 0.5)
+        scaled, shifted = self.align(self.multiply(x, GELU_SCALE), shifted)
+        return self.rescale(self.relinearize(self.multiply(scaled, shifted)))
