@@ -119,9 +119,18 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
             out[index] = self.add(normalised, normalised)  # THOR's final doubling, never cancelled
         return out
 
+    def _residual(self, x, y):
+        """Add a residual to a branch output. The two are never at the same level.
+
+        The skip connection has been sitting at whatever level stage 01 left it while the branch spent
+        a dozen on the attention, so FIXEDMANUAL will not add them. desilofhe aligns implicitly; here
+        it is a `level_down` on the residual, which is what the hardware does anyway.
+        """
+        return [self.add(*self.align(a, b)) for a, b in zip(x, y)]
+
     def stage_11_attention_layernorm(self, x, dense, gamma, beta, ones):
         """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels."""
-        return self.he_layernorm1([self.add(a, b) for a, b in zip(x, dense)], gamma, beta, ones)
+        return self.he_layernorm1(self._residual(x, dense), gamma, beta, ones)
 
     def stage_15_prepare_layernorm(self, x, y, *, keep_levels=3):
         """The feed-forward residual, bootstrapped back up - four bootstraps for eight ciphertexts.
@@ -130,7 +139,7 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         is deliberate: :meth:`variance_window` accepts four times the variance for the variants that
         halve their input, which is exactly the ones stage 16 uses after this.
         """
-        summed = [self.add(a, b) for a, b in zip(x, y)]
+        summed = self._residual(x, y)
         half = len(summed) // 2
         out = np.empty((len(summed),), dtype=object)
         for index in range(half):

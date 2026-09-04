@@ -177,8 +177,11 @@ class DivisionMixin:
         ``precision`` is the achieved lower bound on the normalised denominator (it ends above
         ``1 - alpha``). One level per iteration.
         """
-        a = DeltaCiphertext(ones, delta)
-        b = DeltaCiphertext(self.bootstrap(denominator), delta)
+        # `ones` is a fresh encryption and the denominator has been through a stage, so they are
+        # almost never at the same level; FIXEDMANUAL will not multiply across levels.
+        start, refreshed = self.align(ones, self.bootstrap(denominator))
+        a = DeltaCiphertext(start, delta)
+        b = DeltaCiphertext(refreshed, delta)
         error = epsilon
         iterations = 0
 
@@ -336,8 +339,21 @@ class GeluMixin:
         """``tanh(64 x * sqrt(2/pi) * (1 + ...)) / 2``, as the two-polynomial composite. Twelve levels."""
         return self.evaluate_polynomial(self.evaluate_polynomial(x, GELU_INNER), GELU_OUTER)
 
-    def gelu(self, x):
-        """``gelu(64 x)``, for a ciphertext carrying the pre-activation divided by 64."""
-        shifted = self.add(self.he_tanh_for_gelu(x), 0.5)
+    def gelu(self, x, carrier: float = 1.0):
+        """``carrier * gelu(64 * x / carrier)``, for a ciphertext carrying ``carrier * pre / 64``.
+
+        ``carrier`` exists because GELU is the one place THOR's doubled-ciphertext convention cannot
+        simply pass through. Everywhere else a ciphertext holds twice the value it represents and the
+        factor commutes with the arithmetic; here the composite's argument has to be the *actual*
+        pre-activation over 64, since the degree-31 fit is only valid on ``[-1, 1]``. So the tanh is
+        evaluated at ``x / carrier`` while the linear factor keeps the full ``x``, and the product
+        comes out on the same doubled footing as everything around it.
+        """
+        argument = x if carrier == 1.0 else self.rescale(self.multiply(x, 1.0 / carrier))
+        shifted = self.add(self.he_tanh_for_gelu(argument), 0.5)
+        # The linear factor stays 64 whatever the carrier: `x` already carries it, so `64 * x` is
+        # `carrier * pre_activation` - which is the footing the result is wanted on. Only the tanh's
+        # argument has to be un-carried. It also has to stay an integer, because an integer multiply
+        # is level- and scale-free under FIXEDMANUAL and a float one costs a rescale.
         scaled, shifted = self.align(self.multiply(x, GELU_SCALE), shifted)
         return self.rescale(self.relinearize(self.multiply(scaled, shifted)))

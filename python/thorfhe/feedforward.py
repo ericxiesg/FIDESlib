@@ -32,6 +32,10 @@ def input_mask(g: Geometry) -> np.ndarray:
 class FeedForwardStages(GeluMixin, NumericMixin, Stages):
     """Stages 12, 13 and 14 over the ``Stages`` primitive surface."""
 
+    #: How much a ciphertext here overstates the value it represents. THOR runs the whole network on
+    #: a doubled footing (see ``docs/thor_port.md``); set it to 1 to run these stages standalone.
+    carrier = 2.0
+
     def prepare_feedforward_input(self, x):
         """Pack the LayerNorm output into ``pack * n`` rotated copies with both windows filled.
 
@@ -81,8 +85,9 @@ class FeedForwardStages(GeluMixin, NumericMixin, Stages):
             merged = self.add(x[0, column], self.multiply_1j(x[1, column]))
             merged = self.bootstrap(self.rescale(self.multiply(merged, 0.5)))
             conj = self.conjugate(merged)
-            out[0, column] = self.gelu(self.add(merged, conj))
-            out[1, column] = self.gelu(self.multiply_1j(self.subtract(conj, merged)))
+            out[0, column] = self.gelu(self.add(merged, conj), carrier=self.carrier)
+            out[1, column] = self.gelu(self.multiply_1j(self.subtract(conj, merged)),
+                                       carrier=self.carrier)
         return out
 
     def prepare_output_dense_input(self, x, rep):

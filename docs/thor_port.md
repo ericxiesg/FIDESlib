@@ -1,4 +1,4 @@
-# Porting THOR onto fideslib (stages 01-18)
+# Porting THOR onto fideslib (stages 01-18, one layer end to end)
 
 `python/thorfhe/` is THOR's BERT layer rewritten against `pyfideslib.Engine`, so the same code runs on
 OpenFHE (CPU) and FIDESlib (CUDA). This note covers what stages 01-05 do, the three places the port
@@ -292,6 +292,77 @@ GELU's degree-31/27 composite, because the `/40` in stage 17 puts the argument w
 It is accurate to 1.1e-2 for a pre-activation in +/-10, and past that it *plateaus* at 0.18 rather
 than diverging, which is the opposite of how the GELU inner polynomial fails. End to end the head
 reproduces `w_cls @ tanh(W @ cls + b) + b_cls` to 1.4e-3, the tanh fit being the whole of the error.
+
+## The doubled-ciphertext convention
+
+**Every ciphertext in THOR carries twice the value it represents.** This is not stated anywhere in
+`he.py`; it was found by running one real BERT layer against the plaintext model and reading the
+best-fit scale of every stage (`python -m thorfhe.bench fhe --per-stage`). Three things maintain it:
+
+* the weight encoders halve (`gather_upper_diagonal_batch` returns `(real - i*imag) / 2`), so a
+  plaintext-ciphertext product of a doubled input comes back singled;
+* the bias is added **before** the `y + conj(y)` that doubles, so relative to a doubled input the
+  bias is single - which is why the projections compute `x @ w.T + b` on the doubled footing and not,
+  as it first appears, `x @ w.T + 2b`;
+* LayerNorm's final doubling, which is never cancelled, puts the next layer back on the same footing.
+
+The practical consequence is that **layer 0 has to be entered on that footing too**: the embeddings
+are encrypted at `2 * hidden`. Feeding them at 1x makes every stage individually plausible and the
+layer as a whole wrong by about 50% RMS.
+
+GELU is the single exception, and it has to be. The composite is only valid for an argument in
+`[-1, 1]`, so it needs the *actual* pre-activation over 64, not a multiple of it.
+`GeluMixin.gelu(x, carrier)` therefore divides the tanh's argument by the carrier while keeping the
+linear factor at 64, which lands the result back on the doubled footing. That costs one level (14
+rather than 13) and is a deliberate deviation from `he.py`.
+
+## The softmax, calibrated against a real model
+
+Three things had to be right before stage 07 worked on real activations. Each failed quietly - the
+chain ran and produced plausible-looking numbers.
+
+**The key scaling is 1/64, not THOR's 1/512.** A softmax is not scale-invariant, and `he_softmax(x)`
+approximates `softmax(x)` - which is what `test_stage9` pins down, and the units THOR's window is in
+(its narrow `[-27.2, 21.7]` is the range of a BERT-base attention score). Counting the factors:
+q and k are each doubled, stage 06's own masks contribute a half, and `stage_07_softmax`'s bootstrap
+fold doubles again, so `he_softmax` sees `4 * (q.k) * scale`. THOR writes 1/512, which its own
+softmax must compensate elsewhere; 1/64 is what this port's stages measure.
+
+**The attention mask is a list, one plaintext per score ciphertext.** The scores are held as
+diagonals: slot `(group, tau, block)` of ciphertext `ct` carries key position
+`(ct*pack + group + tau) mod dim`. A mask keyed on the slot alone can only say "this *query* is
+padding"; the denominator needs "this *key* position is padding". With the wrong mask the denominator
+sums the exponential over all 128 key positions and the softmax is off by a third.
+
+**The window has to be calibrated on the denominator, not on the scores.** `softmax.calibrate`
+rejects a window whose row sums exceed 1, because the Goldschmidt iteration needs a denominator in
+`[epsilon, 1]`. The `thor-openfhe` draft reaches the same conclusion from the other direction: a
+per-element range is not enough, the row sum has to be calibrated with it.
+
+With all three right, stage 07 reproduces the true softmax to `2.3e-6` relative, at a best-fit scale
+of `1.0023` - which is not error but THOR's own `int(1/(2*delta)) + 1`, a fixed slight
+over-normalisation that the `thor-openfhe` draft measures independently as `1.0022567`.
+
+## One layer, end to end, on a real checkpoint
+
+`textattack/bert-base-uncased-MRPC`, a real MRPC pair, layer 0 encrypted and the rest in plaintext:
+
+| stage | best-fit scale | relRMSE |
+|---|---:|---:|
+| query, value | 2.0000 | 2.9e-7 |
+| scores (06) | 0.5000 | 2.9e-7 |
+| softmax (07) | 1.0023 | 2.3e-6 |
+| attention dense (10) | 2.0044 | 3.0e-4 |
+| LayerNorm 1 (11) | 1.9998 | 6.5e-4 |
+| intermediate (12) | 0.0313 | 4.8e-4 |
+| GELU (13) | 2.0001 | 2.3e-3 |
+| output dense (14) | 2.0000 | 2.2e-3 |
+| LayerNorm 2 (16) | 1.9998 | 1.1e-3 |
+
+The layer output is faithful to `1.05e-3` relative RMSE, max absolute `3.7e-3` - the same order as the
+`thor-openfhe` draft's v21 baseline (RMSE ~1.3e-3, max ~9e-3). Every number above is exact arithmetic
+under the FIXEDMANUAL contract, so it measures the *schedule and algebra*; CKKS noise is what a GPU run
+adds on top.
 
 ## Open questions
 

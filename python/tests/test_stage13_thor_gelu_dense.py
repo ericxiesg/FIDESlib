@@ -22,6 +22,10 @@ from thorfhe.numeric import GELU_SCALE
 
 F = THOR_FEEDFORWARD
 INTERMEDIATE = 4 * F.features
+#: THOR runs the network on a doubled footing - every ciphertext carries twice the value it
+#: represents (see ``docs/thor_port.md``). ``FeedForwardStages.carrier`` says so, and GELU is the one
+#: stage that has to un-carry its argument, because its polynomial is only valid on [-1, 1].
+CARRIER = FeedForwardStages.carrier
 #: High enough that the schedule, not the level budget, is what the chain is tested against.
 DEPTH, BOOTSTRAP_LEVEL = 80, 60
 
@@ -97,7 +101,8 @@ def chain(model):
     """12 -> 13 -> 14 once; the individual tests then read whichever intermediate they need."""
     engine = ClearEngine(F, depth=DEPTH, bootstrap_level=BOOTSTRAP_LEVEL)
     st = stages(engine)
-    s12 = st.stage_12_intermediate_dense(encode_six_blocks(engine, model["x"]), model["e1"],
+    s12 = st.stage_12_intermediate_dense(encode_six_blocks(engine, CARRIER * model["x"]),
+                                         model["e1"],
                                          zero_plaintexts(2, F.n_output_ciphertexts))
     s13 = st.stage_13_gelu(s12)
     s14 = st.stage_14_output_dense(s13, model["e2"], zero_plaintexts(F.n_output_ciphertexts))
@@ -109,17 +114,23 @@ def test_encoded_contraction_matches_thor(model):
     assert model["e2"].shape == (2, 8, 6, 64)
 
 
-def test_gelu_costs_thirteen_levels_and_leaves_the_shape_alone(chain):
+def test_gelu_costs_fourteen_levels_and_leaves_the_shape_alone(chain):
+    """Thirteen for the two-polynomial composite, plus one to un-carry the tanh's argument."""
     engine, s12, s13, _ = chain
     assert s13.shape == s12.shape == (2, F.n_output_ciphertexts)
-    assert s13[0, 0].level == BOOTSTRAP_LEVEL - 13
+    assert s13[0, 0].level == BOOTSTRAP_LEVEL - 14
     assert s13[0, 0].scale_exp == 1
 
 
 def test_stage_13_is_gelu_in_place(chain, model):
-    """Elementwise, in the layout stage 12 left behind - so the fold has to have cancelled exactly."""
+    """``2 * gelu(x @ W1.T)`` elementwise, in the layout stage 12 left behind.
+
+    The factor is the point: GELU is not linear, so the carrier cannot pass through it the way it
+    passes through every other stage. ``gelu(x, carrier)`` divides the tanh's argument by the carrier
+    and keeps the linear factor at 64, which lands the result back on the doubled footing.
+    """
     engine, _, s13, _ = chain
-    want = numpy_gelu(model["x"] @ model["w1"].T)
+    want = CARRIER * numpy_gelu(model["x"] @ model["w1"].T)
     error = 0.0
     for rep in range(2):
         for ct in range(F.n_output_ciphertexts):
@@ -140,7 +151,7 @@ def test_stage_14_contracts_to_six_blocks(chain, model):
     """`gelu(x @ W1.T) @ W2.T`, in the 6-block layout LayerNorm reads."""
     engine, _, _, s14 = chain
     assert s14.shape == (F.n_output_ciphertexts,)
-    want = numpy_gelu(model["x"] @ model["w1"].T) @ model["w2"].T
+    want = CARRIER * numpy_gelu(model["x"] @ model["w1"].T) @ model["w2"].T
     error = 0.0
     for ct in range(F.n_output_ciphertexts):
         slots = np.asarray(engine.decrypt(s14[ct]), dtype=complex)

@@ -230,9 +230,12 @@ def encode_bias(g: Geometry, b: np.ndarray, scale: float = 1.0) -> np.ndarray:
     """
     if b.shape != (g.features,):
         raise ValueError(f"bias must be ({g.features},), got {b.shape}")
+    # `out_blocks`, not `n_blocks`: THOR's `encode_b(b, n_blocks=features // n_out)` fills the first
+    # `features // n_out` slots of a token. The two coincide for the QKV geometry and do not for the
+    # attention dense one, which is twelve blocks of 64 in and six of 128 out.
     return encode_bias_raw(b, dim=g.dim, pack=g.pack, n_slot=g.n_slot, group_size=g.group_size,
                            slot_count=g.slot_count, n_out=g.n_out, n_blocks=g.out_blocks,
-                           slot_indices=np.arange(g.n_blocks), scale=scale)
+                           slot_indices=np.arange(g.out_blocks), scale=scale)
 
 
 # ---------------------------------------------------------------- pooler and classifier

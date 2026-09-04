@@ -1,6 +1,10 @@
 # 背景：这个仓库在做什么（给远程调试端看）
 
-日期：2026-09-03。分支 `bootstrap-dev`，远程默认 `gitcode/bootstrap-dev`。
+日期：2026-09-03，2026-09-04 更新。分支 `bootstrap-dev`，远程默认 `gitcode/bootstrap-dev`。
+
+> **2026-09-04：远程 V100 agent 已下线**（GPU 排队）。这份文档仍然有效，是给它回来时读的；
+> 当前状态、发现和 TODO 在 [STATUS.md](STATUS.md)。此后所有数字都来自本机 numpy 的 `ClearEngine`，
+> GPU 路径一行都没跑过。
 
 ## 一句话
 
