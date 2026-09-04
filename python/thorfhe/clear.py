@@ -148,6 +148,10 @@ class ClearEngine:
     def level_down(self, ct: ClearCiphertext, by: int) -> ClearCiphertext:
         return ClearCiphertext(ct.slots.copy(), ct.level - by, ct.scale_exp)
 
+    def relinearize(self, ct: ClearCiphertext) -> ClearCiphertext:
+        """No-op: ciphertext degree is not modelled here, only the values, levels and scales."""
+        return ct
+
     def ntt(self, ct):
         return ct
 

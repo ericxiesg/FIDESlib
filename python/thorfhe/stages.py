@@ -78,6 +78,9 @@ class Stages:
     def rescale(self, x):
         return self.engine.rescale(x)
 
+    def relinearize(self, x):
+        return self.engine.relinearize(x)
+
     def level_down(self, x, by: int):
         return self.engine.level_down(x, by)
 

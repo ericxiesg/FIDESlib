@@ -118,3 +118,93 @@ def test_interval_sum_folds_the_slot_vector(masks):
 
     windows = values.reshape(-1, interval)
     assert np.abs(np.real(folded).reshape(-1, interval) - windows.sum(axis=0)).max() < 1e-6
+
+
+# ---------------------------------------------------------------- the attention score itself
+@pytest.fixture(scope="module")
+def score_masks():
+    from thorfhe.attention import ccmm_masks
+    return ccmm_masks(G)
+
+
+def build_score(masks, score_masks, depth=30):
+    from thorfhe.attention import AttentionScore
+    (low, high), transpose, copies, attention = masks
+    engine = ClearEngine(G, depth=depth)
+    return engine, AttentionScore(engine, G, masks=low, complement_masks=high, transpose=transpose,
+                                  copies=copies, attention=attention, ccmm=score_masks)
+
+
+def expected_scores(engine, q, k):
+    """`out[ct][group, tau, b] = (Q_b K_b^T)[tau, (ct*pack + group + tau) mod dim]`."""
+    per_head = np.stack([q[:, G.n_out * h:G.n_out * (h + 1)] @ k[:, G.n_out * h:G.n_out * (h + 1)].T
+                         for h in range(G.n_blocks)])
+    expect = np.zeros((2 * G.n_output_ciphertexts, G.slot_count))
+    for ct in range(2 * G.n_output_ciphertexts):
+        for group in range(G.pack):
+            diagonal = ct * G.pack + group
+            for tau in range(G.dim):
+                for block in range(G.n_blocks):
+                    expect[ct, G.slot(group, tau, block)] = per_head[block, tau, (diagonal + tau) % G.dim]
+    return expect
+
+
+def test_attention_score_is_exactly_q_k_transpose(masks, score_masks):
+    """Stage 06 computes Q K^T per head - to machine precision, not just approximately."""
+    rng = np.random.default_rng(21)
+    q = rng.normal(size=(G.dim, G.features)) * 0.1
+    k = rng.normal(size=(G.dim, G.features)) * 0.1
+
+    engine, stages = build_score(masks, score_masks)
+    out = stages.stage_06_attention_score(encode_qkv_output(engine, q), encode_qkv_output(engine, k))
+
+    assert out.shape == (2 * G.n_output_ciphertexts,)
+    got = np.stack([np.asarray(engine.decrypt(o), dtype=complex).real for o in out])
+    assert np.abs(got - expected_scores(engine, q, k)).max() < 1e-12
+    # the score is real; a surviving imaginary part would mean the conjugate fold went wrong
+    assert max(np.abs(np.asarray(engine.decrypt(o), dtype=complex).imag).max() for o in out) == 0.0
+
+
+def test_attention_score_costs_four_levels(masks, score_masks):
+    """transpose, the group rotation, make_copies and the product's own rescales."""
+    rng = np.random.default_rng(22)
+    q = rng.normal(size=(G.dim, G.features)) * 0.1
+    k = rng.normal(size=(G.dim, G.features)) * 0.1
+    engine, stages = build_score(masks, score_masks, depth=30)
+    out = stages.stage_06_attention_score(encode_qkv_output(engine, q), encode_qkv_output(engine, k))
+    assert [engine.level(o) for o in out] == [30 - 4] * 8
+
+
+def test_he_py_accumulator_table_is_wrong(masks, score_masks):
+    """Pin the divergence from he.py, so a well-meaning "fix" back to the literal table fails here.
+
+    he.py routes the `in_index % pack == 0` contribution by `out_index == 0`; the rule that makes the
+    result equal Q K^T is the one its own other branch uses, `offset < 0`. They agree for
+    `in_index // pack == 1` and differ for 2 and 3 - in_index 32 and 48 of the 64 inner-product terms.
+    """
+    from thorfhe.attention import AttentionScore
+
+    class HePyRouting(AttentionScore):
+        def accumulator_column(self, out_index, offset, j):
+            if j == 0:
+                return 2 if out_index == 0 else 0
+            return super().accumulator_column(out_index, offset, j)
+
+    rng = np.random.default_rng(23)
+    q = rng.normal(size=(G.dim, G.features)) * 0.1
+    k = rng.normal(size=(G.dim, G.features)) * 0.1
+
+    (low, high), transpose, copies, attention = masks
+    engine = ClearEngine(G, depth=30)
+    stages = HePyRouting(engine, G, masks=low, complement_masks=high, transpose=transpose,
+                         copies=copies, attention=attention, ccmm=score_masks)
+    out = stages.stage_06_attention_score(encode_qkv_output(engine, q), encode_qkv_output(engine, k))
+    got = np.stack([np.asarray(engine.decrypt(o), dtype=complex).real for o in out])
+
+    expect = expected_scores(engine, q, k)
+    error = np.abs(got - expect).max()
+    assert error > 0.1 * np.abs(expect).max(), "he.py's routing should be visibly wrong, not marginal"
+
+    # and it is wrong only where the two rules disagree: the middle two output ciphertexts of each half
+    per_ciphertext = [np.abs(got[i] - expect[i]).max() for i in range(8)]
+    assert [i for i, e in enumerate(per_ciphertext) if e > 1e-12] == [1, 2, 5, 6]

@@ -135,8 +135,41 @@ The draft OpenFHE repo (`qkv_pcmm_openfhe.cpp`) that the handoff names as the re
 available in this checkout, so the reference here is the linear algebra itself, which is stronger: it
 is independent of both implementations.
 
+## Stage 06, and a bug in he.py
+
+Stage 06 forms the attention scores as a ciphertext-ciphertext product. It runs in three parts, each
+an exact operation with a stated formula (`thorfhe/attention.py`):
+
+| part | what it does |
+|---|---|
+| `transpose_upper_to_lower` | a permutation of the packed key: `out[ct][group, tau, b] = k[t, f]` with `ct*pack + group = (t - d) mod n_out` and `tau = d + n_out * ((d > t mod n_out) XOR (t // n_out))` |
+| `make_copies` | broadcasts every diagonal across all groups: `copies[l][group, t, b] = q[t, n_out*b + (l+t) mod n_out] / 2` |
+| `stage_06_attention_score` | `out[ct][group, tau, b] = (Q_b K_b^T)[tau, (ct*pack + group + tau) mod dim]` |
+
+All three were derived by probing the numpy model with one-hot inputs, the same way the QKV layout was,
+and all three are checked against those formulas with zero tolerance.
+
+**`he.py` computes the wrong attention score.** The inner product accumulates into four columns per
+output ciphertext, and a contribution goes to columns 2-3 or 0-1 depending on whether the source
+ciphertext index wrapped past zero. The `in_index % pack != 0` branch routes on exactly that
+(`i - in_index // pack < 0`). The `in_index % pack == 0` branch instead routes on `i == 0`. The two
+agree when `in_index // pack == 1` and disagree when it is 2 or 3 - so two of the sixty-four
+inner-product terms land in the wrong accumulator, where they are then conjugated and multiplied by i
+before being summed.
+
+The effect is not marginal: with `he.py`'s routing the score is off by ~32% of its own magnitude, in
+output ciphertexts 1, 2, 5 and 6. With the other rule it is `Q K^T` to machine precision (3e-16). The
+port uses the correct rule, `AttentionScore.accumulator_column` is overridable, and
+`test_he_py_accumulator_table_is_wrong` pins the difference so a well-meaning revert fails.
+
+This is worth double-checking against THOR's reported MRPC accuracy before treating it as settled -
+an error this size in the attention scores should be visible end to end, so either the artifact
+differs from the paper's numbers here or something compensates downstream.
+
 ## Open questions
 
+* **The he.py score bug.** Confirmed against the linear algebra, not against THOR's own outputs (the
+  draft repo is not in this checkout). Re-check when a real MRPC sample runs end to end.
 * **Layer >= 1 input.** `stage_01_complexify_x` has a second branch, for the `2 * n_input_ciphertexts`
   real/imaginary ciphertexts a previous layer produces, which folds in a rotation by `n_blocks // 2`.
   It is ported but only reachable once stage 16 exists, so it is untested.

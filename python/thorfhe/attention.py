@@ -184,3 +184,128 @@ class AttentionStages(Stages):
                     copies[index * g.pack + 2 * chunk_index + offset] = real
                     copies[(index + n // 2) * g.pack + 2 * chunk_index + offset] = imag
         return copies
+
+
+def ccmm_masks(g: Geometry) -> dict[int, dict[int, np.ndarray]]:
+    """THOR ``pre_encode_masks``, the ``ccmm`` family: how a rotated product is split four ways.
+
+    Mask 1 is the complement of mask 0 when ``n`` is a multiple of ``pack``, and mask 3 is literally
+    ``1 - m0 - m1 - m2`` otherwise, so the four always partition the slot vector. ``he.py`` forms the
+    last piece by subtracting the others from the un-rescaled product instead; that mixes two levels,
+    so the port multiplies by the mask THOR already stores.
+    """
+    require_thor_shape(g)
+    slot = np.arange(g.slot_count)
+    masks: dict[int, dict[int, np.ndarray]] = {0: {}, 1: {}, 2: {}, 3: {}}
+    for n in range(1, g.dim):
+        j = n % g.pack
+        high = (slot % g.group_size) >= (g.group_size - g.n_slot * n)
+        m0 = np.ones(g.slot_count)
+        m0[high] = 0
+        m1 = np.zeros(g.slot_count)
+        m1[high] = 1
+        if j == 0:
+            masks[0][n], masks[1][n] = m0, m1
+            continue
+        m0[: g.group_size * j] = 0
+        m1[-g.group_size:] = 0
+        if j > 1:
+            m1[: g.group_size * (j - 1)] = 0
+        m2 = np.ones(g.slot_count)
+        m2[high] = 0
+        m2[g.group_size * j:] = 0
+        masks[0][n], masks[1][n], masks[2][n] = m0, m1, m2
+        masks[3][n] = np.ones(g.slot_count) - m0 - m1 - m2
+    return masks
+
+
+class AttentionScore(AttentionStages):
+    """Stage 06: the ciphertext-ciphertext product that forms the attention scores.
+
+    Computes, exactly, ``S[b] = Q_b K_b^T`` for each of the ``n_blocks`` heads, packed by diagonals::
+
+        out[ct][group, tau, b] = S[b][tau, (ct * pack + group + tau) mod dim]
+
+    over ``2 * n_output_ciphertexts`` ciphertexts, since the score matrix is ``dim x dim`` per head
+    while the projections were ``dim x n_out``.
+
+    **This diverges from he.py, deliberately.** ``he.py``'s accumulator table for the
+    ``in_index % pack == 0`` case sends the contribution to columns 2-3 when ``i == 0`` and to columns
+    0-1 otherwise. The rule its own ``in_index % pack != 0`` branch uses - columns 2-3 exactly when the
+    source index wrapped, ``i - in_index // pack < 0`` - is the one that makes the result equal
+    ``Q K^T``; the two agree for ``in_index // pack == 1`` and disagree for 2 and 3, which corrupts two
+    of the sixty-four inner-product terms in half the output ciphertexts. See docs/thor_port.md.
+    """
+
+    def __init__(self, engine, geometry: Geometry, ccmm=None, **kwargs):
+        super().__init__(engine, geometry, **kwargs)
+        #: ``{column: {n: mask}}`` from :func:`ccmm_masks`.
+        self.ccmm = ccmm
+
+    def accumulator_column(self, out_index: int, offset: int, j: int) -> int:
+        """Which pair of accumulator columns a contribution lands in.
+
+        Columns 2-3 when the source ciphertext index wrapped past zero, 0-1 otherwise. ``he.py`` uses
+        exactly this for ``j != 0`` but keys the ``j == 0`` case on ``out_index == 0`` instead, which
+        differs for ``block`` 2 and 3; overridable so a test can pin that difference down.
+        """
+        return 2 if offset < 0 else 0
+
+    def _key_as_complex(self, k):
+        """Fold the transposed key and its group-rotated copy into one complex ciphertext."""
+        g = self.g
+        lower = self.transpose_upper_to_lower(k)
+        out = np.empty((4,), dtype=object)
+        for index in range(4):
+            rotated = self.rotate_internal_attention(lower[index], g.n_out)
+            # rotate_internal_attention spent a level, so the un-rotated half has to follow it down.
+            out[index] = self.add(self.level_down(lower[index], 1), self.multiply_1j(rotated))
+        return out
+
+    def stage_06_attention_score(self, q, k):
+        g = self.g
+        out_dim = 4
+        key = self._key_as_complex(k)
+        copies = self.make_copies(q)
+
+        accumulator = np.full((out_dim, 4), None, dtype=object)
+
+        def accumulate(index, value):
+            if accumulator[index] is None:
+                accumulator[index] = value
+            else:
+                self.add_inplace(accumulator[index], value)
+
+        # in_index 0 needs no rotation and no split; level_down aligns it with the rescaled rest.
+        for i in range(out_dim):
+            accumulator[i, 0] = self.level_down(self.multiply(key[i], copies[0]), by=1)
+
+        for in_index in range(1, g.n_out):
+            block, j = divmod(in_index, g.pack)
+            rotation = g.group_size * j - g.n_slot * in_index
+
+            pieces = np.full((out_dim, 4), None, dtype=object)
+            for i in range(out_dim):
+                product = self.multiply(self.rotate(key[i], rotation), copies[in_index])
+                rescaled = self.rescale(product)
+                for column in ((0, 1) if j == 0 else (0, 1, 2, 3)):
+                    pieces[i, column] = self.multiply(self.ccmm[column][in_index], rescaled)
+
+            for i in range(out_dim):
+                sources = [(i - block, 0)] if j == 0 else [(i - 1 - block, 2), (i - block, 0)]
+                for offset, first_column in sources:
+                    column = self.accumulator_column(i, offset, j)
+                    accumulate((i, column), pieces[offset % 4, first_column])
+                    accumulate((i, column + 1), pieces[offset % 4, first_column + 1])
+
+        output = np.empty((2 * out_dim,), dtype=object)
+        for i in range(out_dim):
+            parts = [self.relinearize(accumulator[i, c]) for c in range(4)]
+            parts[1] = self.rotate(parts[1], g.group_size)
+            parts[3] = self.rotate(parts[3], g.group_size)
+            parts[2] = self.multiply_1j(self.conjugate(self.add(parts[2], parts[3])))
+            merged = self.add(self.add(parts[0], parts[1]), parts[2])
+            conjugated = self.conjugate(merged)
+            output[i] = self.rescale(self.add(merged, conjugated))
+            output[i + out_dim] = self.rescale(self.multiply_1j(self.subtract(conjugated, merged)))
+        return output
