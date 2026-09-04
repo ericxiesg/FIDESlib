@@ -15,12 +15,16 @@ from .encoding import (
     encode_bias,
     encode_bias_raw,
     encode_weight,
+    FF_SLOT_INDICES,
+    encode_weight_ff,
     encode_weight_raw,
     lower_diagonal_entry,
     to_diagonal_blocks,
 )
-from .geometry import SMALL, THOR_ATTENTION_DENSE, THOR_BERT, Geometry
+from .geometry import (FEEDFORWARD_STRIDE, FEEDFORWARD_WINDOW, SMALL, THOR_ATTENTION_DENSE,
+                       THOR_BERT, THOR_FEEDFORWARD, Geometry)
 from .dense import DenseStages
+from .feedforward import FeedForwardStages
 from .layernorm import LayerNormStages
 from .he import LightWeights, decrypt_ciphertexts, encrypt_activations, plan_rotation_keys
 from .stages import Stages
@@ -37,6 +41,7 @@ __all__ = [
     "ClearCiphertext",
     "ClearEngine",
     "DenseStages",
+    "FeedForwardStages",
     "Geometry",
     "LayerNormStages",
     "LightWeights",
@@ -44,6 +49,9 @@ __all__ = [
     "SMALL",
     "THOR_ATTENTION_DENSE",
     "THOR_BERT",
+    "THOR_FEEDFORWARD",
+    "FEEDFORWARD_WINDOW",
+    "FEEDFORWARD_STRIDE",
     "Stages",
     "block_diagonal_masks",
     "decode_linear_output",
@@ -51,6 +59,8 @@ __all__ = [
     "encode_bias",
     "encode_bias_raw",
     "encode_weight",
+    "FF_SLOT_INDICES",
+    "encode_weight_ff",
     "encode_weight_raw",
     "encrypt_activations",
     "decrypt_ciphertexts",

@@ -121,8 +121,15 @@ def encode_weight_raw(w: np.ndarray, *, dim: int, pack: int, n_slot: int, group_
 
     Returns an ``(out_ct, diag_count, n_in // 2)`` object array of slot vectors.
     """
+    return _pack_diagonals(to_diagonal_blocks(w, (n_out, n_in)), dim=dim, pack=pack, n_slot=n_slot,
+                           group_size=group_size, slot_count=slot_count, n_in=n_in, n_out=n_out,
+                           slot_indices=slot_indices, scale=scale)
+
+
+def _pack_diagonals(diag_blocks, *, dim, pack, n_slot, group_size, slot_count, n_in, n_out,
+                    slot_indices, scale):
+    """The shared body: gather each block diagonal and lay it out over the slots."""
     n_in_complex = n_in // 2
-    diag_blocks = to_diagonal_blocks(w, (n_out, n_in))
     diag_count = diag_blocks.shape[0]
     n_out_packed = n_out // pack
     pack_range = np.arange(pack)
@@ -145,6 +152,32 @@ def encode_weight_raw(w: np.ndarray, *, dim: int, pack: int, n_slot: int, group_
                 msg[positions] = values.transpose(0, 2, 1)
                 messages[out_ct, diag_index, n] = msg
     return messages
+
+
+#: THOR ``FF_SLOT_INDICES``: the feed-forward stages carry twelve blocks as two windows of six.
+FF_SLOT_INDICES = np.array([0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13])
+
+
+def encode_weight_ff(w: np.ndarray, *, dim: int, pack: int, n_slot: int, group_size: int,
+                     slot_count: int, n_in: int, n_out: int, split: int = 4,
+                     slot_indices=FF_SLOT_INDICES, scale: float = 1.0):
+    """THOR ``model_encoder.encode_w_ff``: a tall weight split into pieces and packed two at a time.
+
+    The feed-forward expansion is (4 * features, features), which does not fit one block diagonal, so
+    THOR splits it into ``split`` pieces and stacks them two at a time. Each ``rep`` therefore carries
+    twelve block rows where the attention stages carry six, laid out as two windows of six per token -
+    which is what ``FF_SLOT_INDICES`` and the ``block_diag_2`` masks (modulo 8, not 16) are about.
+
+    Returns a ``(2, out_ct, diag_count, n_in // 2)`` object array.
+    """
+    pieces = [to_diagonal_blocks(piece, (n_out, n_in)) for piece in np.vsplit(w, split)]
+    reps = []
+    for rep in range(2):
+        combined = np.concatenate((pieces[2 * rep], pieces[2 * rep + 1]), axis=1)
+        reps.append(_pack_diagonals(combined, dim=dim, pack=pack, n_slot=n_slot,
+                                    group_size=group_size, slot_count=slot_count, n_in=n_in,
+                                    n_out=n_out, slot_indices=slot_indices, scale=scale))
+    return np.stack(reps)
 
 
 def encode_weight(g: Geometry, w: np.ndarray, scale: float = 1.0) -> np.ndarray:
@@ -200,20 +233,23 @@ def encode_bias(g: Geometry, b: np.ndarray, scale: float = 1.0) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- masks
-def block_diagonal_masks(g: Geometry) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+def block_diagonal_masks(g: Geometry, stride: int | None = None,
+                        width: int | None = None) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
     """``rotate_internal`` masks and their complements, keyed by delta.
 
-    Mask ``d`` selects the slots with ``slot % n_slot < d``. THOR stores these per mode
-    (``block_diag_1`` splits at 12 blocks, ``block_diag_2`` at 6); here the split point is ``n_blocks``,
-    so one family covers both.
+    Mask ``d`` selects the slots with ``slot % stride < d``, restricted to the ``width`` that carry
+    data. THOR has two families: ``block_diag_1`` wraps twelve blocks in a token's sixteen slots, and
+    ``block_diag_2`` wraps six in a *half* token's eight - its masks are modulo 8, not 16. Passing
+    ``stride`` and ``width`` gives either; the defaults give the first.
 
     The complements exist because ``Stages.rotate_internal`` multiplies by both instead of masking once
-    and subtracting: that keeps the two halves at the same scale under FIXEDMANUAL. Only the first
-    ``n_blocks`` slots of a token carry data, so the complement is restricted to those - masking the
-    padding slots back in would rotate garbage into the used window.
+    and subtracting: that keeps the two halves at the same scale under FIXEDMANUAL. Only the used slots
+    may be masked back in - the padding would otherwise rotate garbage into the window.
     """
-    within = np.arange(g.slot_count) % g.n_slot
-    used = within < g.n_blocks
-    low = {d: ((within < d) & used).astype(float) for d in range(1, g.n_slot + 1)}
-    high = {d: ((within >= d) & used).astype(float) for d in range(1, g.n_slot + 1)}
+    stride = g.n_slot if stride is None else stride
+    width = g.n_blocks if width is None else width
+    within = np.arange(g.slot_count) % stride
+    used = within < width
+    low = {d: ((within < d) & used).astype(float) for d in range(1, stride + 1)}
+    high = {d: ((within >= d) & used).astype(float) for d in range(1, stride + 1)}
     return low, high

@@ -109,6 +109,16 @@ THOR_BERT = Geometry(dim=128, pack=16, n_slot=16, n_blocks=12, features=768, n_i
 THOR_ATTENTION_DENSE = Geometry(dim=128, pack=16, n_slot=16, n_blocks=12, features=768,
                                 n_in=64, n_out=128)
 
+#: The feed-forward stages (12 and 14): twelve blocks of 128 in a token's sixteen slots, but laid out
+#: as two windows of six (``FF_SLOT_INDICES``) and recombined with ``block_diag_2`` - a window of six
+#: on a stride of eight. The window is a property of the product, not of the packing, so it is passed
+#: to ``pcmm`` rather than carried here.
+THOR_FEEDFORWARD = Geometry(dim=128, pack=16, n_slot=16, n_blocks=12, features=768,
+                            n_in=128, n_out=128)
+
+#: The window and stride ``block_diag_2`` uses, i.e. what the feed-forward ``pcmm`` needs.
+FEEDFORWARD_WINDOW, FEEDFORWARD_STRIDE = 6, 8
+
 #: A 4096-slot (log N = 13) instance with the same structure, small enough to run under OpenFHE on a
 #: laptop while keeping BERT's 128 tokens. ``pack != n_slot`` on purpose: THOR uses 16 for both, so a
 #: port that conflated them would still pass at production size.

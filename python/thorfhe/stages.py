@@ -187,28 +187,34 @@ class Stages:
                 output[out_index, diag_index] = self.rescale(temp)
         return output
 
-    def rotate_internal(self, x, delta: int):
-        """Rotate the used blocks of every token by ``delta``, wrapping within the ``n_blocks`` window.
+    def rotate_internal(self, x, delta: int, *, window=None, masks=None, complements=None):
+        """Rotate the used blocks of every token by ``delta``, wrapping within ``window`` blocks.
 
-        Costs exactly one level, which is what ``pcmm`` assumes when it drops the un-rotated term by one.
+        ``window`` defaults to the geometry's ``n_blocks`` (THOR's ``block_diag_1``); the feed-forward
+        stages pass 6, with masks built on a stride of 8 (``block_diag_2``). Costs exactly one level,
+        which is what ``pcmm`` assumes when it drops the un-rotated term by one.
         """
         if delta == 0:
             return self.level_down(x, by=1)
-        low, high = self.masks[delta], self.complement_masks[delta]
-        rotated = self.add(self.rotate(self.multiply(high, x), -delta),
-                           self.rotate(self.multiply(low, x), self.g.n_blocks - delta))
+        window = self.g.n_blocks if window is None else window
+        masks = self.masks if masks is None else masks
+        complements = self.complement_masks if complements is None else complements
+        rotated = self.add(self.rotate(self.multiply(complements[delta], x), -delta),
+                           self.rotate(self.multiply(masks[delta], x), window - delta))
         return self.rescale(rotated)
 
-    def pcmm(self, ws, xs):
+    def pcmm(self, ws, xs, *, window=None, masks=None, complements=None):
         """Block-diagonal plaintext-ciphertext matrix product: the sum of the rotated partial products."""
         out_dim, diag_dim, _ = ws.shape
+        window = self.g.n_blocks if window is None else window
         submatrices = self.parallel_diagonal_pc_mult(ws, xs)
         output = np.full((out_dim,), None, dtype=object)
         for out_index in range(out_dim):
             temp = self.level_down(submatrices[out_index, 0], by=1)
             for diag_index in range(1, diag_dim):
-                self.add_inplace(temp, self.rotate_internal(submatrices[out_index, diag_index],
-                                                            self.g.n_blocks - diag_index))
+                rotated = self.rotate_internal(submatrices[out_index, diag_index], window - diag_index,
+                                               window=window, masks=masks, complements=complements)
+                self.add_inplace(temp, rotated)
             output[out_index] = temp
         return output
 
