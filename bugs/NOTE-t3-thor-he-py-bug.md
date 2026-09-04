@@ -79,3 +79,35 @@ FHE 那一层（log_n=16）没有做，CPU 上太慢；等 stage_07 补齐、能
 
 stage_07 softmax（Stockmeyer 多项式、he_exp1/2、he_inv、update_inv_D、bootstrap）——
 是剩下最大的一块，而且是近似运算，验证方式要换成误差阈值而不是逐槽精确。
+
+---
+
+## 补充（stage_07/08 完成后）
+
+T3 全部完成。`python/thorfhe/` 现在有 stage_01–08。numpy 引擎（严格 FIXEDMANUAL）上的实测：
+
+| 检查 | 结果 |
+|---|---|
+| stage_06 = `Q K^T` | 3.3e-16（逐槽） |
+| stage_08 = `A V` | 3.1e-16（逐槽） |
+| stage_07 softmax 行和 | 1.0023（`output_alpha = 0.01` 之内） |
+| stage_07 权重 vs 真 softmax | max 2.6e-3，mean 1.9e-5 |
+| stage_06→07→08 vs `softmax(QK^T)V` | 相对误差 < 2% |
+
+`pytest python/tests -q` 在没有编译扩展的机器上是 **33 passed, 40 skipped**。
+
+### 两个坑，后面接手的人务必先看 `docs/thor_port.md`
+
+1. **指数记账**：`he_exp1` 给的是 `exp(u/2)`（u 是喂给 `he_softmax` 的值），`he_exp2` 是 `exp(u/4)`
+   （量程宽一倍所以斜率减半），每次 `update_inv_D` 把指数翻倍，而 `stage_07_softmax` 的
+   bootstrap 折叠会把 score **翻倍**。走窄多项式还是宽多项式由 `max_x >= 30` 决定，
+   所以重新标定时如果 `l` 不跟着动，softmax 的温度会悄悄变。
+2. **softmax 输入窗口两边都很窄**：超过 `max_x` 一成，15 次多项式就发散、分母溢出；
+   低于 `inv_epsilon`，Goldschmidt 没有可收敛的东西。可用的分母范围只有约三个数量级 ——
+   key 投影里的 `softmax_scale = 1/512`（第 2 层 1/1024）就是为了把 score 打进这个窗口。
+   `thorfhe.softmax.calibrate(scores)` 可以按实际分布重算这三个参数，T5 上真实 MRPC 数据时要用。
+
+### 还是那个请求
+
+如果服务器上能拿到 THOR 原始仓库或草稿 C++ 输出，麻烦对拍一次 stage_06：同样的 Q、K，
+比较 `he.py` 的输出和 `Q K^T`。这是唯一能区分「THOR 有 bug」和「THOR 下游有补偿」的办法。
