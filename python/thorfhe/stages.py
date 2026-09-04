@@ -90,6 +90,17 @@ class Stages:
     def level_down(self, x, by: int):
         return self.engine.level_down(x, by)
 
+    def align(self, *cts):
+        """Drop every operand to the lowest level present, so they can be combined.
+
+        FIXEDMANUAL will not add or multiply across levels, and operands that took different routes
+        through a stage rarely arrive together. desilofhe aligns implicitly; here it is one call, at
+        the point where the mismatch is meaningful.
+        """
+        target = min(self.engine.level(ct) for ct in cts)
+        return tuple(ct if self.engine.level(ct) == target
+                     else self.level_down(ct, self.engine.level(ct) - target) for ct in cts)
+
     def prepare_for_multiply(self, x):
         """Identity under FIXEDMANUAL - see the module docstring for why ``he.py`` rescales here."""
         return x

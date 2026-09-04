@@ -174,6 +174,32 @@ This is worth double-checking against THOR's reported MRPC accuracy before treat
 an error this size in the attention scores should be visible end to end, so either the artifact
 differs from the paper's numbers here or something compensates downstream.
 
+## Stage 07: the softmax
+
+There is no exponential and no division in CKKS, so THOR builds a low-temperature softmax out of a
+degree-15 polynomial and sharpens it with Goldschmidt iterations (`thorfhe/numeric.py`,
+`thorfhe/softmax.py`). Measured against the real thing on the numpy engine: row sums within 0.23% of
+one, individual weights within 2.6e-3, and the whole attention chain - stages 06, 07 and 08 - within 2%
+of `softmax(Q K^T) V`.
+
+Three things about it are easy to get wrong and are now written down where they bite:
+
+* **The exponent bookkeeping.** `he_exp1` gives `exp(u/2)` for the `u` handed to `he_softmax`;
+  `he_exp2` gives `exp(u/4)`, because its range is twice as wide; each `update_inv_D` doubles the
+  exponent; and `stage_07_softmax`'s bootstrap fold hands `he_softmax` **twice** the score. Which
+  polynomial is used is decided by `max_x >= 30`, so a re-calibration silently changes the temperature
+  unless `l` moves with it.
+* **The input window is narrow in both directions.** Above `max_x` the degree-15 fit stops being an
+  exponential and diverges fast - 10% past the range overflows the denominator. Below `inv_epsilon`
+  the Goldschmidt iteration is inverting something outside the range it was set up for. The usable
+  denominator window is about three decades, and the `softmax_scale = 1/512` folded into the key
+  projection is what exists to hit it. `softmax.calibrate` computes the same choice from a sample of
+  scores, which is what a re-calibration on real activations would do.
+* **The level schedule.** The clear engine enforces FIXEDMANUAL, and it caught three real errors while
+  this was being written: a missing rescale after the scalar division, two ciphertext products whose
+  operands had drifted apart in level, and a rescale applied to an integer multiply that does not need
+  one. `Stages.align` is where operands that took different routes are brought together.
+
 ## Open questions
 
 * **The he.py score bug.** Confirmed against the linear algebra, not against THOR's own outputs (the

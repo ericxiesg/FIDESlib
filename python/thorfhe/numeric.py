@@ -58,12 +58,6 @@ class NumericMixin:
             basis[k] = self.power_basis(basis[1], [k])[k]
         return basis[k]
 
-    def align(self, *cts):
-        """Drop every operand to the lowest level present, so they can be combined."""
-        target = min(self.engine.level(ct) for ct in cts)
-        return tuple(ct if self.engine.level(ct) == target
-                     else self.level_down(ct, self.engine.level(ct) - target) for ct in cts)
-
     def evaluate_polynomial(self, x, coefficients):
         """Baby-step giant-step evaluation of ``sum_i coefficients[i] * x^i`` (low order first).
 

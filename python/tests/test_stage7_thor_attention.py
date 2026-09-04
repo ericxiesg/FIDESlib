@@ -185,10 +185,10 @@ def test_he_py_accumulator_table_is_wrong(masks, score_masks):
     from thorfhe.attention import AttentionScore
 
     class HePyRouting(AttentionScore):
-        def accumulator_column(self, out_index, offset, j):
+        def accumulator_column(self, out_index, offset, j, out_dim):
             if j == 0:
                 return 2 if out_index == 0 else 0
-            return super().accumulator_column(out_index, offset, j)
+            return super().accumulator_column(out_index, offset, j, out_dim)
 
     rng = np.random.default_rng(23)
     q = rng.normal(size=(G.dim, G.features)) * 0.1
@@ -290,7 +290,7 @@ def test_accumulator_routing_reproduces_he_py_stage_08(masks, score_masks):
     (low, high), transpose, copies, attention = masks
     stages = AttentionContext(ClearEngine(G, depth=30), G, masks=low, complement_masks=high,
                               transpose=transpose, copies=copies, attention=attention, ccmm=score_masks)
-    out_dim = stages.out_dim
+    from thorfhe.attention import CONTEXT_OUTPUTS as out_dim
 
     for block in range(4):
         for table, j in ((j_zero[block], 0), (j_other[block], 1)):
@@ -298,7 +298,7 @@ def test_accumulator_routing_reproduces_he_py_stage_08(masks, score_masks):
             for i in range(out_dim):
                 sources = [(i - block, 0)] if j == 0 else [(i - 1 - block, 2), (i - block, 0)]
                 for offset, first in sources:
-                    column = stages.accumulator_column(i, offset, j)
+                    column = stages.accumulator_column(i, offset, j, out_dim)
                     derived.append(((i, column), (offset % out_dim, first)))
                     derived.append(((i, column + 1), (offset % out_dim, first + 1)))
             assert sorted(derived) == sorted(table), f"block={block} j={j}"

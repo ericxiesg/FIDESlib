@@ -242,10 +242,7 @@ class AttentionScore(AttentionStages):
         #: ``{column: {n: mask}}`` from :func:`ccmm_masks`.
         self.ccmm = ccmm
 
-    #: how many ciphertexts the accumulator spans; 4 for the score, 2 for the context.
-    out_dim = 4
-
-    def accumulator_column(self, out_index: int, offset: int, j: int) -> int:
+    def accumulator_column(self, out_index: int, offset: int, j: int, out_dim: int) -> int:
         """Which pair of accumulator columns a contribution lands in.
 
         Columns 2-3 when the source index wrapped an odd number of times, 0-1 otherwise. Stage 08's
@@ -256,7 +253,7 @@ class AttentionScore(AttentionStages):
         on ``out_index == 0``; that agrees only when ``in_index // pack == 1``. Overridable so a test
         can pin the difference down.
         """
-        return 2 * ((offset // self.out_dim) % 2)
+        return 2 * ((offset // out_dim) % 2)
 
     def _key_as_complex(self, k):
         """Fold the transposed key and its group-rotated copy into one complex ciphertext."""
@@ -272,11 +269,23 @@ class AttentionScore(AttentionStages):
     def _accumulate_product(self, left, diagonals, in_dim: int):
         """The shared body of both ciphertext-ciphertext products.
 
-        ``left`` is ``out_dim`` complex ciphertexts, ``diagonals`` is ``in_dim`` broadcast diagonals.
-        Returns the ``out_dim x 4`` accumulator, still degree-2 and at scale Delta^2.
+        ``left`` is the complex left operand - one ciphertext per output - and ``diagonals`` is
+        ``in_dim`` broadcast diagonals. Returns the ``len(left) x 4`` accumulator, still degree-2 and
+        at scale Delta^2. The score product has four outputs and the context product two, which is why
+        the width is taken from the operand rather than fixed on the class.
         """
         g = self.g
-        out_dim = self.out_dim
+        out_dim = len(left)
+
+        # The two operands reach this point by very different routes - the values come straight from the
+        # projection, the weights through a softmax - so bring them to a common level once, here.
+        target = min(min(self.engine.level(ct) for ct in left),
+                     min(self.engine.level(ct) for ct in diagonals))
+        left = [self.level_down(ct, self.engine.level(ct) - target) if self.engine.level(ct) > target
+                else ct for ct in left]
+        diagonals = [self.level_down(ct, self.engine.level(ct) - target) if self.engine.level(ct) > target
+                     else ct for ct in diagonals]
+
         accumulator = np.full((out_dim, 4), None, dtype=object)
 
         def accumulate(index, value):
@@ -303,7 +312,7 @@ class AttentionScore(AttentionStages):
             for i in range(out_dim):
                 sources = [(i - block, 0)] if j == 0 else [(i - 1 - block, 2), (i - block, 0)]
                 for offset, first_column in sources:
-                    column = self.accumulator_column(i, offset, j)
+                    column = self.accumulator_column(i, offset, j, out_dim)
                     accumulate((i, column), pieces[offset % out_dim, first_column])
                     accumulate((i, column + 1), pieces[offset % out_dim, first_column + 1])
         return accumulator
@@ -311,8 +320,9 @@ class AttentionScore(AttentionStages):
     def _fold_accumulator(self, accumulator):
         """Relinearise, realign the halves and fold the conjugate pair into one complex ciphertext."""
         g = self.g
-        merged = np.empty((self.out_dim,), dtype=object)
-        for i in range(self.out_dim):
+        out_dim = accumulator.shape[0]
+        merged = np.empty((out_dim,), dtype=object)
+        for i in range(out_dim):
             parts = [self.relinearize(accumulator[i, c]) for c in range(4)]
             parts[1] = self.rotate(parts[1], g.group_size)
             parts[3] = self.rotate(parts[3], g.group_size)
@@ -324,12 +334,17 @@ class AttentionScore(AttentionStages):
         accumulator = self._accumulate_product(self._key_as_complex(k), self.make_copies(q), self.g.n_out)
         merged = self._fold_accumulator(accumulator)
 
-        output = np.empty((2 * self.out_dim,), dtype=object)
-        for i in range(self.out_dim):
+        half = len(merged)
+        output = np.empty((2 * half,), dtype=object)
+        for i in range(half):
             conjugated = self.conjugate(merged[i])
             output[i] = self.rescale(self.add(merged[i], conjugated))
-            output[i + self.out_dim] = self.rescale(self.multiply_1j(self.subtract(conjugated, merged[i])))
+            output[i + half] = self.rescale(self.multiply_1j(self.subtract(conjugated, merged[i])))
         return output
+
+
+#: how many ciphertexts the attention *context* product spans, against the score product's four.
+CONTEXT_OUTPUTS = 2
 
 
 class AttentionContext(AttentionScore):
@@ -346,12 +361,10 @@ class AttentionContext(AttentionScore):
     ``he_softmax`` produces, and the same shape :meth:`make_copies` produces for the score.
     """
 
-    out_dim = 2
-
     def _values_as_complex(self, v):
         """Pack the four real value ciphertexts into two complex ones."""
-        return np.array([self.add(v[i], self.multiply_1j(v[i + self.out_dim])) for i in range(self.out_dim)],
-                        dtype=object)
+        return np.array([self.add(v[i], self.multiply_1j(v[i + CONTEXT_OUTPUTS]))
+                         for i in range(CONTEXT_OUTPUTS)], dtype=object)
 
     def stage_08_attention_context(self, v, weights):
         accumulator = self._accumulate_product(self._values_as_complex(v), weights, self.g.dim)
