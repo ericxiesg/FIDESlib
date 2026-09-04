@@ -119,6 +119,33 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
             out[index] = self.add(normalised, normalised)  # THOR's final doubling, never cancelled
         return out
 
+    def stage_11_attention_layernorm(self, x, dense, gamma, beta, ones):
+        """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels."""
+        return self.he_layernorm1([self.add(a, b) for a, b in zip(x, dense)], gamma, beta, ones)
+
+    def stage_15_prepare_layernorm(self, x, y, *, keep_levels=3):
+        """The feed-forward residual, bootstrapped back up - four bootstraps for eight ciphertexts.
+
+        Unlike stage 13 there is no compensating halving, so this returns **twice** the residual. That
+        is deliberate: :meth:`variance_window` accepts four times the variance for the variants that
+        halve their input, which is exactly the ones stage 16 uses after this.
+        """
+        summed = [self.add(a, b) for a, b in zip(x, y)]
+        half = len(summed) // 2
+        out = np.empty((len(summed),), dtype=object)
+        for index in range(half):
+            merged = self.bootstrap(self.add(summed[index], self.multiply_1j(summed[index + half])))
+            merged = self.level_down(merged, by=keep_levels)
+            conj = self.conjugate(merged)
+            out[index] = self.add(merged, conj)
+            out[index + half] = self.multiply_1j(self.subtract(conj, merged))
+        return out
+
+    def stage_16_output_layernorm(self, x, gamma, beta, ones, *, layer_index):
+        """THOR routes layers 9 and 10 to the widest variance window; everything else to variant 2."""
+        variant = self.he_layernorm3 if layer_index in (9, 10) else self.he_layernorm2
+        return variant(x, gamma, beta, ones)
+
     def he_layernorm1(self, x, gamma, beta, ones, var_e=1e-5, min_var=0.15, max_var=10.0):
         return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var, max_var=max_var)
 

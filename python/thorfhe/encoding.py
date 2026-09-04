@@ -159,18 +159,21 @@ FF_SLOT_INDICES = np.array([0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13])
 
 
 def encode_weight_ff(w: np.ndarray, *, dim: int, pack: int, n_slot: int, group_size: int,
-                     slot_count: int, n_in: int, n_out: int, split: int = 4,
+                     slot_count: int, n_in: int, n_out: int, split: int = 4, axis: int = 0,
                      slot_indices=FF_SLOT_INDICES, scale: float = 1.0):
-    """THOR ``model_encoder.encode_w_ff``: a tall weight split into pieces and packed two at a time.
+    """THOR ``model_encoder.encode_w_ff``: an oversized weight split into pieces, packed two at a time.
 
-    The feed-forward expansion is (4 * features, features), which does not fit one block diagonal, so
-    THOR splits it into ``split`` pieces and stacks them two at a time. Each ``rep`` therefore carries
-    twelve block rows where the attention stages carry six, laid out as two windows of six per token -
-    which is what ``FF_SLOT_INDICES`` and the ``block_diag_2`` masks (modulo 8, not 16) are about.
+    Neither feed-forward weight fits one block diagonal. The expansion (stage 12) is
+    (4 * features, features) and is split *vertically* (``axis=0``); the contraction (stage 14) is
+    (features, 4 * features) and is split *horizontally* (``axis=1``). Either way the four pieces are
+    square, and each ``rep`` stacks two of them - so a rep carries twelve block rows where the attention
+    stages carry six, laid out as two windows of six per token. That is what ``FF_SLOT_INDICES`` and the
+    ``block_diag_2`` masks (modulo 8, not 16) are about.
 
     Returns a ``(2, out_ct, diag_count, n_in // 2)`` object array.
     """
-    pieces = [to_diagonal_blocks(piece, (n_out, n_in)) for piece in np.vsplit(w, split)]
+    splitter = np.vsplit if axis == 0 else np.hsplit
+    pieces = [to_diagonal_blocks(piece, (n_out, n_in)) for piece in splitter(w, split)]
     reps = []
     for rep in range(2):
         combined = np.concatenate((pieces[2 * rep], pieces[2 * rep + 1]), axis=1)
@@ -230,6 +233,76 @@ def encode_bias(g: Geometry, b: np.ndarray, scale: float = 1.0) -> np.ndarray:
     return encode_bias_raw(b, dim=g.dim, pack=g.pack, n_slot=g.n_slot, group_size=g.group_size,
                            slot_count=g.slot_count, n_out=g.n_out, n_blocks=g.out_blocks,
                            slot_indices=np.arange(g.n_blocks), scale=scale)
+
+
+# ---------------------------------------------------------------- pooler and classifier
+def encode_weight_pooler(g: Geometry, w: np.ndarray) -> np.ndarray:
+    """THOR ``model_encoder.encode_w_pooler``: a (features, features) weight for the CLS token only.
+
+    The pooler multiplies a single token, broadcast over all of them, so there is no rotated-copy
+    dimension over ``pack`` - the pack offset is folded into the *input* index instead. Returns a
+    ``(diag_count, n_in // (2 * pack))`` object array, i.e. ``(6, 4)``.
+    """
+    if w.shape != (g.features, g.features):
+        raise ValueError(f"pooler weight must be ({g.features}, {g.features}), got {w.shape}")
+    diag_blocks = to_diagonal_blocks(w, (g.n_out, g.n_in))
+    diag_count = diag_blocks.shape[0]
+    columns = g.n_in_complex // g.pack
+
+    messages = np.full((diag_count, columns), None, dtype=object)
+    tokens = g.n_slot * np.arange(g.dim)[:, None]
+    for diag_index in range(diag_count):
+        blocks = diag_blocks[diag_index]
+        for column in range(columns):
+            msg = np.zeros((g.slot_count,), dtype=complex)
+            for offset in range(g.pack):
+                index = column * g.pack + offset
+                values = (blocks[:, :, index] - 1j * blocks[:, :, index + g.n_in_complex]) / 2
+                msg[g.group_size * offset + tokens + np.arange(values.shape[0])[None, :]] = values.T
+            messages[diag_index, column] = msg
+    return messages
+
+
+def encode_weight_classifier(g: Geometry, w: np.ndarray) -> np.ndarray:
+    """THOR ``model_encoder.encode_w_cls``: one slot vector per class, six blocks in slots 0..5."""
+    if w.ndim != 2 or w.shape[1] != g.features:
+        raise ValueError(f"classifier weight must be (classes, {g.features}), got {w.shape}")
+    positions = g.n_slot * np.arange(g.dim)[:, None] + np.arange(g.out_blocks)[None, :]
+    messages = np.full((w.shape[0],), None, dtype=object)
+    for class_index in range(w.shape[0]):
+        msg = np.zeros((g.slot_count,), dtype=float)
+        msg[positions] = w[class_index].reshape(g.out_blocks, g.dim).T
+        messages[class_index] = msg
+    return messages
+
+
+def encode_bias_pooler(g: Geometry, b: np.ndarray) -> np.ndarray:
+    """THOR ``model_encoder.encode_b_pooler``: slot ``n_slot * t + block`` holds ``b[n_out * block + t]``.
+
+    Halved, because ``pooler_dense`` adds the bias before its ``y + conj(y)``. That is the opposite of
+    the QKV convention, where the bias is *not* halved and the layer therefore computes ``x @ w.T + 2b``.
+    """
+    if b.shape != (g.features,):
+        raise ValueError(f"bias must be ({g.features},), got {b.shape}")
+    group = np.zeros((g.group_size,), dtype=float)
+    positions = g.n_slot * np.arange(g.dim)[:, None] + np.arange(g.out_blocks)[None, :]
+    group[positions] = np.stack(np.split(b, g.out_blocks), axis=1) / 2
+    return np.tile(group, g.pack)
+
+
+def encode_bias_classifier(g: Geometry, b: np.ndarray) -> np.ndarray:
+    """THOR ``model_encoder.encode_b_cls``: one slot vector per class, the bias in slot 0 alone."""
+    messages = np.full((b.shape[0],), None, dtype=object)
+    for class_index in range(b.shape[0]):
+        msg = np.zeros((g.slot_count,), dtype=float)
+        msg[0] = b[class_index]
+        messages[class_index] = msg
+    return messages
+
+
+def pooler_mask(g: Geometry) -> np.ndarray:
+    """THOR ``masks["pooler_dense"]``: the CLS token's six blocks, in every group."""
+    return (np.arange(g.slot_count) % g.group_size < g.out_blocks).astype(float)
 
 
 # ---------------------------------------------------------------- masks

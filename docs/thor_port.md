@@ -1,4 +1,4 @@
-# Porting THOR onto fideslib (stages 01-05)
+# Porting THOR onto fideslib (stages 01-18)
 
 `python/thorfhe/` is THOR's BERT layer rewritten against `pyfideslib.Engine`, so the same code runs on
 OpenFHE (CPU) and FIDESlib (CUDA). This note covers what stages 01-05 do, the three places the port
@@ -200,6 +200,99 @@ Three things about it are easy to get wrong and are now written down where they 
   operands had drifted apart in level, and a rescale applied to an integer multiply that does not need
   one. `Stages.align` is where operands that took different routes are brought together.
 
+## Stages 10-16: the dense layers, LayerNorm, and the feed-forward block
+
+Everything after the attention chain is linear algebra plus two non-linearities, and all of it is
+checked slot-by-slot against numpy on the clear engine:
+
+| stage | file | what it computes | measured |
+|---|---|---|---|
+| 10 attention dense | `dense.py` | `ctx @ W.T`, folded from 2 output ciphertexts to the 6-block form | 7.2e-16 |
+| 11 / 16 LayerNorm | `layernorm.py` | `2 * (gamma * (x - mean) / sqrt(var + eps) + beta)` | 3.3e-6 |
+| 12 intermediate dense | `feedforward.py` | `x @ W1.T / 64`, 768 -> 3072 | exact |
+| 13 GELU | `feedforward.py` | `gelu` elementwise, two polynomials in series | 4.7e-5 abs |
+| 14 output dense | `feedforward.py` | `h @ W2.T`, 3072 -> 768 | exact; 12->13->14 within 2e-4 |
+| 15 prepare LayerNorm | `layernorm.py` | the residual, bootstrapped | exact (see below) |
+
+### The feed-forward window is a property of the product, not of the packing
+
+Neither feed-forward weight fits a block diagonal: the expansion is (3072, 768) and the contraction
+(768, 3072). THOR splits each into four square pieces - `vsplit` for the first, `hsplit` for the
+second - and packs two per `rep`, so a rep carries twelve block rows where the attention stages carry
+six. Those twelve live in a token's sixteen slots as **two windows of six** (`FF_SLOT_INDICES`), and
+the partial products are recombined with `block_diag_2`: a window of six on a stride of **eight**, not
+twelve on sixteen.
+
+The first attempt made that a second `Geometry` (256 half-tokens of 8 slots). The slot arithmetic is
+identical, so it looks clean, and it is wrong: the *encoder* indexes by token, and re-indexing the
+packing walks `arange(dim)` against a 128-row block and overflows `group_size`. The window belongs to
+the multiply. `rotate_internal` and `pcmm` therefore take `window`, `masks` and `complements`
+explicitly, and `block_diagonal_masks` takes `stride` and `width`; the geometry is unchanged.
+
+The resulting layout is pinned exactly, for both the expansion and its GELU:
+
+```
+out[rep][ct][group, t, s] = z[t, 128 * block + (ct*pack + group + t) mod 128]
+block = 12 * rep + FF_SLOT_INDICES.index(s)
+```
+
+and the contraction lands back in the ordinary 6-block form the LayerNorm reads.
+
+### The 64 is load-bearing
+
+`GELU_SCALE = 64` is not a nicety. THOR composes a degree-31 with a degree-27 polynomial because a
+single minimax fit of `tanh` over the pre-activation range would need a hopeless degree; the composite
+is only valid for an argument in `[-1, 1]`, so the ciphertext carries the pre-activation **divided by
+64** and `stage_12`'s weight is encoded with `scale = 1/64` to put it there. Outside that window the
+degree-31 inner polynomial stops being bounded, which a test asserts so nobody quietly drops the
+scale. Thirteen levels, 4.7e-5 absolute.
+
+### Two folds that look the same and are not
+
+Stages 13 and 15 both merge two real ciphertexts into one complex one, bootstrap once instead of
+twice, and split back out with `x + conj(x)` / `i * (conj(x) - x)`. That split **doubles**. Stage 13
+multiplies by `1/2` first, so the values that come out are the ones that went in - the halving is
+there for the bootstrap's input bound, not for the arithmetic. Stage 15 does not, so it hands stage 16
+*twice* the residual, deliberately: `variance_window` accepts four times the variance for exactly the
+LayerNorm variants (2 and 3) that stage 16 routes to, and those are exactly the ones that halve their
+input. The two conventions cancel, and a test states each half of that so neither can be "fixed" alone.
+
+### The dead mask in stage 14
+
+`he.py` builds a `slot % 16 < 6` mask in stage 14 and never applies it. It is not needed, but the
+reason is worth writing down: the `rotate(temp, -8)` that sums the two windows pulls the *next*
+token's low window into slots 8..13, so the output is meaningful only on slots 0..5. LayerNorm's
+`value_mask` zeroes everything else as its first operation, so the pollution never reaches an
+arithmetic result. Slots 6, 7, 14 and 15 do stay clean, because the packed weight is zero there.
+
+## Stages 17 and 18: the classification head
+
+The pooler and the classifier act on the CLS token alone, which is why they look unlike everything
+before them (`thorfhe/pooler.py`). The pooler masks token 0 out of the last LayerNorm output and
+broadcasts it back over all 128 tokens, so every group already holds the same token and there is no
+rotated-copy dimension: `encode_w_pooler` folds the pack offset into the *input* index instead, giving
+a (6, 4) weight where an ordinary dense layer needs (8, 6, 64). It closes with an `interval_sum` over
+the groups, because here the groups carry parts of one inner product rather than independent output
+diagonals. The layout that comes out is exact, and is exactly the one `encode_w_cls` expects:
+
+```
+slot n_slot * t + block  ==  (W @ cls)[dim * block + t]
+```
+
+Two details are easy to lose:
+
+* **The pooler bias is halved** (`encode_b_pooler`), so the closing `y + conj(y)` gives `+b`. This is
+  the opposite of the QKV convention, where the bias is not halved and the layer computes `x @ w.T + 2b`.
+* **The classifier folds six slots, not eight.** `temp + rot(temp, -1)`, then `+ rot(., -2)` off that
+  pair, then `+ rot(pair, -4)` - off the *pair* again, not the quad. A plain doubling chain would sum
+  eight and pull the padding slots in. Then `dim` tokens by `n_slot` through `n_slot * dim`.
+
+The pooler's `tanh` is two degree-15 polynomials with a bootstrap on either side - far cheaper than
+GELU's degree-31/27 composite, because the `/40` in stage 17 puts the argument well inside the fit.
+It is accurate to 1.1e-2 for a pre-activation in +/-10, and past that it *plateaus* at 0.18 rather
+than diverging, which is the opposite of how the GELU inner polynomial fails. End to end the head
+reproduces `w_cls @ tanh(W @ cls + b) + b_cls` to 1.4e-3, the tanh fit being the whole of the error.
+
 ## Open questions
 
 * **The he.py score bug.** Confirmed against the linear algebra, not against THOR's own outputs (the
@@ -209,3 +302,9 @@ Three things about it are easy to get wrong and are now written down where they 
   It is ported but only reachable once stage 16 exists, so it is untested.
 * **`temp` (the real/imaginary split) is unused by stages 01-05** and its extra rescale is charged
   where it happens rather than where THOR charges it. Re-check when stage 11 lands.
+* **The level budget is not yet the real one.** The feed-forward tests run with a bootstrap level of
+  60 so that the *schedule* is what is tested rather than the budget. Stages 12-14 cost 2 + 13 + 2
+  levels; whether that fits THOR's actual bootstrap output is a T5 question.
+* **The pooler tanh window.** The fit is valid to a pre-activation of about 10. Real BERT pooler
+  pre-activations have not been measured here - the tests use random weights - so this needs checking
+  against a real checkpoint before T5's end-to-end numbers mean anything.

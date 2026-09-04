@@ -122,6 +122,15 @@ class NumericMixin:
     def he_exp2(self, x, min_x: float, max_x: float, n: int):
         return self.he_exp(x, min_x, max_x, n, wide=True)
 
+    def he_tanh_for_pooler(self, x):
+        """``tanh`` for the pooler, as two degree-15 polynomials with a bootstrap on either side.
+
+        Unlike the GELU composite this one is cheap - the ``/40`` in :meth:`stage_17_pooler` puts the
+        argument comfortably inside the fitted range, so degree 15 twice is enough.
+        """
+        inner = self.evaluate_polynomial(self.bootstrap(x), POOLER_INNER)
+        return self.bootstrap(self.evaluate_polynomial(inner, POOLER_OUTER))
+
 
 class DeltaCiphertext:
     """A ciphertext together with the factor its plaintext has been scaled by.
@@ -272,6 +281,21 @@ class InverseSqrtMixin:
 
 
 #: THOR's GELU: the inner polynomial of the two-stage tanh composite (degree 31, low order first).
+#: THOR ``he_tanh_single_for_pooler``: two degree-15 polynomials, with a bootstrap on each side.
+#: A far easier fit than GELU's - the pooler's own ``/40`` puts the argument well inside the range.
+POOLER_INNER = np.array([
+    2.06201784e-03, 1.95056729e01, -4.29024545e-01, -4.13341496e02, 8.17596753e00, 3.58757327e03,
+    -5.64098990e01, -1.51158283e04, 1.82989351e02, 3.42189880e04, -3.01953016e02, -4.25793697e04,
+    2.45150249e02, 2.74279201e04, -7.76519925e01, -7.14529052e03,
+])
+
+POOLER_OUTER = np.array([
+    -4.08442578e-03, 2.02874846e00, 1.30194294e-02, -2.38934873e00, -1.77631073e-02, 2.74974898e00,
+    1.17381072e-02, -2.43259032e00, -2.22416152e-03, 1.46476749e00, -1.42873183e-03, -5.41327356e-01,
+    7.96793166e-04, 1.08762008e-01, -1.12320034e-04, -9.02573450e-03,
+])
+
+
 GELU_INNER = np.array([
     -1.06240033e-05, 1.64454894e-04, -5.83533517e-04, -3.80912692e-04, 2.24431193e-03,
     8.92295204e-03, -1.05277477e-02, -1.91827040e-02, -2.04634786e-01, 4.54014410e-01,
