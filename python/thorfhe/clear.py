@@ -38,10 +38,12 @@ class ClearCiphertext:
 class ClearEngine:
     """Exact, plaintext mirror of the primitives :mod:`thorfhe.stages` uses."""
 
-    def __init__(self, geometry: Geometry, depth: int, strict: bool = True):
+    def __init__(self, geometry: Geometry, depth: int, strict: bool = True, bootstrap_level: int = 14):
         self.geometry = geometry
         self.slots = geometry.slot_count
         self.depth = depth
+        #: level a bootstrap refreshes to; THOR assumes 14 (`use_bootstrap_to_14_levels`).
+        self.bootstrap_level = bootstrap_level
         #: when set, add/subtract enforce matching level and scale (the FIXEDMANUAL contract).
         self.strict = strict
         #: rotation indexes actually requested, so a run can report the key set it needs.
@@ -147,6 +149,16 @@ class ClearEngine:
 
     def level_down(self, ct: ClearCiphertext, by: int) -> ClearCiphertext:
         return ClearCiphertext(ct.slots.copy(), ct.level - by, ct.scale_exp)
+
+    def square(self, ct: ClearCiphertext) -> ClearCiphertext:
+        return self.multiply(ct, ct)
+
+    def bootstrap(self, ct: ClearCiphertext, keep_levels: int | None = None) -> ClearCiphertext:
+        """Refresh to ``bootstrap_level``: exact here, so a stage's *schedule* is tested, not its noise."""
+        if self.strict and ct.scale_exp != 1:
+            raise ScaleMismatch("bootstrap: ciphertext must be canonical (scale D^1)")
+        level = self.bootstrap_level if keep_levels is None else keep_levels
+        return ClearCiphertext(ct.slots.copy(), level, 1)
 
     def relinearize(self, ct: ClearCiphertext) -> ClearCiphertext:
         """No-op: ciphertext degree is not modelled here, only the values, levels and scales."""

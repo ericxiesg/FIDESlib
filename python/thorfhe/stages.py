@@ -81,6 +81,12 @@ class Stages:
     def relinearize(self, x):
         return self.engine.relinearize(x)
 
+    def square(self, x):
+        return self.engine.square(x)
+
+    def bootstrap(self, x, keep_levels=None):
+        return self.engine.bootstrap(x, keep_levels)
+
     def level_down(self, x, by: int):
         return self.engine.level_down(x, by)
 
