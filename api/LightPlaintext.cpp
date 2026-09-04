@@ -1,5 +1,6 @@
 #include "LightPlaintext.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -70,6 +71,9 @@ LightPlaintext LightPlaintextImpl::Load(const std::string& path) {
 	lp->coeffs.resize(n);
 	if (n > 0 && !is.read(reinterpret_cast<char*>(lp->coeffs.data()), static_cast<std::streamsize>((size_t)n * sizeof(int64_t))))
 		throw std::runtime_error("LightPlaintext::Load: truncated coefficients in '" + path + "'");
+
+	static std::atomic<uint64_t> s_load_uid{ 0x8000000000000000ULL };
+	lp->uid = s_load_uid++;
 
 	return lp;
 }
