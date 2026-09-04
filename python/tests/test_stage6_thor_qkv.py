@@ -54,9 +54,17 @@ def test_qkv_computes_xw_plus_bias(geometry):
     assert np.abs(got - (x @ w.T + 2 * b)).max() < 1e-12
 
 
-def test_geometry_rejects_inconsistent_shapes():
-    with pytest.raises(ValueError):
-        thorfhe.Geometry(dim=16, pack=4, n_slot=8, n_blocks=6, features=48, n_in=16, n_out=16)
+@pytest.mark.parametrize("kwargs,message", [
+    (dict(n_blocks=12), "does not fit in n_slot"),
+    (dict(features=50), "divisible by both"),
+    (dict(pack=16), "divisible by pack"),
+    (dict(dim=12), "power of two"),
+])
+def test_geometry_rejects_inconsistent_shapes(kwargs, message):
+    """The shape invariants that still hold; `features // n_out == n_blocks` was a QKV coincidence."""
+    base = dict(dim=128, pack=4, n_slot=8, n_blocks=6, features=48, n_in=16, n_out=8)
+    with pytest.raises(ValueError, match=message):
+        thorfhe.Geometry(**{**base, **kwargs})
 
 
 def test_unused_slots_stay_empty():

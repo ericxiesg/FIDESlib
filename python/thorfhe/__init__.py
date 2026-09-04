@@ -13,11 +13,14 @@ from .encoding import (
     decode_linear_output,
     encode_activations,
     encode_bias,
+    encode_bias_raw,
     encode_weight,
+    encode_weight_raw,
     lower_diagonal_entry,
     to_diagonal_blocks,
 )
-from .geometry import SMALL, THOR_BERT, Geometry
+from .geometry import SMALL, THOR_ATTENTION_DENSE, THOR_BERT, Geometry
+from .dense import DenseStages
 from .he import LightWeights, decrypt_ciphertexts, encrypt_activations, plan_rotation_keys
 from .stages import Stages
 from .weights_io import (
@@ -32,17 +35,21 @@ from .weights_io import (
 __all__ = [
     "ClearCiphertext",
     "ClearEngine",
+    "DenseStages",
     "Geometry",
     "LightWeights",
     "ScaleMismatch",
     "SMALL",
+    "THOR_ATTENTION_DENSE",
     "THOR_BERT",
     "Stages",
     "block_diagonal_masks",
     "decode_linear_output",
     "encode_activations",
     "encode_bias",
+    "encode_bias_raw",
     "encode_weight",
+    "encode_weight_raw",
     "encrypt_activations",
     "decrypt_ciphertexts",
     "lower_diagonal_entry",

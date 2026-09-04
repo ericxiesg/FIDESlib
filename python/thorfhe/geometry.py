@@ -30,7 +30,9 @@ class Geometry:
     pack: int
     #: slots reserved per token; ``n_blocks`` of them carry data, the rest are padding.
     n_slot: int
-    #: block-diagonal blocks actually used per token.
+    #: slots of a token that carry data in the *working* representation - the window ``rotate_internal``
+    #: wraps in. For the QKV projections this happens to equal ``features // n_out``; for the attention
+    #: dense layer it does not, because that stage consumes a 12-block input and produces a 6-block one.
     n_blocks: int
     #: hidden size of the layer (768 for BERT-base).
     features: int
@@ -48,8 +50,6 @@ class Geometry:
             raise ValueError(f"n_blocks {self.n_blocks} does not fit in n_slot {self.n_slot}")
         if self.features % self.n_in or self.features % self.n_out:
             raise ValueError("features must be divisible by both n_in and n_out")
-        if self.features // self.n_out != self.n_blocks:
-            raise ValueError(f"features // n_out = {self.features // self.n_out} must equal n_blocks {self.n_blocks}")
         if self.n_in_complex % self.pack:
             raise ValueError(f"n_in // 2 = {self.n_in_complex} must be divisible by pack {self.pack}")
         if self.n_out % self.pack:
@@ -78,6 +78,16 @@ class Geometry:
         return self.n_out // self.pack
 
     @property
+    def in_blocks(self) -> int:
+        """Blocks the input is split into: ``features // n_in``."""
+        return self.features // self.n_in
+
+    @property
+    def out_blocks(self) -> int:
+        """Blocks the output falls into: ``features // n_out``."""
+        return self.features // self.n_out
+
+    @property
     def diag_count(self) -> int:
         """Block diagonals of the weight matrix, i.e. terms combined by ``pcmm``."""
         return min(self.features // self.n_out, self.features // self.n_in)
@@ -92,6 +102,12 @@ class Geometry:
 
 #: BERT-base as THOR packs it: 128 tokens, 768 features, 32768 slots (log N = 16).
 THOR_BERT = Geometry(dim=128, pack=16, n_slot=16, n_blocks=12, features=768, n_in=128, n_out=64)
+
+#: The attention dense layer (stage 10) and the layers after it: a 64-wide input blocking and a
+#: 128-wide output one, over the same 32768 slots. ``n_blocks`` stays 12 because that is the window the
+#: partial products are recombined in; the output fold halves it to 6 afterwards.
+THOR_ATTENTION_DENSE = Geometry(dim=128, pack=16, n_slot=16, n_blocks=12, features=768,
+                                n_in=64, n_out=128)
 
 #: A 4096-slot (log N = 13) instance with the same structure, small enough to run under OpenFHE on a
 #: laptop while keeping BERT's 128 tokens. ``pack != n_slot`` on purpose: THOR uses 16 for both, so a

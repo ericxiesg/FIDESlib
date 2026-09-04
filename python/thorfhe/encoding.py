@@ -95,12 +95,13 @@ def decode_linear_output(g: Geometry, messages) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- weights
-def _gather_upper_diagonal(g: Geometry, blocks, input_indices, rotations):
+def _gather_upper_diagonal(blocks, input_indices, rotations, dim, n_in):
     """THOR ``model_encoder.gather_upper_diagonal_batch``."""
-    offsets = rotations[:, None] + np.arange(g.dim)[None, :]
+    n_in_complex = n_in // 2
+    offsets = rotations[:, None] + np.arange(dim)[None, :]
     row_indices = offsets % blocks.shape[1]
     real_cols = (input_indices[:, None] + offsets) % blocks.shape[2]
-    imag_cols = (((input_indices + g.n_in_complex) % g.n_in)[:, None] + offsets) % blocks.shape[2]
+    imag_cols = (((input_indices + n_in_complex) % n_in)[:, None] + offsets) % blocks.shape[2]
     block_indices = np.arange(blocks.shape[0])[None, :, None]
     real = blocks[block_indices, row_indices[:, None, :], real_cols[:, None, :]]
     imag = blocks[block_indices, row_indices[:, None, :], imag_cols[:, None, :]]
@@ -108,30 +109,79 @@ def _gather_upper_diagonal(g: Geometry, blocks, input_indices, rotations):
     return (real - 1j * imag) / 2
 
 
-def encode_weight(g: Geometry, w: np.ndarray, scale: float = 1.0) -> np.ndarray:
-    """Pack a (features, features) weight into an ``(out_ct, diag_count, n_in_complex)`` object array.
+def encode_weight_raw(w: np.ndarray, *, dim: int, pack: int, n_slot: int, group_size: int,
+                      slot_count: int, n_in: int, n_out: int, slot_indices, scale: float = 1.0):
+    """THOR ``model_encoder.encode_w_att``, with every shape taken as an argument.
 
-    THOR ``model_encoder.encode_w_att`` / ``encode_w_qkv``. ``w`` is in BERT's ``(out, in)`` order, so
-    the layer computes ``x @ w.T``.
+    :class:`~thorfhe.geometry.Geometry` fixes ``n_in``/``n_out`` for one representation, but a BERT
+    layer changes representation as it goes: the QKV projections are 12 blocks of 64 while the
+    attention dense output is 6 blocks of 128, and the feed-forward stages change again. So the
+    encoder takes the block shape directly, and ``slot_indices`` says which of a token's slots the
+    result occupies (THOR's ``ATT_SLOT_INDICES`` and ``FF_SLOT_INDICES``).
+
+    Returns an ``(out_ct, diag_count, n_in // 2)`` object array of slot vectors.
+    """
+    n_in_complex = n_in // 2
+    diag_blocks = to_diagonal_blocks(w, (n_out, n_in))
+    diag_count = diag_blocks.shape[0]
+    n_out_packed = n_out // pack
+    pack_range = np.arange(pack)
+    slot_indices = np.asarray(slot_indices)
+
+    positions = (group_size * np.arange(pack)[:, None, None]
+                 + n_slot * np.arange(dim)[None, :, None]
+                 + slot_indices[None, None, :])
+
+    messages = np.empty((n_out_packed, diag_count, n_in_complex), dtype=object)
+    for diag_index in range(diag_count):
+        diagonal = diag_blocks[diag_index]
+        for n in range(n_in_complex):
+            for out_ct in range(n_out_packed):
+                rotations = out_ct * pack + pack_range
+                input_indices = ((n // pack) * pack + out_ct * pack + (n + pack_range) % pack) % n_in_complex
+                input_indices = (input_indices - rotations) % n_in
+                values = scale * _gather_upper_diagonal(diagonal, input_indices, rotations, dim, n_in)
+                msg = np.zeros((slot_count,), dtype=complex)
+                msg[positions] = values.transpose(0, 2, 1)
+                messages[out_ct, diag_index, n] = msg
+    return messages
+
+
+def encode_weight(g: Geometry, w: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """Pack a (features, features) weight for the geometry's own representation.
+
+    THOR ``model_encoder.encode_w_qkv``. ``w`` is in BERT's ``(out, in)`` order, so the layer computes
+    ``x @ w.T``. For a stage whose input and output blockings differ, use :func:`encode_weight_raw`.
     """
     if w.shape != (g.features, g.features):
         raise ValueError(f"weight must be ({g.features}, {g.features}), got {w.shape}")
-    diag_blocks = to_diagonal_blocks(w, g.block_shape)
-    pack_range = np.arange(g.pack)
+    return encode_weight_raw(w, dim=g.dim, pack=g.pack, n_slot=g.n_slot, group_size=g.group_size,
+                             slot_count=g.slot_count, n_in=g.n_in, n_out=g.n_out,
+                             slot_indices=np.arange(g.n_blocks), scale=scale)
 
-    messages = np.empty((g.n_output_ciphertexts, g.diag_count, g.n_in_complex), dtype=object)
-    for diag_index in range(g.diag_count):
-        diagonal = diag_blocks[diag_index]
-        for n in range(g.n_in_complex):
-            for out_ct in range(g.n_output_ciphertexts):
-                rotations = out_ct * g.pack + pack_range
-                input_indices = ((n // g.pack) * g.pack + out_ct * g.pack
-                                 + (n + pack_range) % g.pack) % g.n_in_complex
-                input_indices = (input_indices - rotations) % g.n_in
-                values = scale * _gather_upper_diagonal(g, diagonal, input_indices, rotations)
-                msg = np.zeros((g.slot_count,), dtype=complex)
-                msg[_slot_positions(g)] = values.transpose(0, 2, 1)
-                messages[out_ct, diag_index, n] = msg
+
+def encode_bias_raw(b: np.ndarray, *, dim: int, pack: int, n_slot: int, group_size: int,
+                    slot_count: int, n_out: int, n_blocks: int, slot_indices, scale: float = 1.0):
+    """THOR ``model_encoder.encode_b``, with every shape taken as an argument.
+
+    ``n_blocks`` here is how many pieces the bias splits into (``features // n_out``), which is not
+    the same as the geometry's ``n_blocks`` once a stage changes representation - see
+    :func:`encode_weight_raw`.
+    """
+    blocks = np.stack(np.split(b, n_blocks), axis=0)  # (n_blocks, n_out)
+    slot_indices = np.asarray(slot_indices)
+    positions = (group_size * np.arange(pack)[:, None, None]
+                 + n_slot * np.arange(dim)[None, :, None]
+                 + slot_indices[None, None, :])
+
+    messages = np.empty((n_out // pack,), dtype=object)
+    for out_ct in range(n_out // pack):
+        rotations = out_ct * pack + np.arange(pack)
+        gather = (rotations[:, None] + np.arange(dim)[None, :]) % n_out  # (pack, dim)
+        rotated = np.take_along_axis(blocks[:, None, :], gather[None, :, :], axis=2).transpose(1, 2, 0)
+        msg = np.zeros((slot_count,), dtype=float)
+        msg[positions] = scale * rotated
+        messages[out_ct] = msg
     return messages
 
 
@@ -144,18 +194,9 @@ def encode_bias(g: Geometry, b: np.ndarray, scale: float = 1.0) -> np.ndarray:
     """
     if b.shape != (g.features,):
         raise ValueError(f"bias must be ({g.features},), got {b.shape}")
-    blocks = np.stack(np.split(b, g.n_blocks), axis=0)  # (n_blocks, n_out)
-    positions = _slot_positions(g)
-
-    messages = np.empty((g.n_output_ciphertexts,), dtype=object)
-    for out_ct in range(g.n_output_ciphertexts):
-        rotations = out_ct * g.pack + np.arange(g.pack)
-        gather = (rotations[:, None] + np.arange(g.dim)[None, :]) % g.n_out  # (pack, dim)
-        rotated = np.take_along_axis(blocks[:, None, :], gather[None, :, :], axis=2).transpose(1, 2, 0)
-        msg = np.zeros((g.slot_count,), dtype=float)
-        msg[positions] = scale * rotated
-        messages[out_ct] = msg
-    return messages
+    return encode_bias_raw(b, dim=g.dim, pack=g.pack, n_slot=g.n_slot, group_size=g.group_size,
+                           slot_count=g.slot_count, n_out=g.n_out, n_blocks=g.out_blocks,
+                           slot_indices=np.arange(g.n_blocks), scale=scale)
 
 
 # ---------------------------------------------------------------- masks
