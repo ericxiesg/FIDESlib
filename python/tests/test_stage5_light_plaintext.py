@@ -84,6 +84,26 @@ def test_file_roundtrip(engine, tmp_path):
     ) < 1e-9
 
 
+def test_loaded_plaintexts_have_distinct_identities(engine, tmp_path):
+    """Two weights read from disk must stay two weights.
+
+    The expansion cache is keyed on a light plaintext's identity, so two of them sharing one is not a
+    crash but a silently wrong weight: the second multiply is served the first one's expansion. THOR
+    reads ~220k weights back from files, so this is the shape of the bug that matters.
+    """
+    engine.clear_light_plaintext_cache()
+    w0, w1 = rand(engine, 50), rand(engine, 51)
+    for name, w in (("w0", w0), ("w1", w1)):
+        engine.write_light_plaintext(engine.encode_to_light_plaintext(w), tmp_path / name)
+    back = [engine.read_light_plaintext(tmp_path / name) for name in ("w0", "w1")]
+
+    x = rand(engine, 52)
+    cx = engine.encrypt(x)
+    for light, w in zip(back, (w0, w1)):
+        assert np.max(np.abs(engine.decrypt_real(engine.multiply(cx, light)) - x * w)) < 1e-5
+    assert engine.cc.GetLightPlaintextCacheSize() == 2
+
+
 def test_cache_is_bounded(engine):
     engine.clear_light_plaintext_cache()
     engine.cc.light_plaintext_cache_capacity = 2

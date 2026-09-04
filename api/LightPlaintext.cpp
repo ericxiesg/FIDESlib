@@ -23,6 +23,9 @@ namespace {
  */
 constexpr char MAGIC[8] = { 'F', 'L', 'P', 'T', '0', '0', '0', '1' };
 
+/** Process-wide source of light plaintext identities. 0 is never handed out (see LightPlaintextImpl::uid). */
+std::atomic<uint64_t> g_uid{ 1 };
+
 template <typename T> void Put(std::ostream& os, const T& v) {
 	os.write(reinterpret_cast<const char*>(&v), sizeof(T));
 }
@@ -33,6 +36,8 @@ template <typename T> void Get(std::istream& is, T& v, const std::string& path) 
 }
 
 } // namespace
+
+LightPlaintextImpl::LightPlaintextImpl() : uid(g_uid++) {}
 
 void LightPlaintextImpl::Save(const std::string& path) const {
 	std::ofstream os(path, std::ios::binary | std::ios::trunc);
@@ -71,9 +76,6 @@ LightPlaintext LightPlaintextImpl::Load(const std::string& path) {
 	lp->coeffs.resize(n);
 	if (n > 0 && !is.read(reinterpret_cast<char*>(lp->coeffs.data()), static_cast<std::streamsize>((size_t)n * sizeof(int64_t))))
 		throw std::runtime_error("LightPlaintext::Load: truncated coefficients in '" + path + "'");
-
-	static std::atomic<uint64_t> s_load_uid{ 0x8000000000000000ULL };
-	lp->uid = s_load_uid++;
 
 	return lp;
 }

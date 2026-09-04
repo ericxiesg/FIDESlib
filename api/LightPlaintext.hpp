@@ -30,7 +30,8 @@ namespace fideslib {
  */
 class LightPlaintextImpl {
   public:
-	LightPlaintextImpl() = default;
+	/// @brief Assigns a fresh @ref uid; see that member for why it must never be left at 0.
+	LightPlaintextImpl();
 
 	/// @brief The N centred integer coefficients of round(scale * IFFT(message)).
 	std::vector<int64_t> coeffs;
@@ -46,8 +47,15 @@ class LightPlaintextImpl {
 	 * per stage, and keeping the hint lets a mismatch be reported instead of silently costing scale.
 	 */
 	int32_t level_hint = -1;
-	/// @brief Identity used to key the expansion cache; unique per process.
-	uint64_t uid = 0;
+	/**
+	 * @brief Identity used to key the expansion cache; unique per process, assigned by the constructor.
+	 *
+	 * Every construction path has to set this. A light plaintext that shares a uid with another one is
+	 * served that other one's expansion out of `CryptoContextImpl::light_plaintext_cache` - a silently
+	 * wrong weight, not a crash. Deserialisation used to leave it at 0, which made every weight read
+	 * back from disk alias the first one.
+	 */
+	uint64_t uid;
 
 	/// @brief Bytes the compact form occupies (what the caller saves by not expanding).
 	[[nodiscard]] size_t Bytes() const { return coeffs.size() * sizeof(int64_t); }

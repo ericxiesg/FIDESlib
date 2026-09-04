@@ -2161,9 +2161,6 @@ uint32_t CryptoContextImpl<DCRTPoly>::GetRemainingLevels(const Ciphertext<DCRTPo
 
 namespace {
 
-/** Process-wide identity for light plaintexts, used to key the expansion cache. */
-std::atomic<uint64_t> g_light_plaintext_uid{ 1 };
-
 /** Representative of `v` mod `q` in [0, q), for a centred (possibly negative) `v` of any magnitude. */
 inline uint64_t ReduceCentred(int64_t v, uint64_t q) {
 	const int64_t r = v % static_cast<int64_t>(q);
@@ -2215,7 +2212,6 @@ LightPlaintext CryptoContextImpl<DCRTPoly>::MakeLightPlaintext(const std::vector
 	lp->slots			= static_cast<uint32_t>(pt->GetSlots());
 	lp->noise_scale_deg = static_cast<uint32_t>(pt->GetNoiseScaleDeg());
 	lp->level_hint		= levelHint;
-	lp->uid				= g_light_plaintext_uid++;
 	return lp;
 }
 
