@@ -265,7 +265,7 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                    for index in range(args.layers)]
 
     engine = make_engine(args, THOR_BERT)
-    layer = EncoderLayer(engine)
+    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations)
     stage_rows = []
 
     for sample, (ids, types, mask, _label) in enumerate(encoded):
@@ -494,6 +494,10 @@ def build_parser():
     engine.add_argument("--calibrate", action="store_true",
                         help="derive the softmax window from the plaintext scores instead of using "
                              "THOR's per-layer table")
+    engine.add_argument("--binary-rotations", action="store_true",
+                        help="perform every rotation as a sequence of power-of-two rotations: 15 "
+                             "rotation keys instead of 210 (3.6 GiB instead of 51), at 4.5x the "
+                             "rotation count. The only way a full layer's keys fit a 32 GB card")
     engine.add_argument("--per-stage", action="store_true",
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "

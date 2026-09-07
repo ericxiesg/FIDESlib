@@ -7,6 +7,12 @@
 > [RESPONSE-gpu-benchmark-20260907.md](RESPONSE-gpu-benchmark-20260907.md)。
 > **GPU 上 stage 01 通过，之后卡在三个阻塞问题**；根因是 `MAXP=64` 常量表溢出（一个 bug 表现成三个）、
 > `pcmm` 持有整个网格、掩码明文被反复编码。C++ 侧的修复**未编译**。
+>
+> **第二轮**（[GPU-OOM-210keys-20260907.md](GPU-OOM-210keys-20260907.md) /
+> [RESPONSE-gpu-oom-20260907.md](RESPONSE-gpu-oom-20260907.md)）：`dnum=4` 证实了 MAXP 诊断，
+> 但 210 把 rotation key 要 51 GiB，**截断也只降到 40 GiB**（三分之二的 key 用在满 level，无可截）。
+> 解法是把旋转拆成 2 的幂：**210 把 → 15 把，51 GiB → 3.6 GiB**，代价 4.5 倍旋转次数。
+> `--binary-rotations`，数值逐位不变。
 
 下面的精度数字仍然全部来自本机 numpy 的 `ClearEngine`——精确算术加严格的 FIXEDMANUAL level/scale
 契约，能证明**调度和代数正确**，不含任何 CKKS 噪声。
@@ -134,6 +140,12 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       好定出准确的 depth 上限表。先试 `dnum=4/5`——不改 C++ 可能就解掉 Bug 1 和一半的 Bug 3。
 - [ ] **Bug 2：bootstrap 运行时崩溃**，仍未定位。报告里写的 stage_02 应为 stage_03
       （`make_rotated_copies` 只有 rotate，没有 multiply）。
+- [ ] **用 `--binary-rotations` 重跑**：15 把 key（3.6 GiB）+ bootstrap 22.3 GiB ≈ 26 GiB，
+      在 32 GiB 卡上装得下。这是目前唯一能让整层的密钥放进去的办法。
+- [ ] 中间档：给最常用的少数索引留专用 key、其余拆开，用 4.5 倍旋转换回一部分。
+      接口已留在 `Stages.rotation_steps`。
+- [ ] `levelBudget={4,4}`（原 T7）现在有了具体动机：bootstrap 的 10.4 GiB **明文**是第二大占用，
+      减少线性变换的 giant-step 数能把明文和 key 一起压下来。
 - [ ] 真实自举之后剩多少 level。**已知下界**：`plan_rotation_keys` 实测 `bootstrap_level=30`
       不够跑完一层（1 个 rotation 掉到 level 0 以下），14 更不够（4 个）。所以
       `bootstrap_level_budget=(3,3)` 配 `depth=30` 即使不崩也跑不完。

@@ -108,7 +108,7 @@ class EncoderLayer:
 
     def __init__(self, engine, *, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
-                 feedforward: Geometry = THOR_FEEDFORWARD):
+                 feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False):
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
@@ -123,11 +123,16 @@ class EncoderLayer:
         self.attention = Softmax(engine, qkv, masks=qkv_low, complement_masks=qkv_high,
                                  transpose=transpose_masks(qkv), copies=make_copies_masks(qkv),
                                  attention=attention_rotate_masks(qkv), ccmm=ccmm_masks(qkv),
-                                 ones=engine.encrypt(self.used_slots))
-        self.dense = DenseStages(engine, dense, masks=dense_low, complement_masks=dense_high)
-        self.norm = LayerNormStages(engine, dense, masks=dense_low, complement_masks=dense_high)
+                                 ones=engine.encrypt(self.used_slots),
+                                 binary_rotations=binary_rotations)
+        self.dense = DenseStages(engine, dense, masks=dense_low, complement_masks=dense_high,
+                                 binary_rotations=binary_rotations)
+        self.norm = LayerNormStages(engine, dense, masks=dense_low,
+                                    complement_masks=dense_high,
+                                    binary_rotations=binary_rotations)
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
-                                             complement_masks=ff_high)
+                                             complement_masks=ff_high,
+                                             binary_rotations=binary_rotations)
 
         #: LayerNorm's own starting point is the *slot-0* indicator, not the used-slot one
         self.norm_ones = engine.encrypt(statistic_mask(dense))
