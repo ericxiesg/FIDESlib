@@ -1,8 +1,15 @@
 # 状态与 TODO
 
-日期：2026-09-04。分支 `bootstrap-dev`。**远程 V100 agent 已下线**（GPU 排队），所以下面所有数字
-都来自本机 numpy 的 `ClearEngine`——它是精确算术加上严格的 FIXEDMANUAL level/scale 契约，因此能证明
-**调度和代数正确**，不含任何 CKKS 噪声。GPU 路径一行都没跑过。
+日期：2026-09-04，2026-09-07 更新。分支 `bootstrap-dev`。
+
+> **2026-09-07**：远程 agent 跑了一轮 GPU benchmark，报告在
+> [GPU-benchmark-bugs-20260907.md](GPU-benchmark-bugs-20260907.md)，我的复核和修复在
+> [RESPONSE-gpu-benchmark-20260907.md](RESPONSE-gpu-benchmark-20260907.md)。
+> **GPU 上 stage 01 通过，之后卡在三个阻塞问题**；根因是 `MAXP=64` 常量表溢出（一个 bug 表现成三个）、
+> `pcmm` 持有整个网格、掩码明文被反复编码。C++ 侧的修复**未编译**。
+
+下面的精度数字仍然全部来自本机 numpy 的 `ClearEngine`——精确算术加严格的 FIXEDMANUAL level/scale
+契约，能证明**调度和代数正确**，不含任何 CKKS 噪声。
 
 背景仍见 [BACKGROUND-for-remote.md](BACKGROUND-for-remote.md)。
 
@@ -118,12 +125,18 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       （`[-10.7, 10.1]` vs THOR 的 `[-27.2, 21.7]`）。THOR 自己的表现在已经够用（softmax 2.3e-6），
       所以优先级低，但这个不一致本身要查清楚。
 - [ ] `encode weights` 每层约 64 s（6144 个 slot vector ×2），12 层就是 13 分钟。需要缓存到磁盘。
+- [ ] `plan_rotation_keys(scope="layer")` 一次约 97 s，也该缓存。
 
-### 需要 GPU
-- [ ] **`--engine fideslib` 从没跑过**。`make_engine` 里的构造参数是照 `conftest.py` 抄的，
-      `Engine` 是否提供 `Stages` 用到的全部原语（`multiply_1j`、`level_down`、`conjugate`、
-      `relinearize`、`level`）没验证过。
-- [ ] 真实自举之后剩多少 level；stage 12–14 的 17 个 level 是否放得下。
+### 需要 GPU（2026-09-07 起有了实测）
+- [x] `--engine fideslib` 跑起来了，`Engine` 原语齐全（远程补了 `add`/`subtract` 的
+      `np.ndarray` 分支）。stage 01 通过。
+- [ ] **拉上 2026-09-07 的修复重跑**，尤其把 `MAXP` 检查抛出的 `q / p / total` 三个数字发回来，
+      好定出准确的 depth 上限表。先试 `dnum=4/5`——不改 C++ 可能就解掉 Bug 1 和一半的 Bug 3。
+- [ ] **Bug 2：bootstrap 运行时崩溃**，仍未定位。报告里写的 stage_02 应为 stage_03
+      （`make_rotated_copies` 只有 rotate，没有 multiply）。
+- [ ] 真实自举之后剩多少 level。**已知下界**：`plan_rotation_keys` 实测 `bootstrap_level=30`
+      不够跑完一层（1 个 rotation 掉到 level 0 以下），14 更不够（4 个）。所以
+      `bootstrap_level_budget=(3,3)` 配 `depth=30` 即使不崩也跑不完。
 - [ ] 旋转密钥预算。新 stage 的索引和 level 已量过：stage 12/14 各 12 个（`±1..±5`、`±8`、2048），
       stage 17+18 共 28 个（加 `±16..±1024`、4096、8192、16384），和 01–05 的集合大部分重叠。
 - [ ] `block_diag_2` 掩码族是**模 8 窗口 6**，FF 和 pooler 共用。GPU 侧若按单一 `n_slot` 公式生成

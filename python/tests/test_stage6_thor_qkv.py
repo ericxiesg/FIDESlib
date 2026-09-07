@@ -102,7 +102,7 @@ def test_scale_discipline_is_enforced():
 
 def test_rotation_plan_covers_every_rotation():
     """plan_rotation_keys must name every index the stages ask for, at a high enough level."""
-    plan = plan_rotation_keys(SMALL, depth=DEPTH)
+    plan = plan_rotation_keys(SMALL, depth=DEPTH, scope="qkv")
     x, w, b = sample(SMALL, seed=6)
     engine, _ = run_clear(SMALL, x, w, b)
     assert engine.rotations_used <= set(plan)
@@ -116,7 +116,7 @@ def thor_engine(device):
     # imported here, not at module scope: the checks above are numpy-only and must run without the
     # compiled extension.
     pf = pytest.importorskip("pyfideslib", reason="the pyfideslib extension is not built")
-    plan = plan_rotation_keys(SMALL, depth=DEPTH)
+    plan = plan_rotation_keys(SMALL, depth=DEPTH, scope="qkv")
     engine = pf.Engine(device, log_n=LOG_N, depth=DEPTH, scaling_bits=50, first_mod_bits=55, dnum=3,
                        rotation_indexes=plan)
     assert engine.slots == SMALL.slot_count

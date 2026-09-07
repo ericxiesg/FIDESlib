@@ -46,11 +46,22 @@ class Stages:
         self.masks = masks
         #: their complements, so both halves of ``rotate_internal`` are products (see module docstring).
         self.complement_masks = complement_masks
+        #: content -> engine plaintext, so a mask is encoded once per engine rather than per multiply
+        self._plaintexts: dict = {}
 
     # ---------------------------------------------------------------- primitives
     def rotate(self, x, delta: int):
-        """THOR's rotation direction: slot ``i`` moves to slot ``i + delta``."""
-        return self.engine.rotate(x, -int(delta) % self.g.slot_count)
+        """THOR's rotation direction: slot ``i`` moves to slot ``i + delta``.
+
+        A delta that is zero modulo the slot count is skipped entirely rather than handed to the
+        engine. It is not just a wasted call: ``ClearEngine`` records every rotation it is asked for,
+        so a zero would put index 0 into ``plan_rotation_keys``' output, and the GPU would then be
+        asked to generate a rotation key that OpenFHE has no index for - a 123 MiB key for a no-op.
+        """
+        index = -int(delta) % self.g.slot_count
+        if index == 0:
+            return x
+        return self.engine.rotate(x, index)
 
     def add(self, x, y):
         # he.py passes plaintexts on either side; the engine wants the ciphertext first.
@@ -67,7 +78,31 @@ class Stages:
     def multiply(self, x, y):
         if not self._is_ciphertext(x):
             x, y = y, x
-        return self.engine.multiply(x, y)
+        return self.engine.multiply(x, self.plaintext(y))
+
+    def plaintext(self, value):
+        """Turn a mask into whatever the engine wants to multiply by, and remember it.
+
+        Every mask in the port is a fixed numpy array - the ``rotate_internal`` families, LayerNorm's
+        value and statistic masks, the feed-forward window, the pooler's CLS mask - and each one is
+        multiplied into a ciphertext many times per layer. Handing the raw array to
+        ``pyfideslib.Engine`` encodes a fresh full-tower plaintext on *every* call: a GV100 run of one
+        layer reported 378 plaintexts holding 6.4 GB, which is most of the way to the card on its own.
+
+        A light plaintext is the level-agnostic form (``docs/light_plaintext.md``) and the engine
+        expands it through its own cache, so one encode serves every level. Keyed by content rather
+        than identity because several masks are rebuilt per call site.
+
+        ``ClearEngine`` has no such notion and wants the array itself, so this is a no-op there.
+        """
+        if not isinstance(value, np.ndarray) or not hasattr(self.engine, "encode_to_light_plaintext"):
+            return value
+        key = (value.shape, value.dtype.str, value.tobytes())
+        cached = self._plaintexts.get(key)
+        if cached is None:
+            cached = self.engine.encode_to_light_plaintext(value)
+            self._plaintexts[key] = cached
+        return cached
 
     def conjugate(self, x):
         return self.engine.conjugate(x)
@@ -169,22 +204,29 @@ class Stages:
                 rotated[base + r] = self.rotate(rotated[base + r - 1], -self.g.group_size)
         return rotated
 
-    def parallel_diagonal_pc_mult(self, ws, xs):
-        """The plaintext-ciphertext inner product, one term per input copy, for every block diagonal."""
-        out_dim, diag_dim, in_dim = ws.shape
-        prepared = np.full(xs.shape, None, dtype=object)
-        for index, x in np.ndenumerate(xs):
-            prepared[index] = self.prepare_for_multiply(x)
+    def diagonal_product(self, ws, prepared, out_index: int, diag_index: int):
+        """One block diagonal's plaintext-ciphertext inner product, over all the input copies."""
+        in_dim = ws.shape[2]
+        base = self.g.pack * out_index
+        temp = self.multiply(ws[out_index, diag_index, 0], prepared[base % in_dim])
+        for in_index in range(1, in_dim):
+            self.add_inplace(temp, self.multiply(ws[out_index, diag_index, in_index],
+                                                 prepared[(base + in_index) % in_dim]))
+        return self.rescale(temp)
 
+    def parallel_diagonal_pc_mult(self, ws, xs):
+        """The whole ``(out_dim, diag_dim)`` grid of partial products.
+
+        Kept for tests and for reading against ``he.py``; :meth:`pcmm` does not use it, because
+        holding the grid is what makes a layer run out of GPU memory - see :meth:`pcmm`.
+        """
+        out_dim, diag_dim, _ = ws.shape
+        prepared = [self.prepare_for_multiply(x) for x in np.asarray(xs).ravel()]
         output = np.full((out_dim, diag_dim), None, dtype=object)
         for out_index in range(out_dim):
             for diag_index in range(diag_dim):
-                temp = self.multiply(ws[out_index, diag_index, 0], prepared[(self.g.pack * out_index) % in_dim])
-                for in_index in range(1, in_dim):
-                    wx = self.multiply(ws[out_index, diag_index, in_index],
-                                       prepared[(self.g.pack * out_index + in_index) % in_dim])
-                    self.add_inplace(temp, wx)
-                output[out_index, diag_index] = self.rescale(temp)
+                output[out_index, diag_index] = self.diagonal_product(ws, prepared, out_index,
+                                                                      diag_index)
         return output
 
     def rotate_internal(self, x, delta: int, *, window=None, masks=None, complements=None):
@@ -204,17 +246,27 @@ class Stages:
         return self.rescale(rotated)
 
     def pcmm(self, ws, xs, *, window=None, masks=None, complements=None):
-        """Block-diagonal plaintext-ciphertext matrix product: the sum of the rotated partial products."""
+        """Block-diagonal plaintext-ciphertext matrix product: the sum of the rotated partial products.
+
+        Each output ciphertext needs only its own row of the ``(out_dim, diag_dim)`` grid, and needs it
+        only long enough to rotate and accumulate, so the row is formed and folded one diagonal at a
+        time. Building the whole grid first is the obvious transcription of ``he.py`` and it is what
+        exhausts a 32 GB card: at N=2^16 and depth 48 a ciphertext is about 50 MB, and the grid is
+        ``out_dim * diag_dim`` of them (48 for the QKV and feed-forward stages) where this holds two.
+        """
         out_dim, diag_dim, _ = ws.shape
         window = self.g.n_blocks if window is None else window
-        submatrices = self.parallel_diagonal_pc_mult(ws, xs)
+        prepared = [self.prepare_for_multiply(x) for x in np.asarray(xs).ravel()]
+
         output = np.full((out_dim,), None, dtype=object)
         for out_index in range(out_dim):
-            temp = self.level_down(submatrices[out_index, 0], by=1)
+            # the un-rotated term skips a rotate_internal, so it is levelled down by hand instead
+            temp = self.level_down(self.diagonal_product(ws, prepared, out_index, 0), by=1)
             for diag_index in range(1, diag_dim):
-                rotated = self.rotate_internal(submatrices[out_index, diag_index], window - diag_index,
-                                               window=window, masks=masks, complements=complements)
-                self.add_inplace(temp, rotated)
+                partial = self.diagonal_product(ws, prepared, out_index, diag_index)
+                self.add_inplace(temp, self.rotate_internal(partial, window - diag_index,
+                                                            window=window, masks=masks,
+                                                            complements=complements))
             output[out_index] = temp
         return output
 
