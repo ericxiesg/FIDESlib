@@ -17,26 +17,46 @@ from .stages import Stages
 
 
 def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0) -> dict[int, int]:
-    """``{rotation index: highest level it is used at}`` for stages 01-05, ready for ``SetRotationKeyLevels``.
+    """``{rotation index: highest level it is used at}`` for the full encoder layer.
 
-    Derived by running the stages on the clear engine with dummy data: every ``rotate`` records the
-    level of its operand, which is exactly what a level-truncated rotation key has to cover. This is
-    THOR's ``rotation_contexts`` table, computed rather than transcribed.
+    Derived by running the entire layer on the clear engine with dummy data: every ``rotate`` records
+    the level of its operand, which is exactly what a level-truncated rotation key has to cover.
     """
+    from .layer import EncoderLayer, encode_layer
+    from .geometry import THOR_ATTENTION_DENSE, THOR_FEEDFORWARD
+
     g = geometry
     engine = ClearEngine(g, depth=depth)
-    low, high = block_diagonal_masks(g)
-    stages = Stages(engine, g, masks=low, complement_masks=high)
 
-    zeros_x = np.zeros((g.dim, g.features))
-    zeros_w = np.zeros((g.features, g.features))
-    zeros_b = np.zeros((g.features,))
+    dummy_params = {
+        "query.weight": np.zeros((g.features, g.features)),
+        "query.bias": np.zeros((g.features,)),
+        "key.weight": np.zeros((g.features, g.features)),
+        "key.bias": np.zeros((g.features,)),
+        "value.weight": np.zeros((g.features, g.features)),
+        "value.bias": np.zeros((g.features,)),
+        "attention.output.dense.weight": np.zeros((g.features, g.features)),
+        "attention.output.dense.bias": np.zeros((g.features,)),
+        "attention.output.LayerNorm.weight": np.zeros((g.features,)),
+        "attention.output.LayerNorm.bias": np.zeros((g.features,)),
+        "intermediate.dense.weight": np.zeros((g.features * 4, g.features)),
+        "intermediate.dense.bias": np.zeros((g.features * 4,)),
+        "output.dense.weight": np.zeros((g.features, g.features * 4)),
+        "output.dense.bias": np.zeros((g.features,)),
+        "output.LayerNorm.weight": np.zeros((g.features,)),
+        "output.LayerNorm.bias": np.zeros((g.features,)),
+    }
 
-    x = np.array([engine.encrypt(m) for m in encode_activations(g, zeros_x)], dtype=object)
-    x8, x_cplx = stages.stage_01_complexify_x(x, layer_index=layer_index)
-    rots = stages.stage_02_make_rotated_copies(x_cplx)
-    stages.stage_03_query(rots, encode_weight(g, zeros_w), encode_bias(g, zeros_b))
-    return dict(engine.rotation_levels)
+    weights = encode_layer(dummy_params, layer_index)
+    layer = EncoderLayer(engine)
+    x = np.zeros((g.dim, g.features))
+    state = encrypt_activations(engine, g, x)
+    padding = layer.padding_mask(g.dim)
+    try:
+        layer.forward(state, weights, padding, layer_index, softmax_parameters=None)
+    except Exception:
+        pass
+    return {k: v for k, v in dict(engine.rotation_levels).items() if v >= 0}
 
 
 class LightWeights:

@@ -118,6 +118,9 @@ class Engine:
     def add(self, x, y):
         if isinstance(y, (int, float)):
             return self.cc.EvalAddScalar(x, float(y))
+        if isinstance(y, np.ndarray):
+            pt = self.encode(y, level=self.depth - self.level(x))
+            return self.cc.EvalAddPt(x, pt)
         if isinstance(y, _core.LightPlaintext):
             return self.cc.EvalAddLightPt(x, y)
         if isinstance(y, _core.Plaintext):
@@ -133,6 +136,9 @@ class Engine:
             return self.cc.EvalScalarSub(float(x), y)
         if isinstance(y, (int, float)):
             return self.cc.EvalSubScalar(x, float(y))
+        if isinstance(y, np.ndarray):
+            pt = self.encode(y, level=self.depth - self.level(x))
+            return self.cc.EvalSubPt(x, pt)
         if isinstance(y, _core.Plaintext):
             return self.cc.EvalSubPt(x, y)
         return self.cc.EvalSub(x, y)
@@ -165,6 +171,8 @@ class Engine:
         return self.cc.EvalConjugate(x)
 
     def rotate(self, x, delta: int):
+        if int(delta) == 0:
+            return x
         return self.cc.EvalRotate(x, int(delta))
 
     def rescale(self, x):
