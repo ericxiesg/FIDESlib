@@ -156,7 +156,11 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       而且 slab **从不还给 driver**。所以「8.4 GiB 空闲」大多躺在别的 size class 的空闲表里。
       已加自适应减半重试（**未编译**），见 `RESPONSE-gpu-runtime-grow-20260908.md`。
 - [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
-- [ ] **level 预算和显存预算目前不相交**：bl≥38 意味着 depth≈50，而 depth=50 预测要 34.4 GiB，
+- [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
+      （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，
+      **最小 depth 52 → 34**，显存 35.3 → **27.4 GiB（余量 4.6 GiB）**。
+      代价是 18 次自举里多 4 次；数值上是恒等变换，实测 logits 逐位不变。
+- [ ] ~~**level 预算和显存预算目前不相交**~~：bl≥38 意味着 depth≈50，而 depth=50 预测要 34.4 GiB，
       比 32 GiB 卡多 2.4 GiB。(4,4) 实测之后：bootstrap_depth 从 14 涨到 18，level 墙推到
       depth≥56，但显存降到 23.8 GiB——**depth=51/(4,4) 只差 0.8 GiB**，是目前最接近的一组。
 - [ ] 旋转密钥预算。新 stage 的索引和 level 已量过：stage 12/14 各 12 个（`±1..±5`、`±8`、2048），

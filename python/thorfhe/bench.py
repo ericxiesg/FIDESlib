@@ -135,7 +135,8 @@ def make_engine(args, geometry):
               f"({achievable} = depth - {args.bootstrap_depth}). The plan will assume levels the "
               f"hardware never reaches.", file=sys.stderr)
     plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=level,
-                              binary_rotations=args.binary_rotations)
+                              binary_rotations=args.binary_rotations,
+                              refresh_after_dense=args.refresh_after_dense)
     budget = None if args.no_bootstrap else tuple(args.bootstrap_level_budget)
     dist = (pyfideslib.SPARSE_TERNARY if args.secret_key_dist == "sparse"
             else pyfideslib.UNIFORM_TERNARY)
@@ -298,7 +299,8 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                    for index in range(args.layers)]
 
     engine = make_engine(args, THOR_BERT)
-    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations)
+    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
+                         refresh_after_dense=args.refresh_after_dense)
     stage_rows = []
 
     for sample, (ids, types, mask, _label) in enumerate(encoded):
@@ -483,7 +485,8 @@ def command_budget(args):
         level = (args.depth - args.bootstrap_depth if args.bootstrap_level is None
                  else args.bootstrap_level)
         plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=level,
-                                  binary_rotations=args.binary_rotations)
+                                  binary_rotations=args.binary_rotations,
+                                  refresh_after_dense=args.refresh_after_dense)
     predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
                          rotation_levels=plan, rotation_keys=args.keys,
                          level_budget=None if args.no_bootstrap else tuple(args.bootstrap_level_budget),
@@ -561,6 +564,10 @@ def build_parser():
     engine.add_argument("--calibrate", action="store_true",
                         help="derive the softmax window from the plaintext scores instead of using "
                              "THOR's per-layer table")
+    engine.add_argument("--refresh-after-dense", action="store_true",
+                        help="insert a bootstrap between stages 10 and 11. Not a THOR stage and "
+                             "semantically the identity, but it halves the layer's deepest level "
+                             "chain: minimum depth 52 -> 34, which is what fits a 32 GiB card")
     engine.add_argument("--binary-rotations", action="store_true",
                         help="perform every rotation as a sequence of power-of-two rotations: 15 "
                              "rotation keys instead of 210 (3.6 GiB instead of 51), at 4.5x the "
@@ -602,6 +609,7 @@ def build_parser():
     budget.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
     budget.add_argument("--no-bootstrap", action="store_true")
     budget.add_argument("--binary-rotations", action="store_true")
+    budget.add_argument("--refresh-after-dense", action="store_true")
     budget.add_argument("--keys", type=int, default=None,
                         help="skip the (slow) rotation plan and assume this many untruncated keys")
     budget.add_argument("--special-primes", type=int, default=11,

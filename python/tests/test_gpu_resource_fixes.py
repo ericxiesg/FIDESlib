@@ -11,6 +11,7 @@ import pytest
 from thorfhe import (SMALL, ClearEngine, ScaleMismatch, Stages, block_diagonal_masks,
                      plan_rotation_keys)
 from thorfhe import budget as budget_model
+from thorfhe.layernorm import LayerNormStages
 
 DEPTH = 12
 
@@ -229,3 +230,47 @@ def test_the_measured_level_budgets_reproduce_their_runs():
     assert got.total > 32 * budget_model.GIB             # ... and still does not fit
     assert budget_model.bootstrap_depth(level_budget=(4, 4)) == 18
     assert budget_model.bootstrap_depth(level_budget=(5, 5)) is None
+
+
+# ---------------------------------------------------------------- the inserted refresh
+def test_the_inserted_refresh_is_the_identity():
+    """`refresh` buys level headroom and must cost nothing else.
+
+    It is not a THOR stage - it is inserted between stages 10 and 11 to split the layer's deepest
+    level chain - so it has to be exactly value-neutral, or it would be trading accuracy for depth
+    rather than trading bootstraps for depth. The halving in front of the bootstrap and the doubling
+    in `temp + conj(temp)` cancel, the same way they do in stage 13.
+    """
+    engine = ClearEngine(SMALL, depth=40, bootstrap_level=30)
+    stages = LayerNormStages(engine, SMALL, masks={}, complement_masks={})
+
+    rng = np.random.default_rng(9)
+    values = [rng.normal(size=SMALL.slot_count) for _ in range(8)]
+    before = [engine.encrypt(v) for v in values]
+    for ct in before:                       # spend a few levels so the refresh has something to do
+        engine.level_down(ct, 5)
+
+    after = stages.refresh(before)
+    assert len(after) == 8
+    for index in range(8):
+        got = np.asarray(engine.decrypt(after[index]), dtype=complex)
+        assert np.abs(got.imag).max() < 1e-12
+        assert np.abs(got.real - values[index]).max() < 1e-12          # identity on the values
+        assert engine.level(after[index]) == 30                        # ... and only the level moved
+
+
+def test_the_refresh_costs_four_bootstraps_for_eight_ciphertexts():
+    """Pairs are folded into one complex ciphertext first, as stages 13 and 15 also do."""
+    class Counting(ClearEngine):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.bootstraps = 0
+
+        def bootstrap(self, ct, keep_levels=None):
+            self.bootstraps += 1
+            return super().bootstrap(ct, keep_levels)
+
+    engine = Counting(SMALL, depth=40, bootstrap_level=30)
+    stages = LayerNormStages(engine, SMALL, masks={}, complement_masks={})
+    stages.refresh([engine.encrypt(np.zeros(SMALL.slot_count)) for _ in range(8)])
+    assert engine.bootstraps == 4

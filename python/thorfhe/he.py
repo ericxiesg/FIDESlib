@@ -20,7 +20,8 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
                        bootstrap_level: int | None = None, scope: str = "layer",
                        dense: Geometry | None = None,
                        feedforward: Geometry | None = None,
-                       binary_rotations: bool = False) -> dict[int, int]:
+                       binary_rotations: bool = False,
+                       refresh_after_dense: bool = False) -> dict[int, int]:
     """``{rotation index: highest level it is used at}``, ready for ``SetRotationKeyLevels``.
 
     Derived by running the stages on the clear engine with dummy data: every ``rotate`` records the
@@ -75,7 +76,8 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
 
         weights = encode_layer(dummy, layer_index, qkv=g, dense=dense, feedforward=feedforward)
         layer = EncoderLayer(engine, qkv=g, dense=dense, feedforward=feedforward,
-                             binary_rotations=binary_rotations)
+                             binary_rotations=binary_rotations,
+                             refresh_after_dense=refresh_after_dense)
         state = np.array([engine.encrypt(m)
                           for m in encode_activations(g, np.zeros((g.dim, g.features)))],
                          dtype=object)

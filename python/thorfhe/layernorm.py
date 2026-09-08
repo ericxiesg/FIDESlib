@@ -132,6 +132,32 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels."""
         return self.he_layernorm1(self._residual(x, dense), gamma, beta, ones)
 
+    def refresh(self, x):
+        """Bootstrap a real 8-ciphertext bundle, folding pairs so it costs four bootstraps not eight.
+
+        Not a THOR stage - ``he.py`` has no refresh here. It is an inserted one, and it is *semantically
+        the identity*: the halving in front of the bootstrap and the doubling implicit in
+        ``temp + conj(temp)`` cancel exactly, the same way they do in :meth:`stage_13_gelu`. What it
+        buys is level headroom.
+
+        A layer's deepest chain runs from the softmax's own bootstrap to the rescale in front of
+        GELU's, and costs 37 levels: 14 for the tail of the softmax, 5 for the context and the
+        attention dense, 14 for LayerNorm, and 4 for the feed-forward expansion and that rescale.
+        Splitting it needs one refresh, and the split that minimises the longer half is right after
+        stage 10 - 19 levels before, 18 after - so the layer needs a bootstrap level of 20 instead of
+        38, and a depth of about 34 instead of 52. That is the difference between fitting on a 32 GiB
+        card and not.
+        """
+        half = len(x) // 2
+        out = np.empty((len(x),), dtype=object)
+        for index in range(half):
+            merged = self.add(x[index], self.multiply_1j(x[index + half]))
+            merged = self.bootstrap(self.rescale(self.multiply(merged, 0.5)))
+            conjugated = self.conjugate(merged)
+            out[index] = self.add(merged, conjugated)
+            out[index + half] = self.multiply_1j(self.subtract(conjugated, merged))
+        return out
+
     def stage_15_prepare_layernorm(self, x, y, *, keep_levels=3):
         """The feed-forward residual, bootstrapped back up - four bootstraps for eight ciphertexts.
 

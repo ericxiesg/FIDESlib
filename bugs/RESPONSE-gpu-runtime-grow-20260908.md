@@ -121,8 +121,50 @@ this->grow(poly.level);
    这是成本最低、最可能直接通的一步。
 2. 如果还差一点：**真正的解法是让空 slab 回到 driver**。需要记录每个 slab 的基址和它的块是否全空，
    `GPUfree` 时若整块空闲就 `cudaFreeAsync` 掉。这是个实打实的改动，我没 GPU 验不了，建议你那边评估。
-3. **算法侧**：在 stage 08→13 的数据通路上加一次自举，把那 37 层的链砍短。这样 depth 需求下来，
-   两堵墙就相交了。这条我可以做——要我开始吗？
+3. **算法侧：已经做了，见下。**
+
+---
+
+## 七、追加：插一次自举，最小 depth 52 → 34，两堵墙相交了
+
+先量清楚那 37 层花在哪（从 softmax 自己的自举往下数）：
+
+| 段 | level | 累计 |
+|---|---:|---:|
+| softmax 尾部 | 14 | 14 |
+| attention context | 2 | 16 |
+| attention dense | 3 | **19** |
+| LayerNorm | 14 | 33 |
+| FF1 | 3 | 36 |
+| GELU 自举前那次 rescale | 1 | 37 |
+
+中间没有任何东西刷新**数据通路**——LayerNorm 内部那次自举刷的是**统计量**，不是值本身。
+插一次就够，而让较长的一半最小的切点正好在 **stage 10 之后**：前 19、后 18。
+
+`LayerNormStages.refresh` 就是它，`EncoderLayer(refresh_after_dense=True)` /
+`bench --refresh-after-dense` 打开。它先把成对的实密文折成复密文，所以 8 条只花 **4 次自举**；
+而且是**严格恒等变换**——自举前的 ×½ 和 `x + conj(x)` 的加倍互相抵消，和 stage 13 一模一样。
+
+实测：
+
+| | 最小 depth | N=2^16 / dnum 4 / (3,3) 下一层的显存 |
+|---|---:|---:|
+| THOR 原调度 | 52 | 35.3 GiB —— 装不下 |
+| `--refresh-after-dense` | **34** | **27.4 GiB，余量 4.6 GiB** |
+
+而且真实 MRPC 样本上跑出来的 logits 和不加它的那次**逐位相同**
+（MAE 3.729e-05、概率 L1 9.077e-07），确认没有拿精度换深度。
+
+代价：18 次自举变 22 次。默认关闭（这是相对 `he.py` 的偏离），但它是目前唯一能把一层塞进卡里的办法。
+
+**所以下一次 GPU 运行建议直接用这组**：
+
+```bash
+python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 --per-stage     --binary-rotations --refresh-after-dense --depth 34 --dnum 4     --bootstrap-level-budget 3,3 --light-plaintext-cache 8
+```
+
+`depth=34` 下 `L+K` 大约 44，离 MAXP=64 很远；余量 4.6 GiB 也高于 keygen 需要的 3 GiB。
+配上自适应 slab，这组应该是目前最有希望跑通的。
 
 ---
 

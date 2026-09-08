@@ -108,7 +108,8 @@ class EncoderLayer:
 
     def __init__(self, engine, *, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
-                 feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False):
+                 feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
+                 refresh_after_dense: bool = False):
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
@@ -133,6 +134,11 @@ class EncoderLayer:
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
                                              complement_masks=ff_high,
                                              binary_rotations=binary_rotations)
+
+        #: Insert a bootstrap between stages 10 and 11. Not THOR's, and semantically the
+        #: identity - see `LayerNormStages.refresh`. It halves the layer's deepest level
+        #: chain, which is the only thing that brings the depth inside a 32 GiB card.
+        self.refresh_after_dense = refresh_after_dense
 
         #: LayerNorm's own starting point is the *slot-0* indicator, not the used-slot one
         self.norm_ones = engine.encrypt(statistic_mask(dense))
@@ -187,6 +193,8 @@ class EncoderLayer:
         attention_dense = keep("attention_dense",
                                dense.stage_10_attention_dense(context_rotated,
                                                               *weights.attention_dense))
+        if self.refresh_after_dense:
+            attention_dense = keep("refreshed_dense", norm.refresh(attention_dense))
         norm_1 = keep("norm_1", norm.stage_11_attention_layernorm(
             residual, attention_dense, *weights.attention_norm, self.norm_ones))
 

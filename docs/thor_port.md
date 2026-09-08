@@ -392,6 +392,39 @@ are a handful of indices (stage 02's `group_size`, `rotate_internal`'s small del
 dedicated keys for those and decomposing the long tail should recover most of the time for a few GiB.
 `Stages.rotation_steps` is the one place that would change.
 
+## An inserted refresh, and the depth it buys
+
+THOR's own schedule needs a **depth of 52** to run one layer, and at N=2^16 that does not fit a 32 GiB
+card. The reason is a single long chain. Measured from the softmax's own bootstrap down to the rescale
+in front of GELU's:
+
+| segment | levels | cumulative |
+|---|---:|---:|
+| tail of the softmax | 14 | 14 |
+| attention context | 2 | 16 |
+| attention dense | 3 | **19** |
+| LayerNorm | 14 | 33 |
+| feed-forward expansion | 3 | 36 |
+| the rescale in front of GELU's bootstrap | 1 | 37 |
+
+Thirty-seven levels with nothing refreshing the data path in between - LayerNorm bootstraps its
+*statistic*, not the value. One extra refresh splits it, and the split that minimises the longer half
+is right after stage 10: 19 before, 18 after.
+
+`LayerNormStages.refresh` is that refresh, and `EncoderLayer(refresh_after_dense=True)` inserts it. It
+folds pairs into complex ciphertexts first, so eight ciphertexts cost four bootstraps, and it is
+**exactly value-neutral**: the halving in front of the bootstrap and the doubling in `x + conj(x)`
+cancel, the same way they do in stage 13. Measured on a real MRPC sample, the logits come out
+bit-identical to a run without it.
+
+| | minimum depth | one layer at N=2^16, dnum 4, level budget (3,3) |
+|---|---:|---:|
+| THOR's schedule | 52 | 35.3 GiB - does not fit |
+| `refresh_after_dense` | **34** | **27.4 GiB, 4.6 GiB spare** |
+
+Four extra bootstraps out of eighteen, for eighteen levels of depth. It is off by default because it
+is a deviation from `he.py`, and it is the only thing so far that puts a layer inside the card.
+
 ## Open questions
 
 * **The he.py score bug.** Confirmed against the linear algebra, not against THOR's own outputs (the
