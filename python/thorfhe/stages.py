@@ -146,7 +146,19 @@ class Stages:
     def square(self, x):
         return self.engine.square(x)
 
+    #: Skip a bootstrap whose input already sits at or above the level a bootstrap would restore.
+    #: Four of a layer's eighteen bootstraps are like that - they arrive 28 levels *above* it - so
+    #: each costs a full bootstrap and hands back a ciphertext with fewer levels than it had.
+    #: Measured: this does not lower the minimum depth, it only removes the waste, which is why it is
+    #: opt-in. The tradeoff is noise - a bootstrap refreshes that too - and this trusts that a
+    #: ciphertext which has consumed few levels has little noise to refresh.
+    skip_pointless_bootstraps = False
+
     def bootstrap(self, x, keep_levels=None):
+        if (self.skip_pointless_bootstraps and keep_levels is None
+                and getattr(self.engine, "bootstrap_level", None) is not None
+                and self.engine.level(x) >= self.engine.bootstrap_level):
+            return x
         return self.engine.bootstrap(x, keep_levels)
 
     def level_down(self, x, by: int):

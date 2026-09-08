@@ -74,6 +74,13 @@ def bootstrap_plaintext_bytes(*, log_n: int, depth: int, slots: int,
 #: keys - at roughly 9 GiB. It is a calibration, not a derivation, so it is named as one.
 CALIBRATED_OVERHEAD = 9 * GIB
 
+#: Key generation needs scratch on top of the steady state: `KeySwitchingKey::Initialize` calls
+#: `generateAllDecompAndDigit`, which allocates the decomposition and digit buffers before the key
+#: settles. Round 4 (depth 44, predicted +0.6 GiB of headroom) still died there, in `AddRotationKeys`
+#: rather than at use - so the peak is at least the headroom that run had. Carried as a floor on
+#: required headroom rather than as a term in the total, because it is transient.
+KEYGEN_SCRATCH = 3 * GIB
+
 
 @dataclass
 class Budget:
@@ -120,9 +127,10 @@ class Budget:
             free = card_bytes - self.total
             lines.append(f"  {'headroom on card':<24}{free / GIB:7.1f} GiB"
                          f"{'  -- WILL NOT FIT' if free < 0 else ''}")
-            if 0 <= free < 2 * GIB:
-                lines.append("  (under 2 GiB of headroom: light-plaintext expansion and the "
-                             "ciphertext working set still have to come out of this)")
+            if 0 <= free < KEYGEN_SCRATCH:
+                lines.append(f"  -- headroom is under the {KEYGEN_SCRATCH / GIB:.0f} GiB key "
+                             "generation needs for its decomposition scratch:")
+                lines.append("     expect the OOM in AddRotationKeys, before anything runs.")
         lines.append(f"  (K = {self.special_primes} special primes)")
         return "\n".join(lines)
 

@@ -112,7 +112,9 @@ def make_engine(args, geometry):
     """The clear (numpy) engine, or fideslib when it is built and asked for."""
     if args.engine == "clear":
         from .clear import ClearEngine
-        return ClearEngine(geometry, depth=args.depth, bootstrap_level=args.bootstrap_level,
+        level = (args.depth - args.bootstrap_depth if args.bootstrap_level is None
+                 else args.bootstrap_level)
+        return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
                            strict=not args.lenient)
 
     import pyfideslib
@@ -122,7 +124,17 @@ def make_engine(args, geometry):
     # The rotation plan is computed, not hand-written: `plan_rotation_keys` runs the same layer on the
     # clear engine and records the level every rotation actually happens at, so the key set cannot
     # drift from the code that uses it. With --binary-rotations that is 15 indices instead of 210.
-    plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=args.bootstrap_level,
+    # On hardware the post-bootstrap level is not a free parameter: EvalBootstrap returns a
+    # ciphertext at `depth - GetBootstrapDepth()`. Planning against a different number silently
+    # builds keys for levels the run never reaches - and, worse, hides that the level budget does not
+    # fit at all. Derive it, and only let --bootstrap-level override it deliberately.
+    achievable = args.depth - args.bootstrap_depth
+    level = achievable if args.bootstrap_level is None else args.bootstrap_level
+    if level > achievable and not args.quiet:
+        print(f"warning: --bootstrap-level {level} is above what depth {args.depth} can give "
+              f"({achievable} = depth - {args.bootstrap_depth}). The plan will assume levels the "
+              f"hardware never reaches.", file=sys.stderr)
+    plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=level,
                               binary_rotations=args.binary_rotations)
     budget = None if args.no_bootstrap else tuple(args.bootstrap_level_budget)
     dist = (pyfideslib.SPARSE_TERNARY if args.secret_key_dist == "sparse"
@@ -468,7 +480,9 @@ def command_budget(args):
 
     plan = None
     if not args.keys:
-        plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=args.bootstrap_level,
+        level = (args.depth - args.bootstrap_depth if args.bootstrap_level is None
+                 else args.bootstrap_level)
+        plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=level,
                                   binary_rotations=args.binary_rotations)
     predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
                          rotation_levels=plan, rotation_keys=args.keys,
@@ -536,7 +550,12 @@ def build_parser():
     engine.add_argument("--layers", type=int, default=1,
                         help="how many encoder layers to run encrypted; the rest run in plaintext")
     engine.add_argument("--depth", type=int, default=90)
-    engine.add_argument("--bootstrap-level", type=int, default=80)
+    engine.add_argument("--bootstrap-level", type=int, default=None,
+                        help="level a bootstrap restores to. Defaults to depth - --bootstrap-depth, "
+                             "which is what the hardware actually gives; override only to explore")
+    engine.add_argument("--bootstrap-depth", type=int, default=14,
+                        help="levels EvalBootstrap itself consumes (OpenFHE GetBootstrapDepth); "
+                             "about 14 for level budget 3,3 with a sparse ternary key")
     engine.add_argument("--lenient", action="store_true",
                         help="do not enforce the FIXEDMANUAL level and scale contract")
     engine.add_argument("--calibrate", action="store_true",
@@ -578,7 +597,8 @@ def build_parser():
     budget.add_argument("--log-n", type=int, default=16)
     budget.add_argument("--depth", type=int, default=50)
     budget.add_argument("--dnum", type=int, default=4)
-    budget.add_argument("--bootstrap-level", type=int, default=40)
+    budget.add_argument("--bootstrap-level", type=int, default=None)
+    budget.add_argument("--bootstrap-depth", type=int, default=14)
     budget.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
     budget.add_argument("--no-bootstrap", action="store_true")
     budget.add_argument("--binary-rotations", action="store_true")
