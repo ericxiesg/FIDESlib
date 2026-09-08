@@ -152,7 +152,9 @@ def make_engine(args, geometry):
                              scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
                              dnum=args.dnum, rotation_indexes=plan,
                              bootstrap_level_budget=budget, secret_key_dist=dist,
-                             light_plaintext_cache=args.light_plaintext_cache)
+                             light_plaintext_cache=args.light_plaintext_cache,
+                             truncate_keys=not args.no_truncate_keys,
+                             allow_key_grow=args.allow_key_grow)
 
 
 def decode_six_blocks(engine, ciphertexts, geometry=THOR_ATTENTION_DENSE):
@@ -596,6 +598,14 @@ def build_parser():
     device.add_argument("--light-plaintext-cache", type=int, default=8,
                         help="expanded light plaintexts kept resident; each is about "
                              "(depth+1) * N * 8 bytes, so 64 is over a GiB")
+    device.add_argument("--no-truncate-keys", action="store_true",
+                        help="store every key complete. Costs memory; use it to rule the level plan "
+                             "in or out when a truncated key is suspected of being too small")
+    device.add_argument("--allow-key-grow", action="store_true",
+                        help="reload a truncated key that is used above its planned level instead of "
+                             "raising. Run once with this to validate a level plan: the key memory "
+                             "report then counts how many keys had to grow, and 0 means the plan is "
+                             "right. Leave it off otherwise - silent regrowth is a per-call cost")
     device.add_argument("--card-gib", type=float, default=32.0,
                         help="card size the predicted footprint is checked against")
     fhe.set_defaults(handler=command_fhe)

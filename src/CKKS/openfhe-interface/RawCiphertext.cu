@@ -875,52 +875,82 @@ std::map<int, int> FIDESlib::CKKS::GetBootstrapKeyLevelPlan(lbcrypto::CryptoCont
 	// Total levels consumed by bootstrapping = approxMod depth + lb_e + lb_d (OpenFHE FHECKKSRNS::GetBootstrapDepth).
 	const uint32_t bootDepth = lbcrypto::FHECKKSRNS::GetBootstrapDepth({ lb_e, lb_d }, dist);
 
-	// FIDESlib level = index of the top limb; a fresh ciphertext sits at GPUcc.L, after bootstrapping at L - bootDepth.
-	// StC starts lb_d levels above that. keyLevelMargin covers a deferred (FLEXIBLEAUTO) rescale.
-	const int stcTop = (int)GPUcc.L - (int)bootDepth + (int)lb_d + GPUcc.keyLevelMargin;
-	if (stcTop < 0 || stcTop >= (int)GPUcc.L) {
-		return giveUp((std::string("StC top level ") + std::to_string(stcTop) + " is outside [0, L=" + std::to_string(GPUcc.L) +
+	// FIDESlib level = index of the top limb. Inside EvalBootstrap the level walks down like this:
+	//
+	//   ModRaise            -> L                       (a full modulus chain)
+	//   CtS, lb_e layers    -> layer i runs at L - i
+	//   ApproxMod           -> consumes bootDepth - lb_e - lb_d
+	//   StC, lb_d layers    -> layer j runs at stcStart - j
+	//
+	// so a key's requirement is the *highest* level any layer applies it at, and a key shared between
+	// CtS and StC is pinned by its CtS use. That subsumes the older rule ("StC-exclusive keys go to
+	// stcTop, everything else stays complete") and additionally resolves per layer, which the older
+	// one did not: the last CtS layer sits lb_e - 1 levels below the first, and likewise for StC.
+	const int stcStart = (int)GPUcc.L - (int)bootDepth + (int)lb_d;
+	if (stcStart < 0 || stcStart >= (int)GPUcc.L) {
+		return giveUp((std::string("StC start level ") + std::to_string(stcStart) + " is outside [0, L=" + std::to_string(GPUcc.L) +
 					   ") for bootstrap depth " + std::to_string(bootDepth) + ", levelBudget {" + std::to_string(lb_e) + "," + std::to_string(lb_d) +
-					   "}, margin " + std::to_string(GPUcc.keyLevelMargin))
+					   "}")
 						.c_str());
 	}
 
 	BootstrapPrecomputation tmp;
 	std::vector<int> all = GetBootstrapIndexes(cc, slots, &tmp);
 
-	// Mark the keys used by the StC linear transform (rotIn per layer, rotOut[1] per layer, final accumulated offset).
-	std::set<int> stc;
-	for (auto& layer : tmp.StC) {
-		for (int j : layer.rotIn)
-			stc.insert(NormalizeRotationIndex(j, GPUcc.N));
-		if (layer.rotOut.size() > 1)
-			stc.insert(NormalizeRotationIndex(layer.rotOut[1], GPUcc.N));
-		if (!layer.rotOut.empty())
-			stc.insert(NormalizeRotationIndex(layer.rotOut[0], GPUcc.N)); // acc_offset key (set in GetBootstrapIndexes)
+	// index -> highest level it is applied at, before the safety margin.
+	std::map<int, int> need;
+	const auto note = [&need, &GPUcc](int index, int level) {
+		const int n = NormalizeRotationIndex(index, GPUcc.N);
+		auto it = need.find(n);
+		if (it == need.end() || it->second < level)
+			need[n] = level;
+	};
+
+	for (size_t i = 0; i < tmp.CtS.size(); ++i) {
+		const int level = (int)GPUcc.L - (int)i;
+		for (int j : tmp.CtS[i].rotIn)
+			note(j, level);
+		for (int j : tmp.CtS[i].rotOut)
+			note(j, level);
 	}
-	// Every other bootstrap key (Accumulate, CtS, conjugate) runs at the top level -> complete.
-	std::set<int> full;
-	for (auto& layer : tmp.CtS) {
-		for (int j : layer.rotIn)
-			full.insert(NormalizeRotationIndex(j, GPUcc.N));
-		for (int j : layer.rotOut)
-			full.insert(NormalizeRotationIndex(j, GPUcc.N));
+	for (size_t i = 0; i < tmp.StC.size(); ++i) {
+		// The layer's own start level, which over-estimates rotOut (applied after the layer's drop).
+		// Over-estimating is the safe direction: it keeps a key or two larger than strictly needed,
+		// where under-estimating would make ensureLevel throw at run time.
+		const int level = stcStart - (int)i;
+		for (int j : tmp.StC[i].rotIn)
+			note(j, level);
+		for (int j : tmp.StC[i].rotOut)
+			note(j, level);
 	}
+
 	int truncated = 0;
+	std::map<int, int> histogram; // truncation level -> how many keys, for the report
 	for (int j : all) {
 		const int n = NormalizeRotationIndex(j, GPUcc.N);
 		if (n == 0)
 			continue;
-		if (stc.contains(n) && !full.contains(n)) {
-			plan[n] = stcTop;
-			truncated++;
-		} else {
+		auto it = need.find(n);
+		if (it == need.end()) {
+			plan[n] = -1; // not attributed to a linear transform (conjugation, Accumulate): keep it whole
+			continue;
+		}
+		const int level = it->second + GPUcc.keyLevelMargin;
+		if (level < 0 || level >= (int)GPUcc.L) {
 			plan[n] = -1;
+		} else {
+			plan[n] = level;
+			histogram[level]++;
+			truncated++;
 		}
 	}
-	std::cerr << "[FIDESlib] bootstrap key level plan: " << truncated << " of " << plan.size() << " keys truncated to level " << stcTop << " (L=" << GPUcc.L
-			  << ", bootstrap depth " << bootDepth << ", levelBudget {" << lb_e << "," << lb_d << "}, margin " << GPUcc.keyLevelMargin << "); "
-			  << stc.size() << " StC indexes, " << full.size() << " CtS indexes, " << all.size() << " in total" << std::endl;
+
+	std::cerr << "[FIDESlib] bootstrap key level plan: " << truncated << " of " << plan.size() << " keys truncated (L=" << GPUcc.L << ", bootstrap depth "
+			  << bootDepth << ", levelBudget {" << lb_e << "," << lb_d << "}, StC starts at " << stcStart << ", margin " << GPUcc.keyLevelMargin << "); "
+			  << all.size() << " indexes in total, by level:";
+	for (auto& [level, count] : histogram)
+		std::cerr << " " << level << "x" << count;
+	std::cerr << std::endl;
 	return plan;
 }
 

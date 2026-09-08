@@ -95,3 +95,34 @@ correct as the port grows.
   truncated at full slots, since every StC index is also a CtS index there.
 * Seed-expanded `a` component (halves every key) - needs the patched OpenFHE key generation.
 * On-demand generation of the CtS/StC diagonal plaintexts (currently ~2-3 GiB resident for N=2^16).
+
+## Bootstrap keys: a level per layer, not a level per transform
+
+`GetBootstrapKeyLevelPlan` used to sort bootstrap keys into two buckets: an index used *only* by the
+SlotsToCoeffs transform was truncated to `stcTop`, and everything else was kept complete. That rule
+threw away two things, and on a level budget of {3,3} it truncated **nothing at all** - every StC
+index there is also a CoeffsToSlots index, so nothing was StC-exclusive.
+
+The level inside `EvalBootstrap` walks down like this:
+
+```
+ModRaise           -> L                    a full modulus chain
+CtS, lb_e layers   -> layer i at L - i
+ApproxMod          -> consumes bootDepth - lb_e - lb_d
+StC, lb_d layers   -> layer j at stcStart - j,  stcStart = L - bootDepth + lb_d
+```
+
+so a key's requirement is simply **the highest level any layer applies it at**, plus
+`keyLevelMargin`. That is what the plan computes now, and it subsumes the old rule: a key shared
+between CtS and StC is pinned by its CtS use, exactly as before, while a key used only in a *late*
+CtS layer no longer has to be complete just because it is a CtS key.
+
+It is never looser than the old rule - for the first StC layer the two agree exactly, and a CtS key
+whose layer index is below the margin still comes out complete - but it is tighter, so a mistake in
+the layer model would make a key too small. Two things make that cheap to rule out: `ensureLevel`
+raises rather than silently reloading (naming the key and both levels), and one run with
+`--allow-key-grow` turns the question into a number, since the key memory report counts how many keys
+had to grow. Zero means the plan is right.
+
+The plan also logs its level histogram now, so what the truncation actually bought is visible without
+having to derive it.
