@@ -39,9 +39,17 @@ from .geometry import Geometry
 class Stages:
     """Stage 01-05 of one BERT layer, over ``engine`` (``pyfideslib.Engine`` or ``ClearEngine``)."""
 
-    def __init__(self, engine, geometry: Geometry, masks=None, complement_masks=None):
+    #: Perform every rotation as a sequence of power-of-two rotations, so the layer needs 29 rotation
+    #: keys instead of 210. Off by default: it is a memory-for-time trade, and only worth making when
+    #: the keys do not fit. See :meth:`rotation_steps`.
+    binary_rotations = False
+
+    def __init__(self, engine, geometry: Geometry, masks=None, complement_masks=None,
+                 binary_rotations: bool | None = None):
         self.engine = engine
         self.g = geometry
+        if binary_rotations is not None:
+            self.binary_rotations = binary_rotations
         #: ``rotate_internal`` masks, keyed by delta: 1 on the slots with ``slot % n_slot < delta``.
         self.masks = masks
         #: their complements, so both halves of ``rotate_internal`` are products (see module docstring).
@@ -57,11 +65,30 @@ class Stages:
         engine. It is not just a wasted call: ``ClearEngine`` records every rotation it is asked for,
         so a zero would put index 0 into ``plan_rotation_keys``' output, and the GPU would then be
         asked to generate a rotation key that OpenFHE has no index for - a 123 MiB key for a no-op.
+
+        With ``binary_rotations`` set, an index that is not a power of two is performed as the
+        sequence of power-of-two rotations that sums to it. See :attr:`binary_rotations`.
         """
         index = -int(delta) % self.g.slot_count
         if index == 0:
             return x
-        return self.engine.rotate(x, index)
+        if not self.binary_rotations:
+            return self.engine.rotate(x, index)
+        for step in self.rotation_steps(index):
+            x = self.engine.rotate(x, step)
+        return x
+
+    def rotation_steps(self, index: int) -> list[int]:
+        """``index`` as a sum of powers of two, which is what the binary rotation basis performs.
+
+        Rotations compose additively modulo the slot count and cost no levels, so any index can be
+        reached from the powers of two alone. That trades key *memory* for rotation *count*: one
+        layer uses 210 distinct indices, which is 51 GiB of rotation keys at N=2^16 and depth 50 -
+        more than a 32 GB card holds even fully truncated - while the powers of two are 29 keys and
+        about 7 GiB. The cost is a rotation per set bit (about eight on average here) instead of one,
+        and a key-switch's worth of noise with it.
+        """
+        return [1 << bit for bit in range(index.bit_length()) if index >> bit & 1]
 
     def add(self, x, y):
         # he.py passes plaintexts on either side; the engine wants the ciphertext first.

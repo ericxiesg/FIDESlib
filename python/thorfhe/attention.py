@@ -84,8 +84,8 @@ class AttentionStages(Stages):
     """
 
     def __init__(self, engine, geometry: Geometry, masks=None, complement_masks=None,
-                 transpose=None, copies=None, attention=None):
-        super().__init__(engine, geometry, masks=masks, complement_masks=complement_masks)
+                 transpose=None, copies=None, attention=None, **kwargs):
+        super().__init__(engine, geometry, masks=masks, complement_masks=complement_masks, **kwargs)
         require_thor_shape(geometry)
         #: ``(mask0, mask1, mask2, mask3)`` from :func:`transpose_masks`.
         self.transpose = transpose

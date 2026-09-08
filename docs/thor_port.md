@@ -364,6 +364,34 @@ The layer output is faithful to `1.05e-3` relative RMSE, max absolute `3.7e-3` -
 under the FIXEDMANUAL contract, so it measures the *schedule and algebra*; CKKS noise is what a GPU run
 adds on top.
 
+## Rotation keys do not fit, and truncation does not save them
+
+One layer uses 210 distinct rotation indices. At N=2^16, depth 50 and dnum=4 a rotation key is
+248 MiB, so that is **51 GiB** - on a 32 GB card, alongside 22 GiB of bootstrap plaintexts and keys.
+
+Level truncation, which exists for exactly this, only takes it to 40 GiB. The level histogram says
+why: 140 of the 210 keys are used at level 40-49, because stages 01-05 run *before* the first
+bootstrap on a still-full ciphertext, and a key whose plan level reaches `L` is not truncated at all.
+So `0 truncated` in the GPU log is correct behaviour, not a broken feature.
+
+What does fit is decomposing every rotation into powers of two. Rotations compose additively in slot
+space and cost no levels, so 15 keys (`log2(slot_count)`) reach every index:
+
+| | keys | untruncated | truncated | rotations per layer |
+|---|---:|---:|---:|---:|
+| one key per index | 210 | 50.9 GiB | 40.3 GiB | 1802 |
+| `binary_rotations` | 15 | 3.6 GiB | 3.3 GiB | 8138 |
+
+4.5x the rotations for 14x less key memory, and the decrypted values are bit-identical - a rotation is
+an exact permutation, so splitting it changes nothing but the key-switching noise. It is off by
+default (`Stages.binary_rotations`, `bench --binary-rotations`) because it is a trade worth making
+only when the keys do not otherwise fit.
+
+The middle of that curve is unexplored and probably where the answer is: most of the 1802 rotations
+are a handful of indices (stage 02's `group_size`, `rotate_internal`'s small deltas), so keeping
+dedicated keys for those and decomposing the long tail should recover most of the time for a few GiB.
+`Stages.rotation_steps` is the one place that would change.
+
 ## Open questions
 
 * **The he.py score bug.** Confirmed against the linear algebra, not against THOR's own outputs (the

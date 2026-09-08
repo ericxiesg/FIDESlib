@@ -92,6 +92,34 @@ def test_the_clear_engine_still_gets_its_arrays():
     assert stages.plaintext(3.0) == 3.0
 
 
+# ---------------------------------------------------------------- binary rotations
+def test_binary_rotations_agree_with_direct_ones():
+    """The decomposition must be exact: rotations compose additively and cost no levels."""
+    low, high = block_diagonal_masks(SMALL)
+    direct_engine = ClearEngine(SMALL, depth=20)
+    binary_engine = ClearEngine(SMALL, depth=20)
+    direct = Stages(direct_engine, SMALL, masks=low, complement_masks=high)
+    binary = Stages(binary_engine, SMALL, masks=low, complement_masks=high, binary_rotations=True)
+
+    values = np.arange(SMALL.slot_count, dtype=float)
+    for delta in (1, 5, 16, 100, 1234, -7, -2048, SMALL.slot_count - 1, SMALL.slot_count):
+        want = direct_engine.decrypt(direct.rotate(direct_engine.encrypt(values), delta))
+        got = binary_engine.decrypt(binary.rotate(binary_engine.encrypt(values), delta))
+        assert np.abs(got - want).max() == 0.0, delta
+
+    assert all(index & (index - 1) == 0 for index in binary_engine.rotations_used)
+
+
+def test_rotation_steps_are_the_binary_expansion():
+    _, stages = small_stages()
+    assert stages.rotation_steps(1) == [1]
+    assert stages.rotation_steps(2048) == [2048]
+    assert stages.rotation_steps(2049) == [1, 2048]
+    assert stages.rotation_steps(7) == [1, 2, 4]
+    for index in (3, 100, 1234, 4095):
+        assert sum(stages.rotation_steps(index)) == index
+
+
 # ---------------------------------------------------------------- pcmm working set
 def test_pcmm_streams_the_grid_it_used_to_hold():
     """`out_dim * diag_dim` ciphertexts at 50 MB each is what exhausted a 32 GB card.
