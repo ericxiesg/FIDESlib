@@ -2,6 +2,8 @@
 // Created by carlosad on 25/03/24.
 //
 
+#include <stdexcept>
+#include <algorithm>
 #include "CudaUtils.cuh"
 #include <cassert>
 #include <list>
@@ -388,11 +390,40 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
 		}
 		CudaCheckErrorModNoSync;
 		if (free_limb.empty()) {
-			uint64_t* base;
-			cudaMallocAsync(&base, MBs * 1024 * 1024, s[id].ptr());
+			// The pool is per size class and slabs are never returned to the driver, so late in a run
+			// most of the "free" device memory is sitting in *other* size classes' free lists. Asking
+			// for the full slab then fails even when nvidia-smi shows gigabytes free - which is
+			// exactly the runtime OOM seen on a GV100 at depth 51: the first ciphertext copy needed a
+			// limb size class keygen had never populated, and a 1 GiB slab request could not be met
+			// with 8 GiB nominally free. Halve the request until it fits, down to a single block.
+			uint64_t* base   = nullptr;
+			uint64_t request = MBs * 1024 * 1024;
+			const uint64_t floor_bytes = (uint64_t)bytes;
+			cudaError_t err = cudaErrorMemoryAllocation;
+			while (request >= floor_bytes) {
+				err = cudaMallocAsync(&base, request, s[id].ptr());
+				if (err == cudaSuccess)
+					break;
+				(void)cudaGetLastError(); // clear the sticky-free async error before retrying
+				base = nullptr;
+				if (request == floor_bytes)
+					break;
+				request = std::max(floor_bytes, request / 2);
+			}
+			if (err != cudaSuccess || base == nullptr) {
+				size_t free_bytes = 0, total_bytes = 0;
+				cudaMemGetInfo(&free_bytes, &total_bytes);
+				throw std::runtime_error(
+				  "FIDESlib: GPU memory pool could not obtain a slab of " + std::to_string(floor_bytes) +
+				  " bytes for size class " + std::to_string(bytes) + " (device " + std::to_string(id) +
+				  ", " + std::to_string(free_bytes >> 20) + " of " + std::to_string(total_bytes >> 20) +
+				  " MiB free). Note the pool never returns slabs to the driver and is keyed by exact "
+				  "allocation size, so free memory reported by the driver may already be held by other "
+				  "size classes.");
+			}
 
 			mempool_lock[id].lock();
-			for (uint32_t i = 0; i < MBs * 1024 * 1024; i += bytes) {
+			for (uint64_t i = 0; i + (uint64_t)bytes <= request; i += (uint64_t)bytes) {
 				free_limb.emplace_back(((char*)base) + i);
 			}
 			mempool_lock[id].unlock();

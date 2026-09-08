@@ -44,6 +44,12 @@ def special_prime_count(*, log_n: int, depth: int, dnum: int, measured_key_mib: 
 MEASURED_BOOTSTRAP = {
     (16, 32768, (3, 3)): {"plaintexts": 378, "keys": 48,
                           "samples": [(30, 6426), (50, 10395)]},   # (depth, plaintext MiB)
+    # Measured 2026-09-08 at depth 51 / dnum 4. Only one depth sample, so the tower-per-depth slope
+    # is borrowed from (3,3) - it is a property of the RNS chain, not of the level budget.
+    (16, 32768, (4, 4)): {"plaintexts": 248, "keys": 73,
+                          "samples": [(51, 6882)],
+                          "resident_key_mib": 17452,   # 73 bootstrap + 15 rotation, 36 truncated
+                          "bootstrap_depth": 18},
 }
 
 
@@ -57,21 +63,43 @@ def bootstrap_plaintext_bytes(*, log_n: int, depth: int, slots: int,
     entry = MEASURED_BOOTSTRAP.get((log_n, slots, tuple(level_budget)))
     if entry is None:
         return None
-    (d0, m0), (d1, m1) = entry["samples"]
-    towers0 = m0 * MIB / (entry["plaintexts"] * (1 << log_n) * 8)
-    towers1 = m1 * MIB / (entry["plaintexts"] * (1 << log_n) * 8)
-    slope = (towers1 - towers0) / (d1 - d0)
-    towers = towers0 + slope * (depth - d0)
+    samples = entry["samples"]
+    per_tower = entry["plaintexts"] * (1 << log_n) * 8
+    if len(samples) >= 2:
+        (d0, m0), (d1, m1) = samples[:2]
+        slope = (m1 * MIB / per_tower - m0 * MIB / per_tower) / (d1 - d0)
+    else:
+        # One sample only: the towers-per-depth slope belongs to the RNS chain, not to the level
+        # budget, so borrow the one the two-sample entry pins down.
+        (a0, n0), (a1, n1) = MEASURED_BOOTSTRAP[(16, 32768, (3, 3))]["samples"]
+        base = MEASURED_BOOTSTRAP[(16, 32768, (3, 3))]["plaintexts"] * (1 << 16) * 8
+        slope = (n1 * MIB / base - n0 * MIB / base) / (a1 - a0)
+        (d0, m0) = samples[0]
+    towers = m0 * MIB / per_tower + slope * (depth - d0)
     return int(entry["plaintexts"] * towers * (1 << log_n) * 8)
 
 
-#: Measured totals sit above the sum of keys + bootstrap plaintexts, and the difference has to be
-#: carried or the prediction comes out optimistic and the next run fails the same way. From round 3
-#: (depth 50, dnum 4, 15 binary rotation keys, level budget (3,3)): the context reported 12044 MiB of
-#: keys and 10395 MiB of plaintexts, 22.0 GiB in total, while the card was close enough to full that
-#: a ~27 MiB light-plaintext expansion could not be allocated. That puts everything else - the
-#: bootstrap precomputation's working buffers, the auxiliary polynomial pool, the eval and conjugate
-#: keys - at roughly 9 GiB. It is a calibration, not a derivation, so it is named as one.
+def bootstrap_depth(*, log_n: int = 16, slots: int = 32768,
+                    level_budget: tuple[int, int] = (3, 3)) -> int | None:
+    """Levels ``EvalBootstrap`` itself consumes, where it has been measured.
+
+    This is what ties the level wall to the memory wall: the level a bootstrap restores to is
+    ``depth - bootstrap_depth``, so a level budget that shrinks the precomputation also raises the
+    depth the layer needs.
+    """
+    entry = MEASURED_BOOTSTRAP.get((log_n, slots, tuple(level_budget)))
+    return None if entry is None else entry.get("bootstrap_depth")
+
+
+#: Measured totals sit about 9 GiB above the sum of keys + bootstrap plaintexts, and that has to be
+#: carried or the prediction comes out optimistic and the next run fails the same way.
+#:
+#: What it is, established 2026-09-08 by reading `GPUmalloc`: the device allocator is a **slab pool
+#: keyed by exact allocation size**, and slabs are never returned to the driver. A size class whose
+#: free list is empty takes a fresh 1 GiB slab. So this term is the ciphertext working set - a layer
+#: holds 64 rotated copies in stage 02 alone - *rounded up to whole slabs per size class*, plus the
+#: auxiliary polynomial pool, which `ContextData::trimAuxilarPoly` could drain but nothing ever calls.
+#: It is a calibration, not a derivation, so it is named as one.
 CALIBRATED_OVERHEAD = 9 * GIB
 
 #: Key generation needs scratch on top of the steady state: `KeySwitchingKey::Initialize` calls
@@ -158,7 +186,16 @@ def estimate(*, log_n: int = 16, depth: int = 50, dnum: int = 4, slots: int | No
         rotation = count * full
 
     entry = MEASURED_BOOTSTRAP.get((log_n, slots, tuple(level_budget))) if level_budget else None
-    boot_keys = (entry["keys"] if entry else 0) * full
+    if entry and "resident_key_mib" in entry:
+        # Anchor on what a run actually reported rather than re-deriving how many bootstrap keys were
+        # truncated and to what level - that accounting is ambiguous in the log and the derived figure
+        # came out 4% high. Scale by tower count for other depths, which is exact.
+        measured_depth = entry["samples"][0][0]
+        anchor_towers = measured_depth + 1 + special_primes
+        scaled = entry["resident_key_mib"] * MIB * (depth + 1 + special_primes) / anchor_towers
+        boot_keys = max(0, int(scaled) - rotation) if rotation_levels or rotation_keys else int(scaled)
+    else:
+        boot_keys = (entry["keys"] if entry else 0) * full
     boot_pt = (bootstrap_plaintext_bytes(log_n=log_n, depth=depth, slots=slots,
                                          level_budget=level_budget)
                if level_budget else 0)

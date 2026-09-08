@@ -210,7 +210,22 @@ def test_an_unmeasured_level_budget_refuses_to_give_a_total():
     assert measured.predictable
     assert measured.total > 32 * budget_model.GIB          # round 3 did not fit, and this says so
 
-    unmeasured = budget_model.estimate(depth=50, dnum=4, rotation_keys=15, level_budget=(4, 4))
+    unmeasured = budget_model.estimate(depth=50, dnum=4, rotation_keys=15, level_budget=(5, 5))
     assert not unmeasured.predictable
     assert unmeasured.total is None
     assert "UNKNOWN" in unmeasured.format(32 * budget_model.GIB)
+
+
+def test_the_measured_level_budgets_reproduce_their_runs():
+    """(4,4) at depth 51 was reported as 6882 MiB of plaintexts and 17452 MiB of keys.
+
+    The model has to land on that, and then say the configuration does not fit - it was measured on a
+    run that got through key generation and died at the first ciphertext copy.
+    """
+    got = budget_model.estimate(depth=51, dnum=4, rotation_keys=15, level_budget=(4, 4),
+                                special_primes=12)
+    resident = (got.rotation_keys + got.bootstrap_keys + got.bootstrap_plaintexts) / budget_model.MIB
+    assert abs(resident - (17452 + 6882)) < 60           # within a quarter of a percent
+    assert got.total > 32 * budget_model.GIB             # ... and still does not fit
+    assert budget_model.bootstrap_depth(level_budget=(4, 4)) == 18
+    assert budget_model.bootstrap_depth(level_budget=(5, 5)) is None

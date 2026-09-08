@@ -149,8 +149,16 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
 - [x] 真实自举之后要剩多少 level。**最小 bootstrap_level = 38**（2026-09-08 实测，与 depth 无关：
       depth=50/60/90 在 bl≥38 都通过，bl=36 都失败）。瓶颈是 softmax 自举到 GELU 之间那 38 个
       level。之前记的「30 不够」用的判据不可靠，已更正，见 `RESPONSE-gpu-oom-20260908.md`。
+- [x] **GPU 上 stage 01–05 已验证**（2026-09-08，`report/fidelity-gpu-fideslib-20260908.md`）：
+      query relRMSE 1.03e-8、scale 1.0000，64 次旋转由 15 把二进制密钥完成。引擎原语、light
+      plaintext、binary rotations、pcmm 在硬件上都是对的；未验证的只剩依赖 bootstrap 的部分。
+- [x] **runtime grow OOM 的根因**：`GPUmalloc` 是按精确字节大小分类的 slab 池，默认 slab **1 GiB**，
+      而且 slab **从不还给 driver**。所以「8.4 GiB 空闲」大多躺在别的 size class 的空闲表里。
+      已加自适应减半重试（**未编译**），见 `RESPONSE-gpu-runtime-grow-20260908.md`。
+- [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
 - [ ] **level 预算和显存预算目前不相交**：bl≥38 意味着 depth≈50，而 depth=50 预测要 34.4 GiB，
-      比 32 GiB 卡多 2.4 GiB。差距不大，三个杠杆各值 1–5 GiB（见同一份文档）。
+      比 32 GiB 卡多 2.4 GiB。(4,4) 实测之后：bootstrap_depth 从 14 涨到 18，level 墙推到
+      depth≥56，但显存降到 23.8 GiB——**depth=51/(4,4) 只差 0.8 GiB**，是目前最接近的一组。
 - [ ] 旋转密钥预算。新 stage 的索引和 level 已量过：stage 12/14 各 12 个（`±1..±5`、`±8`、2048），
       stage 17+18 共 28 个（加 `±16..±1024`、4096、8192、16384），和 01–05 的集合大部分重叠。
 - [ ] `block_diag_2` 掩码族是**模 8 窗口 6**，FF 和 pooler 共用。GPU 侧若按单一 `n_slot` 公式生成
