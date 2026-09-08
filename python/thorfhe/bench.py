@@ -116,9 +116,30 @@ def make_engine(args, geometry):
                            strict=not args.lenient)
 
     import pyfideslib
+
+    from .he import plan_rotation_keys
+
+    # The rotation plan is computed, not hand-written: `plan_rotation_keys` runs the same layer on the
+    # clear engine and records the level every rotation actually happens at, so the key set cannot
+    # drift from the code that uses it. With --binary-rotations that is 15 indices instead of 210.
+    plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=args.bootstrap_level,
+                              binary_rotations=args.binary_rotations)
+    budget = None if args.no_bootstrap else tuple(args.bootstrap_level_budget)
+    dist = (pyfideslib.SPARSE_TERNARY if args.secret_key_dist == "sparse"
+            else pyfideslib.UNIFORM_TERNARY)
+
+    if not args.quiet:
+        from .budget import estimate
+        predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
+                             rotation_levels=plan, level_budget=budget)
+        print(f"\npredicted GPU footprint ({len(plan)} rotation keys):", file=sys.stderr)
+        print(predicted.format(args.card_gib * (1 << 30)), file=sys.stderr, flush=True)
+
     return pyfideslib.Engine(args.device, log_n=args.log_n, depth=args.depth,
                              scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
-                             dnum=args.dnum, rotation_indexes=args.rotation_indexes)
+                             dnum=args.dnum, rotation_indexes=plan,
+                             bootstrap_level_budget=budget, secret_key_dist=dist,
+                             light_plaintext_cache=args.light_plaintext_cache)
 
 
 def decode_six_blocks(engine, ciphertexts, geometry=THOR_ATTENTION_DENSE):
@@ -433,6 +454,33 @@ def _write_json(args, payload):
 
 
 # ---------------------------------------------------------------------- argv
+def level_budget(text: str) -> tuple[int, int]:
+    parts = text.replace(",", " ").split()
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("level budget is two integers, e.g. 3,3")
+    return (int(parts[0]), int(parts[1]))
+
+
+def command_budget(args):
+    """Predict the GPU footprint of a parameter set without building a context."""
+    from .budget import estimate
+    from .he import plan_rotation_keys
+
+    plan = None
+    if not args.keys:
+        plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=args.bootstrap_level,
+                                  binary_rotations=args.binary_rotations)
+    predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
+                         rotation_levels=plan, rotation_keys=args.keys,
+                         level_budget=None if args.no_bootstrap else tuple(args.bootstrap_level_budget),
+                         special_primes=args.special_primes, truncate=not args.no_truncate)
+    print(f"log_n={args.log_n} depth={args.depth} dnum={args.dnum} "
+          f"level_budget={args.bootstrap_level_budget} "
+          f"{'binary' if args.binary_rotations else 'one key per index'} rotations")
+    print(predicted.format(args.card_gib * (1 << 30)))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="python -m thorfhe.bench",
                                      description="THOR on fideslib: speed, accuracy and fidelity.")
@@ -509,10 +557,40 @@ def build_parser():
     device.add_argument("--device", default="cuda:0")
     device.add_argument("--log-n", type=int, default=16)
     device.add_argument("--scaling-bits", type=int, default=50)
-    device.add_argument("--first-mod-bits", type=int, default=60)
-    device.add_argument("--dnum", type=int, default=3)
-    device.add_argument("--rotation-indexes", default=None)
+    device.add_argument("--first-mod-bits", type=int, default=55)
+    device.add_argument("--dnum", type=int, default=4,
+                        help="raise only as far as the MAXP check needs: a key is 2*dnum polynomials, "
+                             "so dnum costs key memory linearly while only shrinking K")
+    device.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3),
+                        metavar="E,D", help="EvalBootstrapSetup level budget, e.g. 4,4")
+    device.add_argument("--no-bootstrap", action="store_true",
+                        help="build the context without bootstrap keys - a layer cannot finish "
+                             "without them, but it isolates the rest")
+    device.add_argument("--secret-key-dist", choices=("sparse", "uniform"), default="sparse")
+    device.add_argument("--light-plaintext-cache", type=int, default=8,
+                        help="expanded light plaintexts kept resident; each is about "
+                             "(depth+1) * N * 8 bytes, so 64 is over a GiB")
+    device.add_argument("--card-gib", type=float, default=32.0,
+                        help="card size the predicted footprint is checked against")
     fhe.set_defaults(handler=command_fhe)
+
+    budget = sub.add_parser("budget", help="predict the GPU footprint without building a context")
+    budget.add_argument("--log-n", type=int, default=16)
+    budget.add_argument("--depth", type=int, default=50)
+    budget.add_argument("--dnum", type=int, default=4)
+    budget.add_argument("--bootstrap-level", type=int, default=40)
+    budget.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
+    budget.add_argument("--no-bootstrap", action="store_true")
+    budget.add_argument("--binary-rotations", action="store_true")
+    budget.add_argument("--keys", type=int, default=None,
+                        help="skip the (slow) rotation plan and assume this many untruncated keys")
+    budget.add_argument("--special-primes", type=int, default=11,
+                        help="K; recover it from a run's key-memory line, it depends on the digits")
+    budget.add_argument("--no-truncate", action="store_true")
+    budget.add_argument("--card-gib", type=float, default=32.0)
+    budget.add_argument("--json", default=None)
+    budget.add_argument("--quiet", action="store_true")
+    budget.set_defaults(handler=command_budget)
 
     return parser
 

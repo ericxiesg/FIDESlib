@@ -141,14 +141,29 @@ class ClearEngine:
         return ClearCiphertext(np.roll(ct.slots, -delta), ct.level, ct.scale_exp)
 
     # ---- level management ----
+    def _spend(self, ct: ClearCiphertext, level: int, scale_exp: int, what: str) -> ClearCiphertext:
+        """Build the result of an operation that consumes levels, refusing to go below zero.
+
+        A ciphertext at a negative level has no moduli left and means the level budget does not fit -
+        on hardware it is a crash or garbage, so it is an error here. This is the only sound place to
+        catch it: ``plan_rotation_keys`` used to infer starvation from negative *rotation* levels,
+        which silently stops working as soon as two rotations share an index (as they all do under
+        ``binary_rotations``), because the plan keeps the maximum level per index.
+        """
+        if self.strict and level < 0:
+            raise ScaleMismatch(
+                f"{what}: would leave the ciphertext at level {level}. The level budget does not fit "
+                f"- raise the depth, or the bootstrap level if this is after a bootstrap.")
+        return ClearCiphertext(ct.slots.copy(), level, scale_exp)
+
     def rescale(self, ct: ClearCiphertext) -> ClearCiphertext:
         if self.strict and ct.scale_exp < 2:
             raise ScaleMismatch("rescale: ciphertext is already canonical (scale D^1); "
                                 "rescaling it would leave the scale below Delta")
-        return ClearCiphertext(ct.slots.copy(), ct.level - 1, ct.scale_exp - 1)
+        return self._spend(ct, ct.level - 1, ct.scale_exp - 1, "rescale")
 
     def level_down(self, ct: ClearCiphertext, by: int) -> ClearCiphertext:
-        return ClearCiphertext(ct.slots.copy(), ct.level - by, ct.scale_exp)
+        return self._spend(ct, ct.level - by, ct.scale_exp, f"level_down(by={by})")
 
     def square(self, ct: ClearCiphertext) -> ClearCiphertext:
         return self.multiply(ct, ct)

@@ -8,7 +8,9 @@ single decrypted value, which is why they need tests of their own rather than an
 import numpy as np
 import pytest
 
-from thorfhe import SMALL, ClearEngine, Stages, block_diagonal_masks, plan_rotation_keys
+from thorfhe import (SMALL, ClearEngine, ScaleMismatch, Stages, block_diagonal_masks,
+                     plan_rotation_keys)
+from thorfhe import budget as budget_model
 
 DEPTH = 12
 
@@ -42,8 +44,14 @@ def test_the_key_plan_never_asks_for_index_zero():
 
 
 def test_the_key_plan_refuses_a_starved_level_budget():
-    """Stages 01-05 cost 8 levels. Below that, dropping the negatives would hide missing keys."""
-    with pytest.raises(ValueError, match="below level 0"):
+    """Stages 01-05 cost 8 levels, so 6 cannot run and the planner must say so rather than
+    return a plan that is short of keys.
+
+    The engine now catches this first, at the operation that would go below level 0, which is the
+    only place that stays sound once rotations share indices - see
+    ``test_a_negative_level_is_an_error_not_a_silent_result``.
+    """
+    with pytest.raises((ValueError, ScaleMismatch), match="level"):
         plan_rotation_keys(SMALL, depth=6, scope="qkv")
 
 
@@ -161,3 +169,48 @@ def test_pcmm_streams_the_grid_it_used_to_hold():
 
     stages.parallel_diagonal_pc_mult = refuse
     stages.pcmm(weights, inputs)
+
+
+# ---------------------------------------------------------------- level starvation
+def test_a_negative_level_is_an_error_not_a_silent_result():
+    """The only sound place to catch level starvation.
+
+    ``plan_rotation_keys`` used to infer it from negative *rotation* levels, which stops working the
+    moment two rotations share an index - the plan keeps the maximum level per index, so a use deep
+    in the layer is masked by a shallow one. Under ``binary_rotations`` every index is shared, so the
+    check silently passed configurations that cannot run.
+    """
+    engine = ClearEngine(SMALL, depth=1)
+    ct = engine.encrypt(np.ones(SMALL.slot_count))
+    assert engine.level_down(ct, 1).level == 0            # exactly empty is still legal
+    with pytest.raises(ScaleMismatch, match="level -1"):
+        engine.level_down(ct, 2)
+
+
+def test_a_lenient_engine_still_allows_it():
+    """Strictness is opt-out, so an exploratory run can deliberately go past the budget."""
+    engine = ClearEngine(SMALL, depth=1, strict=False)
+    ct = engine.encrypt(np.ones(SMALL.slot_count))
+    assert engine.level_down(ct, 5).level == -4
+
+
+# ---------------------------------------------------------------- memory model
+def test_the_budget_model_reproduces_the_reported_key_size():
+    """248 MiB a key at depth 50 / dnum 4, and K=11 recovered from the same log line."""
+    k = budget_model.special_prime_count(log_n=16, depth=50, dnum=4,
+                                         measured_key_mib=12152, keys=49)
+    assert k == 11
+    assert round(budget_model.key_bytes(log_n=16, level=50, special_primes=k,
+                                        dnum=4) / budget_model.MIB) == 248
+
+
+def test_an_unmeasured_level_budget_refuses_to_give_a_total():
+    """A rosy total for a configuration nobody has run costs another twenty-minute OOM."""
+    measured = budget_model.estimate(depth=50, dnum=4, rotation_keys=15, level_budget=(3, 3))
+    assert measured.predictable
+    assert measured.total > 32 * budget_model.GIB          # round 3 did not fit, and this says so
+
+    unmeasured = budget_model.estimate(depth=50, dnum=4, rotation_keys=15, level_budget=(4, 4))
+    assert not unmeasured.predictable
+    assert unmeasured.total is None
+    assert "UNKNOWN" in unmeasured.format(32 * budget_model.GIB)

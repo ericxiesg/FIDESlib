@@ -146,9 +146,11 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       接口已留在 `Stages.rotation_steps`。
 - [ ] `levelBudget={4,4}`（原 T7）现在有了具体动机：bootstrap 的 10.4 GiB **明文**是第二大占用，
       减少线性变换的 giant-step 数能把明文和 key 一起压下来。
-- [ ] 真实自举之后剩多少 level。**已知下界**：`plan_rotation_keys` 实测 `bootstrap_level=30`
-      不够跑完一层（1 个 rotation 掉到 level 0 以下），14 更不够（4 个）。所以
-      `bootstrap_level_budget=(3,3)` 配 `depth=30` 即使不崩也跑不完。
+- [x] 真实自举之后要剩多少 level。**最小 bootstrap_level = 38**（2026-09-08 实测，与 depth 无关：
+      depth=50/60/90 在 bl≥38 都通过，bl=36 都失败）。瓶颈是 softmax 自举到 GELU 之间那 38 个
+      level。之前记的「30 不够」用的判据不可靠，已更正，见 `RESPONSE-gpu-oom-20260908.md`。
+- [ ] **level 预算和显存预算目前不相交**：bl≥38 意味着 depth≈50，而 depth=50 预测要 34.4 GiB，
+      比 32 GiB 卡多 2.4 GiB。差距不大，三个杠杆各值 1–5 GiB（见同一份文档）。
 - [ ] 旋转密钥预算。新 stage 的索引和 level 已量过：stage 12/14 各 12 个（`±1..±5`、`±8`、2048），
       stage 17+18 共 28 个（加 `±16..±1024`、4096、8192、16384），和 01–05 的集合大部分重叠。
 - [ ] `block_diag_2` 掩码族是**模 8 窗口 6**，FF 和 pooler 共用。GPU 侧若按单一 `n_slot` 公式生成

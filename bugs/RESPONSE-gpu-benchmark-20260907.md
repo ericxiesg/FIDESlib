@@ -151,8 +151,13 @@ return {k: v for k, v in ... if v >= 0}
 | 30 | 1 个掉到 0 以下 |
 | 80 | OK，**210 个 key**，最高 level 84 |
 
-**这直接回答了 Bug 2 的关键前提**：自举之后至少要留够跑完 stage 12–16 的 level，30 不够。所以
-`bootstrap_level_budget=(3,3)` 配 `depth=30` 即使不崩也跑不完一层。
+**这直接回答了 Bug 2 的关键前提**：自举之后至少要留够跑完 stage 12–16 的 level。
+
+> **2026-09-08 更正**：上面这个「30 不够」的判据本身是不可靠的——它从**旋转的负 level** 反推饥饿，
+> 而 plan 里每个 index 存的是**最大** level，所以只要两次旋转共用一个 index（`binary_rotations`
+> 下全都共用），深处的负 level 就被浅处的大 level 掩掉了。已改成在 `ClearEngine` 里直接拦截任何
+> 降到负 level 的操作。用这个可靠判据重测：**最小 bootstrap_level 是 38**，且与 depth 无关
+> （depth=50/60/90 在 bl≥38 都通过，bl=36 都失败）。详见 `RESPONSE-gpu-oom-20260908.md`。
 
 ---
 
