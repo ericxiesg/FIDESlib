@@ -125,7 +125,7 @@ this->grow(poly.level);
 
 ---
 
-## 七、追加：插一次自举，最小 depth 52 → 34，两堵墙相交了
+## 六、追加：插一次自举，最小 depth 52 → 34，两堵墙相交了
 
 先量清楚那 37 层花在哪（从 softmax 自己的自举往下数）：
 
@@ -160,7 +160,7 @@ this->grow(poly.level);
 **所以下一次 GPU 运行建议直接用这组**：
 
 ```bash
-python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 --per-stage     --binary-rotations --refresh-after-dense --depth 34 --dnum 4     --bootstrap-level-budget 3,3 --light-plaintext-cache 8
+python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 --per-stage \n    --binary-rotations --refresh-after-dense --depth 34 --dnum 4 \n    --bootstrap-level-budget 3,3 --light-plaintext-cache 8
 ```
 
 `depth=34` 下 `L+K` 大约 44，离 MAXP=64 很远；余量 4.6 GiB 也高于 keygen 需要的 3 GiB。
@@ -168,7 +168,7 @@ python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 --per-stage  
 
 ---
 
-## 六、给 fidelity 报告的两条备注
+## 七、给 fidelity 报告的两条备注
 
 * 「Stage 02 全部完成，无误差报告（rotate 是精确置换）」——精确的是**明文语义**；密文侧每次旋转
   是一次 key-switch，会加噪。binary rotations 下一次逻辑旋转变成最多 15 次，噪声按次数累积。
