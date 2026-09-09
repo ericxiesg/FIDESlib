@@ -159,15 +159,15 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       `SetRotationKeyLevels` 和自举预计算会请求同一个索引（binary rotations 下两边都是 2 的幂，
       必然重叠），先到的截断键留下，自举要的完整键被丢掉 → `ensureLevel` 抛错。已改成保留覆盖
       更高 level 的那把。
-- [ ] **illegal memory access 仍未解释**。已定位到 `LimbPartition::LTdotProductPtBatch`
-      （远程用 `CUDA_LAUNCH_BLOCKING=1` 钉住）。我加的检查先报了「pt[31] 为空」，但**那是误报**：
-      空明文是合法的（`DotProductPtInternal` 故意 push nullptr，kernel 里两处 `if (pt_partition
-      != nullptr)` 会跳过），我的检查把一个本来能跑的 bootstrap 弄崩了，已修。
-      仍然最可疑的是 **limb 数**：kernel 只校验 `pt_partition` 外层非空，没校验 `blockIdx.y`
-      在该 partition 的 limb 范围内，而 `grid.y` 来自 `out[0]` 的 level。这一半检查保留着。
-- [x] **`AddRotationKeys` 有键就整个跳过**：所以上一轮在 `AddRotationKey` 里做的「保留覆盖更高
-      level 的键」根本没被调用到。已改成「已有的键覆盖不够就重新生成」。顺带：`GetRotationKey`
-      不像 `HasRotationKey`/`AddRotationKey` 那样归一化负索引，已统一。
+- [x] **illegal memory access：根因找到了**（2026-09-09）。`LTdotProductPtBatch` 报
+      `would read 35 limbs from pt[0], which holds 34`：CtS 对角线由 OpenFHE 的
+      `EvalBootstrapSetup` 编码，而 `Bootstrap.cu` 里 ModRaise 之后是
+      `grow(cc.L - (rescaleTechnique == FLEXIBLEAUTOEXT))`——**只有 FLEXIBLEAUTOEXT 会少一层**。
+      我们跑 FIXEDMANUAL，于是密文 35 limb、明文 34 limb。上游测试用默认缩放技术，恰好对齐，
+      所以从没撞上。已在 `EvalCoeffsToSlots` 里每个 LT step 前把密文降到该层对角线的 level
+      （OpenFHE 的 `EvalMult(ct,pt)` 本来就隐式做这件事）。**未编译。**
+- [x] **密钥这条线结了**：远程实测 `49 rotation keys, 16 truncated, 0 grown at runtime`——
+      `AddRotationKeys` 的修复生效，`GetBootstrapKeyLevelPlan` 的逐层模型也是对的。
 - [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，
