@@ -155,6 +155,13 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
 - [x] **runtime grow OOM 的根因**：`GPUmalloc` 是按精确字节大小分类的 slab 池，默认 slab **1 GiB**，
       而且 slab **从不还给 driver**。所以「8.4 GiB 空闲」大多躺在别的 size class 的空闲表里。
       已加自适应减半重试（**未编译**），见 `RESPONSE-gpu-runtime-grow-20260908.md`。
+- [x] **`AddRotationKey` 用 `std::map::emplace`，索引重复时静默丢弃后来的键**（2026-09-09）：
+      `SetRotationKeyLevels` 和自举预计算会请求同一个索引（binary rotations 下两边都是 2 的幂，
+      必然重叠），先到的截断键留下，自举要的完整键被丢掉 → `ensureLevel` 抛错。已改成保留覆盖
+      更高 level 的那把。
+- [ ] **自举里的 illegal memory access 未定位**：`cudaErrorIllegalAddress` 是异步的，堆栈里的
+      `GPUfree` 只是第一个同步点，故障 kernel 在 `multMonomial` 内部。已在两个 limb 循环前加
+      边界断言；**下一步应该用 `compute-sanitizer --tool memcheck` 一次定位**。
 - [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，

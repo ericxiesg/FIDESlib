@@ -634,7 +634,28 @@ void ContextData::AddRotationKey(int index, KeySwitchingKey&& ksk) {
 		index += this->N / 2;
 	if (!precom.keys.contains(ksk.keyID))
 		precom.keys[ksk.keyID] = Precomputations::KeyPrecomputations{};
-	precom.keys.at(ksk.keyID).rot_keys.emplace(index, std::move(ksk));
+
+	auto& keys = precom.keys.at(ksk.keyID).rot_keys;
+	auto existing = keys.find(index);
+	if (existing == keys.end()) {
+		keys.emplace(index, std::move(ksk));
+		return;
+	}
+
+	// The same rotation index can be asked for twice: once by SetRotationKeyLevels, for the levels the
+	// *caller's* circuit rotates at, and again by the bootstrap precomputation, for the levels StC and
+	// CtS rotate at. With binary rotations the two sets are both powers of two, so they overlap by
+	// construction.
+	//
+	// `std::map::emplace` keeps the first and silently drops the second, which meant the caller's
+	// (lower, truncated) key survived and the bootstrap then used it above the level it was cut to -
+	// KeySwitchingKey::ensureLevel throwing on an index the caller had every right to truncate. Keep
+	// whichever of the two covers more: a complete key (maxLevel < 0) beats any truncated one.
+	const int have = existing->second.maxLevel;
+	const int want = ksk.maxLevel;
+	const bool replace = (have >= 0) && (want < 0 || want > have);
+	if (replace)
+		existing->second = std::move(ksk);
 }
 
 bool ContextData::HasRotationKey(int index, const KeyHash& keyID) {
