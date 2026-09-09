@@ -159,9 +159,13 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       `SetRotationKeyLevels` 和自举预计算会请求同一个索引（binary rotations 下两边都是 2 的幂，
       必然重叠），先到的截断键留下，自举要的完整键被丢掉 → `ensureLevel` 抛错。已改成保留覆盖
       更高 level 的那把。
-- [ ] **自举里的 illegal memory access 未定位**：`cudaErrorIllegalAddress` 是异步的，堆栈里的
-      `GPUfree` 只是第一个同步点，故障 kernel 在 `multMonomial` 内部。已在两个 limb 循环前加
-      边界断言；**下一步应该用 `compute-sanitizer --tool memcheck` 一次定位**。
+- [x] **illegal memory access 已定位到 `LimbPartition::LTdotProductPtBatch`**（远程用
+      `CUDA_LAUNCH_BLOCKING=1` 钉住，2026-09-09）：kernel 用 `out[0]` 的 level 定 `grid.y`，
+      却索引 out/in/pt **三个**数组的 limb，其中 `pt`（自举预计算明文）按自己的 level 生成，
+      最可能对不上。已加逐数组边界检查，抛出会指名是哪个数组、差多少。
+- [x] **`AddRotationKeys` 有键就整个跳过**：所以上一轮在 `AddRotationKey` 里做的「保留覆盖更高
+      level 的键」根本没被调用到。已改成「已有的键覆盖不够就重新生成」。顺带：`GetRotationKey`
+      不像 `HasRotationKey`/`AddRotationKey` 那样归一化负索引，已统一。
 - [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，

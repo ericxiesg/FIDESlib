@@ -815,9 +815,31 @@ void FIDESlib::CKKS::AddRotationKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPol
 	std::set<int> indexes2(indexes.begin(), indexes.end());
 	std::vector<int> indexes3;
 	for (int i : indexes2) {
-		if (i && !GPUcc->HasRotationKey(i, publicKey->GetKeyTag())) {
-			indexes3.emplace_back(i);
+		if (!i)
+			continue;
+		// GetRotationKey does not normalise its argument the way HasRotationKey and AddRotationKey do,
+		// and bootstrap indexes are signed, so normalise once here and use it for both lookups.
+		const int norm = NormalizeRotationIndex(i, GPUcc->N);
+		int want = -1; // -1: this plan wants a complete key
+		if (GPUcc->truncateKeys) {
+			auto it = maxLevels.find(norm);
+			if (it != maxLevels.end())
+				want = it->second;
 		}
+		if (GPUcc->HasRotationKey(norm, publicKey->GetKeyTag())) {
+			// Skipping on presence alone was wrong. This function is called twice for overlapping
+			// index sets - once for the caller's circuit with the levels SetRotationKeyLevels asked
+			// for, and once for the bootstrap with the levels StC and CtS need - and under binary
+			// rotations both sets are powers of two, so they always overlap. The first call's
+			// (truncated) key survived and the second call's requirement was silently dropped, so the
+			// bootstrap used a key above the level it was cut to. Regenerate whenever what is already
+			// there covers less than this plan needs; AddRotationKey then keeps the larger of the two.
+			const int have = GPUcc->GetRotationKey(norm, publicKey->GetKeyTag()).maxLevel;
+			const bool covered = (have < 0) || (want >= 0 && have >= want);
+			if (covered)
+				continue;
+		}
+		indexes3.emplace_back(i);
 	}
 	for (int i : indexes3) {
 		auto clave_rotacion = FIDESlib::CKKS::GetRotationKeySwitchKey(publicKey, i);
