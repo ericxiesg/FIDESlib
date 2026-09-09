@@ -1360,6 +1360,18 @@ void FIDESlib::CKKS::AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DC
 				}
 			}
 
+			// Which side of the seam a level mismatch is on is not otherwise visible: the tower count
+			// of these diagonals is decided entirely by OpenFHE's EvalBootstrapSetup (GetRawPlainText
+			// just reports GetAllElements().size()), while the ciphertext's post-ModRaise level is
+			// chosen here, by scaling technique. Print both once so the two are comparable in a log.
+			// A FIXEDMANUAL context grows the ciphertext to L, i.e. L + 1 limbs; anything less here is
+			// the gap that EvalCoeffsToSlots has to drop the ciphertext across.
+			if (!result.CtS.empty() && !result.CtS.front().A.empty()) {
+				std::cerr << "[FIDESlib] bootstrap diagonals: CtS layer 0 holds "
+						  << result.CtS.front().A.front().c0.getLevel() + 1 << " limbs; a ciphertext at L=" << GPUcc.L
+						  << " has " << GPUcc.L + 1 << " (scaling technique " << (int)GPUcc.rescaleTechnique << ")" << std::endl;
+			}
+
 			for (uint32_t i = 0; i < invA.size(); ++i) {
 				for (uint32_t j = 0; j < invA.at(i).size(); ++j) {
 					RawPlainText raw = GetRawPlainText(cc, invA.at(i).at(j));

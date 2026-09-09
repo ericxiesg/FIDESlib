@@ -60,6 +60,23 @@ const auto alignToDiagonals = [](Ciphertext& ct, const BootstrapPrecomputation::
 如果实测发现降完之后 bootstrap 精度不对，那就说明这个判断错了，届时再回头改 ModRaise。
 判断依据很直接：`test_stage4_bootstrap` 的精度断言。
 
+## 三点五、加了一行日志，把最后一环钉死
+
+我这个修复的前提是「明文那边是权威、密文该让步」。这个前提有一半是确认过的：
+GPU 侧**根本不选明文的 level**——`AddBootstrapPlaintexts` 把 OpenFHE 预计算好的对角线原样搬过来，
+`GetRawPlainText` 里限数就是 `GetAllElements().size()`，OpenFHE 给几个 tower 就是几个。
+
+没确认的是 OpenFHE 那边按什么规则定这个数（`EvalCoeffsToSlotsPrecompute` 里的 `towersToDrop`）。
+本机没有 OpenFHE 源码查不了，所以加了一行日志，建 context 时会打：
+
+```
+[FIDESlib] bootstrap diagonals: CtS layer 0 holds 34 limbs; a ciphertext at L=34 has 35
+           (scaling technique N)
+```
+
+一行就能看出差在哪一侧、差多少。**下次跑请把这一行发我。** 如果它显示的不是差 1，
+或者随 depth 变化的规律和我想的不一样，那我这个「降密文」的修法就得重新考虑。
+
 ## 四、密钥这条线可以结了
 
 ```
