@@ -654,8 +654,12 @@ void ContextData::AddRotationKey(int index, KeySwitchingKey&& ksk) {
 	const int have = existing->second.maxLevel;
 	const int want = ksk.maxLevel;
 	const bool replace = (have >= 0) && (want < 0 || want > have);
-	if (replace)
-		existing->second = std::move(ksk);
+	if (replace) {
+		// KeySwitchingKey holds a CudaNvtxRange with const members, so it is not assignable - erase
+		// and re-emplace rather than overwrite in place.
+		keys.erase(existing);
+		keys.emplace(index, std::move(ksk));
+	}
 }
 
 bool ContextData::HasRotationKey(int index, const KeyHash& keyID) {

@@ -159,10 +159,12 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       `SetRotationKeyLevels` 和自举预计算会请求同一个索引（binary rotations 下两边都是 2 的幂，
       必然重叠），先到的截断键留下，自举要的完整键被丢掉 → `ensureLevel` 抛错。已改成保留覆盖
       更高 level 的那把。
-- [x] **illegal memory access 已定位到 `LimbPartition::LTdotProductPtBatch`**（远程用
-      `CUDA_LAUNCH_BLOCKING=1` 钉住，2026-09-09）：kernel 用 `out[0]` 的 level 定 `grid.y`，
-      却索引 out/in/pt **三个**数组的 limb，其中 `pt`（自举预计算明文）按自己的 level 生成，
-      最可能对不上。已加逐数组边界检查，抛出会指名是哪个数组、差多少。
+- [ ] **illegal memory access 仍未解释**。已定位到 `LimbPartition::LTdotProductPtBatch`
+      （远程用 `CUDA_LAUNCH_BLOCKING=1` 钉住）。我加的检查先报了「pt[31] 为空」，但**那是误报**：
+      空明文是合法的（`DotProductPtInternal` 故意 push nullptr，kernel 里两处 `if (pt_partition
+      != nullptr)` 会跳过），我的检查把一个本来能跑的 bootstrap 弄崩了，已修。
+      仍然最可疑的是 **limb 数**：kernel 只校验 `pt_partition` 外层非空，没校验 `blockIdx.y`
+      在该 partition 的 limb 范围内，而 `grid.y` 来自 `out[0]` 的 level。这一半检查保留着。
 - [x] **`AddRotationKeys` 有键就整个跳过**：所以上一轮在 `AddRotationKey` 里做的「保留覆盖更高
       level 的键」根本没被调用到。已改成「已有的键覆盖不够就重新生成」。顺带：`GetRotationKey`
       不像 `HasRotationKey`/`AddRotationKey` 那样归一化负索引，已统一。

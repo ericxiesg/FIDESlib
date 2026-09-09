@@ -311,17 +311,20 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out,
 	dim3 sgrid = grid;
 	sgrid.y	   = slimbsize;
 
-	// The launch is sized `grid.y = limbsize`, taken from out[0]'s level, and the kernel indexes
-	// `limb[blockIdx.y]` in *every* partition of out, in and pt. So any partition holding fewer limbs
-	// than out[0]'s level implies hands the kernel a pointer past the end of that limb vector, and the
-	// resulting illegal access surfaces at whatever synchronises next - which is how it was first seen
-	// on a GV100, reported from a Stream::wait inside this call. The plaintexts are the operand most
-	// likely to disagree, since they are precomputed at a level of their own. Name which one it is.
+	// The launch is sized `grid.y = limbsize`, taken from out[0]'s level, and the kernel reaches
+	// `pt_partition[blockIdx.y]` after checking only that `pt_partition` itself is non-null. So a
+	// partition that *is* present but holds fewer limbs than out[0]'s level implies gives the kernel a
+	// pointer past the end of that limb vector, and the resulting illegal access surfaces at whatever
+	// synchronises next. The plaintexts are the operand most likely to disagree, being precomputed at
+	// a level of their own.
+	//
+	// A null `pt` entry is NOT an error: DotProductPtInternal pushes nullptr for a diagonal that has no
+	// plaintext, the device pointer table carries it through, and the kernel skips those terms. An
+	// earlier version of this check rejected them and aborted a bootstrap that was working.
 	const auto checkLimbs = [limbsize](const std::vector<LimbPartition*>& v, const char* what) {
 		for (size_t k = 0; k < v.size(); ++k) {
 			if (v[k] == nullptr)
-				throw std::runtime_error(std::string("FIDESlib: LTdotProductPtBatch got a null ") + what +
-										 " partition at index " + std::to_string(k));
+				continue; // a diagonal with no plaintext; the kernel skips it
 			if ((int)v[k]->limb.size() < limbsize)
 				throw std::runtime_error(std::string("FIDESlib: LTdotProductPtBatch would read ") + std::to_string(limbsize) +
 										 " limbs from " + what + "[" + std::to_string(k) + "], which holds " +
