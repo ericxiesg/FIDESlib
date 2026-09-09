@@ -112,7 +112,7 @@ def make_engine(args, geometry):
     """The clear (numpy) engine, or fideslib when it is built and asked for."""
     if args.engine == "clear":
         from .clear import ClearEngine
-        level = (args.depth - args.bootstrap_depth if args.bootstrap_level is None
+        level = (args.depth - resolve_bootstrap_depth(args) if args.bootstrap_level is None
                  else args.bootstrap_level)
         return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
                            strict=not args.lenient)
@@ -128,11 +128,11 @@ def make_engine(args, geometry):
     # ciphertext at `depth - GetBootstrapDepth()`. Planning against a different number silently
     # builds keys for levels the run never reaches - and, worse, hides that the level budget does not
     # fit at all. Derive it, and only let --bootstrap-level override it deliberately.
-    achievable = args.depth - args.bootstrap_depth
+    achievable = args.depth - resolve_bootstrap_depth(args)
     level = achievable if args.bootstrap_level is None else args.bootstrap_level
     if level > achievable and not args.quiet:
         print(f"warning: --bootstrap-level {level} is above what depth {args.depth} can give "
-              f"({achievable} = depth - {args.bootstrap_depth}). The plan will assume levels the "
+              f"({achievable} = depth - {resolve_bootstrap_depth(args)}). The plan will assume levels the "
               f"hardware never reaches.", file=sys.stderr)
     plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=level,
                               binary_rotations=args.binary_rotations,
@@ -470,6 +470,26 @@ def _write_json(args, payload):
 
 
 # ---------------------------------------------------------------------- argv
+def resolve_bootstrap_depth(args) -> int:
+    """Levels EvalBootstrap consumes, measured where we have measured it.
+
+    Not a constant, and not guessable: it moves with the level budget, and for this port it also
+    includes the level EvalCoeffsToSlots spends aligning the ciphertext to its diagonals. An explicit
+    --bootstrap-depth wins; otherwise take the measured value, and say so if there is none.
+    """
+    if getattr(args, "bootstrap_depth", None) is not None:
+        return args.bootstrap_depth
+    from .budget import bootstrap_depth
+    budget = None if getattr(args, "no_bootstrap", False) else tuple(args.bootstrap_level_budget)
+    measured = bootstrap_depth(log_n=getattr(args, "log_n", 16), level_budget=budget or (3, 3))
+    if measured is None:
+        raise SystemExit(
+            f"level budget {budget} has no measured bootstrap depth, so the post-bootstrap level "
+            f"cannot be derived. Pass --bootstrap-depth explicitly, or add the measurement to "
+            f"thorfhe.budget.MEASURED_BOOTSTRAP.")
+    return measured
+
+
 def level_budget(text: str) -> tuple[int, int]:
     parts = text.replace(",", " ").split()
     if len(parts) != 2:
@@ -484,7 +504,7 @@ def command_budget(args):
 
     plan = None
     if not args.keys:
-        level = (args.depth - args.bootstrap_depth if args.bootstrap_level is None
+        level = (args.depth - resolve_bootstrap_depth(args) if args.bootstrap_level is None
                  else args.bootstrap_level)
         plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=level,
                                   binary_rotations=args.binary_rotations,
@@ -558,9 +578,10 @@ def build_parser():
     engine.add_argument("--bootstrap-level", type=int, default=None,
                         help="level a bootstrap restores to. Defaults to depth - --bootstrap-depth, "
                              "which is what the hardware actually gives; override only to explore")
-    engine.add_argument("--bootstrap-depth", type=int, default=14,
-                        help="levels EvalBootstrap itself consumes (OpenFHE GetBootstrapDepth); "
-                             "about 14 for level budget 3,3 with a sparse ternary key")
+    engine.add_argument("--bootstrap-depth", type=int, default=None,
+                        help="levels EvalBootstrap itself consumes, including the one "
+                             "EvalCoeffsToSlots spends aligning to its diagonals. Defaults to the "
+                             "measured value for the level budget (17 for 3,3; 18 for 4,4)")
     engine.add_argument("--lenient", action="store_true",
                         help="do not enforce the FIXEDMANUAL level and scale contract")
     engine.add_argument("--calibrate", action="store_true",
@@ -615,7 +636,7 @@ def build_parser():
     budget.add_argument("--depth", type=int, default=50)
     budget.add_argument("--dnum", type=int, default=4)
     budget.add_argument("--bootstrap-level", type=int, default=None)
-    budget.add_argument("--bootstrap-depth", type=int, default=14)
+    budget.add_argument("--bootstrap-depth", type=int, default=None)
     budget.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
     budget.add_argument("--no-bootstrap", action="store_true")
     budget.add_argument("--binary-rotations", action="store_true")

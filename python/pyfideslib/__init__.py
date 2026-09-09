@@ -186,11 +186,24 @@ class Engine:
         return int(self.cc.GetRemainingLevels(x))
 
     def bootstrap(self, x, keep_levels: int | None = None):
+        """Refresh ``x``. ``keep_levels`` drops the result to exactly that level.
+
+        Asking for more than the bootstrap produced is an error rather than a quiet shortfall. It
+        used to return whatever it got, and the deficit then surfaced several stages later as
+        ``EvalLevelReduce would drop every RNS limb`` - a message about the wrong operation, in the
+        wrong place. How many levels a bootstrap leaves depends on the level budget, the secret key
+        distribution and (see ``EvalCoeffsToSlots``) the level its precomputed diagonals were encoded
+        at, so it is not something a caller can assume.
+        """
         out = self.cc.EvalBootstrap(x)
         if keep_levels is not None:
-            surplus = self.level(out) - keep_levels
-            if surplus > 0:
-                out = self.cc.EvalLevelReduce(out, surplus)
+            got = self.level(out)
+            if got < keep_levels:
+                raise ValueError(
+                    f"bootstrap left level {got}, but keep_levels={keep_levels} asked for more. "
+                    f"Raise the depth, or lower what the circuit expects after a bootstrap.")
+            if got > keep_levels:
+                out = self.cc.EvalLevelReduce(out, got - keep_levels)
         return out
 
     # ---- light plaintexts (THOR weight storage, docs/light_plaintext.md) ----

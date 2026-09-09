@@ -168,6 +168,12 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       （OpenFHE 的 `EvalMult(ct,pt)` 本来就隐式做这件事）。**未编译。**
 - [x] **密钥这条线结了**：远程实测 `49 rotation keys, 16 truncated, 0 grown at runtime`——
       `AddRotationKeys` 的修复生效，`GetBootstrapKeyLevelPlan` 的逐层模型也是对的。
+- [x] **第一次 GPU 自举跑通**（2026-09-09），精度 1.74e-5。日志确认了那个 off-by-one：
+      `CtS layer 0 holds 34 limbs; a ciphertext at L=34 has 35 (scaling technique 1)`。
+- [x] **level 预算重算**：`GetBootstrapDepth` (3,3) 实测 16，加上对齐消耗的 1 层 = **有效 17**；
+      一层需要的自举后 level 实测 **20**（19 挂 20 过）。所以 **最小 depth = 37**，不是 34。
+      depth=37：自举后 20 刚好够，显存 28.7 GiB、余量 3.3 GiB 刚好高过 keygen 的 3 GiB——
+      **是唯一同时满足两边的点**（38 的余量就低于 keygen 需求了）。
 - [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，

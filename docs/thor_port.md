@@ -417,10 +417,16 @@ folds pairs into complex ciphertexts first, so eight ciphertexts cost four boots
 cancel, the same way they do in stage 13. Measured on a real MRPC sample, the logits come out
 bit-identical to a run without it.
 
-| | minimum depth | one layer at N=2^16, dnum 4, level budget (3,3) |
-|---|---:|---:|
-| THOR's schedule | 52 | 35.3 GiB - does not fit |
-| `refresh_after_dense` | **34** | **27.4 GiB, 4.6 GiB spare** |
+| | minimum post-bootstrap level | minimum depth | one layer at N=2^16, dnum 4, budget (3,3) |
+|---|---:|---:|---:|
+| THOR's schedule | 38 | 55 | does not fit |
+| `refresh_after_dense` | **20** | **37** | **28.7 GiB, 3.3 GiB spare** |
+
+The depth is the post-bootstrap level plus what a bootstrap costs, and that cost is 17 rather than
+OpenFHE's reported 16: `EvalCoeffsToSlots` spends one more level aligning the ciphertext to the level
+its diagonals were encoded at (see above). Depth 37 is the only point that satisfies both walls -
+20 is exactly what the layer needs, and the 3.3 GiB left over is exactly what key generation needs
+for its decomposition scratch. At 38 the memory headroom drops below that.
 
 Four extra bootstraps out of eighteen, for eighteen levels of depth. It is off by default because it
 is a deviation from `he.py`, and it is the only thing so far that puts a layer inside the card.

@@ -24,10 +24,21 @@ def test_bootstrap_complex_and_keep_levels(boot_engine):
     rng = np.random.default_rng(7)
     z = rng.uniform(-1, 1, e.slots) + 1j * rng.uniform(-1, 1, e.slots)
     ct = e.encrypt(z, level=e.depth - 1)  # one level left
-    out = e.bootstrap(ct, keep_levels=10)
-    assert e.level(out) == 10
+
+    # How many levels a bootstrap leaves is not a constant: it moves with the level budget, the
+    # secret key distribution, and the level its diagonals were encoded at. Ask what it gives, then
+    # test the contract against that rather than against a number baked in here.
+    out = e.bootstrap(ct)
+    native = e.level(out)
+    assert native > 0
     err = np.max(np.abs(e.decrypt(out) - z))
-    print("bootstrap max err", err, "keys grown", e.cc.GetGrownKeyCount())
+    print("bootstrap max err", err, "level", native, "keys grown", e.cc.GetGrownKeyCount())
     assert err < 1e-2
     # 0 == the bootstrap level plan was exact; a non-zero count names the offending keys on stderr.
     assert e.cc.GetGrownKeyCount() == 0
+
+    # keep_levels below what it produced is honoured exactly ...
+    assert e.level(e.bootstrap(ct, keep_levels=native - 1)) == native - 1
+    # ... and above it is refused, rather than quietly handing back fewer levels than asked for
+    with pytest.raises(ValueError, match="keep_levels"):
+        e.bootstrap(ct, keep_levels=native + 1)

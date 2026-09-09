@@ -42,8 +42,12 @@ def special_prime_count(*, log_n: int, depth: int, dnum: int, measured_key_mib: 
 #: ``plaintexts`` is the count the context reports; ``towers`` is the per-plaintext RNS tower count
 #: recovered from the reported total, which is what scales with depth.
 MEASURED_BOOTSTRAP = {
+    # bootstrap_depth is measured, and it is the *effective* one: OpenFHE's GetBootstrapDepth
+    # reports 16 for (3,3), and EvalCoeffsToSlots spends one more aligning the ciphertext to the
+    # level its diagonals were encoded at (see docs/thor_port.md).
     (16, 32768, (3, 3)): {"plaintexts": 378, "keys": 48,
-                          "samples": [(30, 6426), (50, 10395)]},   # (depth, plaintext MiB)
+                          "samples": [(30, 6426), (50, 10395)],   # (depth, plaintext MiB)
+                          "bootstrap_depth": 17},
     # Measured 2026-09-08 at depth 51 / dnum 4. Only one depth sample, so the tower-per-depth slope
     # is borrowed from (3,3) - it is a property of the RNS chain, not of the level budget.
     (16, 32768, (4, 4)): {"plaintexts": 248, "keys": 73,
