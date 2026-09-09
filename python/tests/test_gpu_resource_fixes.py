@@ -274,3 +274,45 @@ def test_the_refresh_costs_four_bootstraps_for_eight_ciphertexts():
     stages = LayerNormStages(engine, SMALL, masks={}, complement_masks={})
     stages.refresh([engine.encrypt(np.zeros(SMALL.slot_count)) for _ in range(8)])
     assert engine.bootstraps == 4
+
+
+# ---------------------------------------------------------------- attention working set
+def test_the_score_product_aligns_one_diagonal_at_a_time():
+    """`in_dim` is 128 at THOR's geometry, and levelling all of them up front holds a second copy.
+
+    Each diagonal is used in exactly one iteration, so aligning it there keeps one alive instead of
+    128 - about 5 GiB at depth 37, which is what a GV100 ran out of. Counting level_down calls is a
+    proxy for that: the eager version made one per diagonal before any product, the lazy one
+    interleaves them with the multiplies.
+    """
+    from thorfhe import THOR_BERT
+    from thorfhe.attention import (AttentionScore, attention_rotate_masks, ccmm_masks,
+                                   make_copies_masks, transpose_masks)
+
+    g = THOR_BERT
+    order = []
+
+    class Recording(ClearEngine):
+        def level_down(self, ct, by):
+            order.append("level_down")
+            return super().level_down(ct, by)
+
+        def multiply(self, x, y):
+            order.append("multiply")
+            return super().multiply(x, y)
+
+    engine = Recording(g, depth=60)
+    low, high = block_diagonal_masks(g)
+    stages = AttentionScore(engine, g, masks=low, complement_masks=high,
+                            transpose=transpose_masks(g), copies=make_copies_masks(g),
+                            attention=attention_rotate_masks(g), ccmm=ccmm_masks(g))
+
+    # left at a higher level than the diagonals, so every diagonal needs aligning
+    left = [engine.encrypt(np.zeros(g.slot_count)) for _ in range(4)]
+    diagonals = [engine.level_down(engine.encrypt(np.zeros(g.slot_count)), 3) for _ in range(g.dim)]
+    order.clear()
+    stages._accumulate_product(left, diagonals, g.dim)
+
+    # eager alignment would put all 128 diagonal level_downs before the first multiply
+    first_multiply = order.index("multiply")
+    assert order[:first_multiply].count("level_down") < g.dim

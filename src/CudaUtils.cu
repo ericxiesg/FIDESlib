@@ -359,6 +359,67 @@ std::mutex mempool_lock[MAXG];
 
 std::map<int, std::vector<void*>> size_to_memory[MAXG];
 
+/**
+ * Every slab the pool has taken from the driver, so one can be given back.
+ *
+ * The pool is keyed by exact allocation size and, until now, never returned anything: a size class
+ * that had grown could not lend its memory to one that had not. On a GV100 running a full THOR layer
+ * that is what a run dies of - a 512 KiB slab request failing with 16 MiB free, all of it sitting in
+ * other size classes' free lists.
+ *
+ * Reclaiming is only attempted when an allocation is about to fail, so the fast path is untouched.
+ */
+struct PoolSlab {
+	char* base;
+	size_t bytes;	 // the whole slab
+	size_t block;	 // size class it was carved into
+	size_t blocks;	 // how many blocks that is
+};
+std::vector<PoolSlab> pool_slabs[MAXG];
+
+/**
+ * Give back every slab all of whose blocks are currently free. Caller holds mempool_lock[id].
+ * Returns how many bytes went back to the driver.
+ */
+static size_t ReclaimFreeSlabs(int id) {
+	size_t reclaimed = 0;
+	// Blocks handed out are still owned by kernels that may not have finished; only blocks sitting in
+	// a free list are safe, and getting there already went through Stream::wait in GPUfree. Sync once
+	// more before handing memory back, since this runs only on the failure path.
+	cudaDeviceSynchronize();
+
+	for (auto slab = pool_slabs[id].begin(); slab != pool_slabs[id].end();) {
+		auto klass = size_to_memory[id].find((int)slab->block);
+		if (klass == size_to_memory[id].end()) {
+			++slab;
+			continue;
+		}
+		std::vector<void*>& free_list = klass->second;
+		const auto owns = [&slab](void* p) {
+			char* c = (char*)p;
+			return c >= slab->base && c < slab->base + slab->bytes;
+		};
+		size_t held = 0;
+		for (void* p : free_list)
+			held += owns(p) ? 1 : 0;
+
+		if (held != slab->blocks) { // some blocks are still in use
+			++slab;
+			continue;
+		}
+		free_list.erase(std::remove_if(free_list.begin(), free_list.end(), owns), free_list.end());
+		// Allocated with cudaMallocAsync, so it has to go back the same way.
+		cudaFreeAsync(slab->base, s[id].ptr());
+		reclaimed += slab->bytes;
+		slab = pool_slabs[id].erase(slab);
+	}
+	if (reclaimed) {
+		cudaStreamSynchronize(s[id].ptr()); // let the frees land before the caller retries
+		std::cerr << "[FIDESlib] memory pool returned " << (reclaimed >> 20) << " MiB of wholly free slabs to the driver" << std::endl;
+	}
+	return reclaimed;
+}
+
 FIDESlib::Stream s[MAXG];
 
 #define MEMPOOL true
@@ -400,15 +461,28 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
 			uint64_t request = MBs * 1024 * 1024;
 			const uint64_t floor_bytes = (uint64_t)bytes;
 			cudaError_t err = cudaErrorMemoryAllocation;
-			while (request >= floor_bytes) {
-				err = cudaMallocAsync(&base, request, s[id].ptr());
-				if (err == cudaSuccess)
-					break;
-				(void)cudaGetLastError(); // clear the sticky-free async error before retrying
-				base = nullptr;
-				if (request == floor_bytes)
-					break;
-				request = std::max(floor_bytes, request / 2);
+			for (int attempt = 0; attempt < 2 && (err != cudaSuccess || base == nullptr); ++attempt) {
+				request = MBs * 1024 * 1024;
+				while (request >= floor_bytes) {
+					err = cudaMallocAsync(&base, request, s[id].ptr());
+					if (err == cudaSuccess)
+						break;
+					(void)cudaGetLastError(); // clear the sticky-free async error before retrying
+					base = nullptr;
+					if (request == floor_bytes)
+						break;
+					request = std::max(floor_bytes, request / 2);
+				}
+				// Nothing fits, not even one block: the memory is probably not gone, just parked in
+				// other size classes. Hand back whatever is wholly free and try once more.
+				if ((err != cudaSuccess || base == nullptr) && attempt == 0) {
+					mempool_lock[id].lock();
+					const size_t back = ReclaimFreeSlabs(id);
+					mempool_lock[id].unlock();
+					if (back == 0)
+						break; // nothing to reclaim, a second pass would fail identically
+					err = cudaErrorMemoryAllocation;
+				}
 			}
 			if (err != cudaSuccess || base == nullptr) {
 				size_t free_bytes = 0, total_bytes = 0;
@@ -417,15 +491,18 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
 				  "FIDESlib: GPU memory pool could not obtain a slab of " + std::to_string(floor_bytes) +
 				  " bytes for size class " + std::to_string(bytes) + " (device " + std::to_string(id) +
 				  ", " + std::to_string(free_bytes >> 20) + " of " + std::to_string(total_bytes >> 20) +
-				  " MiB free). Note the pool never returns slabs to the driver and is keyed by exact "
-				  "allocation size, so free memory reported by the driver may already be held by other "
-				  "size classes.");
+				  " MiB free). The pool is keyed by exact allocation size; wholly free slabs were "
+				  "already returned to the driver before this failed, so the remaining memory is held "
+				  "by size classes that are still in use.");
 			}
 
 			mempool_lock[id].lock();
+			uint64_t blocks = 0;
 			for (uint64_t i = 0; i + (uint64_t)bytes <= request; i += (uint64_t)bytes) {
 				free_limb.emplace_back(((char*)base) + i);
+				++blocks;
 			}
+			pool_slabs[id].push_back(PoolSlab{ (char*)base, request, (size_t)bytes, (size_t)blocks });
 			mempool_lock[id].unlock();
 		}
 		CudaCheckErrorModNoSync;

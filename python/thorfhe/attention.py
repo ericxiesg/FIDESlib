@@ -271,13 +271,20 @@ class AttentionScore(AttentionStages):
         out_dim = len(left)
 
         # The two operands reach this point by very different routes - the values come straight from the
-        # projection, the weights through a softmax - so bring them to a common level once, here.
+        # projection, the weights through a softmax - so they have to be brought to a common level.
         target = min(min(self.engine.level(ct) for ct in left),
                      min(self.engine.level(ct) for ct in diagonals))
-        left = [self.level_down(ct, self.engine.level(ct) - target) if self.engine.level(ct) > target
-                else ct for ct in left]
-        diagonals = [self.level_down(ct, self.engine.level(ct) - target) if self.engine.level(ct) > target
-                     else ct for ct in diagonals]
+
+        def aligned(ct):
+            surplus = self.engine.level(ct) - target
+            return self.level_down(ct, surplus) if surplus > 0 else ct
+
+        # `left` is two or four ciphertexts, so align it once. `diagonals` is `in_dim` of them - 128 at
+        # THOR's geometry - and levelling those eagerly holds a second copy of all of them while the
+        # caller still holds the originals: about 5 GiB at depth 37, which is what a GV100 runs out of
+        # here. Each diagonal is used in exactly one iteration below, so align it there instead and let
+        # it go, which keeps one alive rather than 128.
+        left = [aligned(ct) for ct in left]
 
         accumulator = np.full((out_dim, 4), None, dtype=object)
 
@@ -288,16 +295,19 @@ class AttentionScore(AttentionStages):
                 self.add_inplace(accumulator[index], value)
 
         # in_index 0 needs no rotation and no split; level_down aligns it with the rescaled rest.
+        first = aligned(diagonals[0])
         for i in range(out_dim):
-            accumulator[i, 0] = self.level_down(self.multiply(left[i], diagonals[0]), by=1)
+            accumulator[i, 0] = self.level_down(self.multiply(left[i], first), by=1)
+        del first
 
         for in_index in range(1, in_dim):
             block, j = divmod(in_index, g.pack)
             rotation = g.group_size * j - g.n_slot * in_index
 
             pieces = np.full((out_dim, 4), None, dtype=object)
+            diagonal = aligned(diagonals[in_index])
             for i in range(out_dim):
-                product = self.multiply(self.rotate(left[i], rotation), diagonals[in_index])
+                product = self.multiply(self.rotate(left[i], rotation), diagonal)
                 rescaled = self.rescale(product)
                 for column in ((0, 1) if j == 0 else (0, 1, 2, 3)):
                     pieces[i, column] = self.multiply(self.ccmm[column][in_index], rescaled)
