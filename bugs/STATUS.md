@@ -174,7 +174,15 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       一层需要的自举后 level 实测 **20**（19 挂 20 过）。所以 **最小 depth = 37**，不是 34。
       depth=37：自举后 20 刚好够，显存 28.7 GiB、余量 3.3 GiB 刚好高过 keygen 的 3 GiB——
       **是唯一同时满足两边的点**（38 的余量就低于 keygen 需求了）。
-- [ ] **让空 slab 回到 driver**：真正的解法，需要记录 slab 基址 + 全空检测。没 GPU 验不了。
+- [x] **空 slab 回到 driver**（2026-09-09）：记录每个 slab，分配失败时把整块空闲的还给 driver
+      再重试一次；只在失败路径上跑，快路径未动。**未编译。**
+- [x] **stage 06 峰值削减**：`_accumulate_product` 曾把 128 条 diagonal 全部降级成新对象
+      （原件还被调用方持有），depth=37 下多出约 5 GiB。改成逐条对齐、用完即弃，同时活着的从
+      128 条降到 1 条。Python 侧，立即生效。
+- [x] **自举、密钥计划、level 预算三条线都确认对了**（远程 depth=37 实测）：自举完整跑通、
+      `0 grown at runtime`、自举后 level 20 够跑完一层。剩下的纯粹是显存。
+- [ ] 辅助 poly 池（`trimAuxilarPoly` 仍无人调用）。以前调了也白调，**有了 slab 回收之后才有意义**——
+      两者是相乘的。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，
       **最小 depth 52 → 34**，显存 35.3 → **27.4 GiB（余量 4.6 GiB）**。
