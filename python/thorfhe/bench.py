@@ -314,6 +314,11 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                   f"(in use {memory['in_use'] / gib:5.2f}, reclaimable {held / gib:5.2f})  "
                   f"driver free {memory['driver_free'] / gib:5.2f} GiB", flush=True)
 
+        # The baseline, before any of the circuit has run: whatever is gone by now is keys, plaintexts
+        # and the engine's own tables. It is the number the per-stage lines have to be read against -
+        # a stage that fails with little free is only the circuit's fault if there was room to begin
+        # with, and that distinction is not visible from the failure alone.
+        probe("(after key generation)", layer.attention.device_memory())
         layer.memory_probe = probe
     stage_rows = []
 
