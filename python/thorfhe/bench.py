@@ -497,6 +497,85 @@ def level_budget(text: str) -> tuple[int, int]:
     return (int(parts[0]), int(parts[1]))
 
 
+def command_workingset(args):
+    """Measure how many ciphertexts each stage keeps alive, and what that costs on the device.
+
+    The key and plaintext footprint is what `budget` predicts; this is the other half - what the
+    circuit itself holds while it runs. Both have to fit, and it was the second that the GPU runs kept
+    dying of, one stage at a time, without anyone knowing which stage was actually the largest.
+    """
+    import collections
+
+    import numpy as np
+
+    from .encoding import encode_activations
+    from .layer import EncoderLayer, encode_layer
+    from .workingset import tracking_engine
+
+    g = THOR_BERT
+    square = np.zeros((g.features, g.features))
+    vector = np.zeros(g.features)
+    dummy = {"query.weight": square, "query.bias": vector, "key.weight": square,
+             "key.bias": vector, "value.weight": square, "value.bias": vector,
+             "attention.output.dense.weight": square, "attention.output.dense.bias": vector,
+             "attention.output.LayerNorm.weight": vector, "attention.output.LayerNorm.bias": vector,
+             "intermediate.dense.weight": np.zeros((4 * g.features, g.features)),
+             "intermediate.dense.bias": np.zeros(4 * g.features),
+             "output.dense.weight": np.zeros((g.features, 4 * g.features)),
+             "output.dense.bias": vector,
+             "output.LayerNorm.weight": vector, "output.LayerNorm.bias": vector}
+
+    level = args.depth - resolve_bootstrap_depth(args)
+    engine, tracker = tracking_engine(g, depth=args.depth, bootstrap_level=level)
+    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
+                         refresh_after_dense=args.refresh_after_dense)
+
+    for owner, names in ((layer.attention, ("stage_01_complexify_x", "stage_02_make_rotated_copies",
+                                            "stage_03_query", "stage_04_key", "stage_05_value",
+                                            "stage_06_attention_score", "stage_07_softmax",
+                                            "stage_08_attention_context")),
+                         (layer.dense, ("stage_10_attention_dense",)),
+                         (layer.norm, ("stage_11_attention_layernorm", "refresh",
+                                       "stage_15_prepare_layernorm", "stage_16_output_layernorm")),
+                         (layer.feedforward, ("stage_12_intermediate_dense", "stage_13_gelu",
+                                              "stage_14_output_dense"))):
+        for name in names:
+            bound = getattr(owner, name, None)
+            if bound is None:
+                continue
+
+            def labelled(bound=bound, name=name):
+                def call(*a, **kw):
+                    tracker.at(name)
+                    return bound(*a, **kw)
+                return call
+            setattr(owner, name, labelled())
+
+    state = np.array([engine.encrypt(m)
+                      for m in encode_activations(g, np.zeros((g.dim, g.features)))], dtype=object)
+    layer.forward(state, encode_layer(dummy, 0), layer.padding_mask(g.dim), 0)
+
+    print(f"ciphertext working set, one layer, depth={args.depth}, bootstrap level {level}, "
+          f"N=2^{args.log_n}")
+    print(tracker.report(g.slot_count, args.depth))
+    # By bytes, not by count: the two disagree, and it is the bytes that run a card out of memory.
+    # Stage 07 holds the most ciphertexts and stage 06 the most memory, because stage 06 works near
+    # full level while stage 07's ciphertexts have already spent theirs.
+    peak = tracker.peak
+    print(f"\n  peak {peak.nbytes / (1 << 30):.2f} GiB in {peak.where} "
+          f"({peak.count} live)")
+    print("  (light-plaintext expansions and the engine's own scratch are on top of this)")
+    # Where in the level range that stage's bytes sit. A ciphertext at level 36 costs six times one at
+    # level 5, so a handful of near-full ones outweighs a crowd of spent ones - and a ciphertext held
+    # at a level higher than its next use needs is pure waste that a level_down would return.
+    ranked = sorted(tracker.per_label.values(), key=lambda p: -p.nbytes)
+    for row in [r for r in ranked if r.nbytes >= (1 << 30)]:
+        histogram = collections.Counter(row.levels)
+        held = " ".join(f"L{lvl}x{n}" for lvl, n in sorted(histogram.items(), reverse=True))
+        print(f"  {row.where}: {held}")
+    return 0
+
+
 def command_budget(args):
     """Predict the GPU footprint of a parameter set without building a context."""
     from .budget import estimate
@@ -650,6 +729,19 @@ def build_parser():
     budget.add_argument("--json", default=None)
     budget.add_argument("--quiet", action="store_true")
     budget.set_defaults(handler=command_budget)
+
+    working = sub.add_parser("workingset",
+                             help="measure the ciphertext working set of one layer, per stage")
+    working.add_argument("--depth", type=int, default=37)
+    working.add_argument("--log-n", type=int, default=16)
+    working.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
+    working.add_argument("--bootstrap-depth", type=int, default=None)
+    working.add_argument("--bootstrap-level", type=int, default=None)
+    working.add_argument("--no-bootstrap", action="store_true")
+    working.add_argument("--binary-rotations", action="store_true", default=True)
+    working.add_argument("--refresh-after-dense", action="store_true", default=True)
+    working.add_argument("--quiet", action="store_true")
+    working.set_defaults(handler=command_workingset)
 
     return parser
 

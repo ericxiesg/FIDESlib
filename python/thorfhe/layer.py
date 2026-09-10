@@ -180,38 +180,64 @@ class EncoderLayer:
             attention.release_pooled_memory()
             return value
 
+        # An intermediate stays alive as long as a local binds it, and `rotated` alone is 64
+        # ciphertexts at nearly full level - about 2 GiB at depth 37, held through stages 03 to 06 for
+        # no reason. Measured, stage 06 is the layer's true peak (5.43 GiB against a GV100's 3.7 GiB
+        # of headroom), so releasing each intermediate where it dies is worth more than any single
+        # rewrite inside a stage. When a trace is being taken it keeps them anyway; that mode is for
+        # reading numbers, not for fitting on the card.
+        def drop(*names):
+            for name in names:
+                scope[name] = None
+
+        scope = {}
+
         attention, dense, norm, ff = self.attention, self.dense, self.norm, self.feedforward
 
-        residual, complexified = attention.stage_01_complexify_x(x, layer_index)
-        rotated = keep("rotated", attention.stage_02_make_rotated_copies(complexified))
-        query = keep("query", attention.stage_03_query(rotated, *weights.query))
-        key = keep("key", attention.stage_04_key(rotated, *weights.key))
-        value = keep("value", attention.stage_05_value(rotated, *weights.value))
+        scope["residual"], scope["complexified"] = attention.stage_01_complexify_x(x, layer_index)
+        scope["rotated"] = keep("rotated",
+                                attention.stage_02_make_rotated_copies(scope["complexified"]))
+        drop("complexified")
+        scope["query"] = keep("query", attention.stage_03_query(scope["rotated"], *weights.query))
+        scope["key"] = keep("key", attention.stage_04_key(scope["rotated"], *weights.key))
+        scope["value"] = keep("value", attention.stage_05_value(scope["rotated"], *weights.value))
+        drop("rotated")
 
-        scores = keep("scores", attention.stage_06_attention_score(query, key))
+        scores = keep("scores", attention.stage_06_attention_score(scope["query"], scope["key"]))
+        drop("query", "key")
         weighted = keep("softmax", attention.stage_07_softmax(scores, attention_mask, layer_index,
                                                            parameters=softmax_parameters))
+        scores = None
         # The softmax diagonals are the layer's largest working set. Nothing reads them after this
         # except a trace, so release them as they are consumed whenever no trace is being taken.
-        context = keep("context", attention.stage_08_attention_context(value, weighted,
+        context = keep("context", attention.stage_08_attention_context(scope["value"], weighted,
                                                                        consume=trace is None))
+        drop("value")
+        weighted = None
 
         context_rotated = dense.stage_02_make_rotated_copies(context)
+        context = None
         attention_dense = keep("attention_dense",
                                dense.stage_10_attention_dense(context_rotated,
                                                               *weights.attention_dense))
+        context_rotated = None
         if self.refresh_after_dense:
             attention_dense = keep("refreshed_dense", norm.refresh(attention_dense))
         norm_1 = keep("norm_1", norm.stage_11_attention_layernorm(
-            residual, attention_dense, *weights.attention_norm, self.norm_ones))
+            scope["residual"], attention_dense, *weights.attention_norm, self.norm_ones))
+        drop("residual")
+        attention_dense = None
 
         intermediate = keep("intermediate",
                             ff.stage_12_intermediate_dense(norm_1, *weights.intermediate))
         activated = keep("gelu", ff.stage_13_gelu(intermediate))
+        intermediate = None
         output_dense = keep("output_dense",
                             ff.stage_14_output_dense(activated, *weights.output_dense))
+        activated = None
 
         norm_2_input = keep("norm_2_input", norm.stage_15_prepare_layernorm(norm_1, output_dense))
+        norm_1 = output_dense = None
         return keep("norm_2", norm.stage_16_output_layernorm(norm_2_input, *weights.output_norm,
                                                              self.norm_ones,
                                                              layer_index=layer_index))

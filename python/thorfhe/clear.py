@@ -24,7 +24,10 @@ class ScaleMismatch(AssertionError):
 class ClearCiphertext:
     """Slots, level (remaining multiplications) and scale exponent (1 = canonical, 2 = needs rescale)."""
 
-    __slots__ = ("slots", "level", "scale_exp")
+    # `__weakref__` is here so a ciphertext can be tracked without being kept alive. That is what
+    # `thorfhe.workingset` needs to measure a stage's peak, and measuring it is the only way to know
+    # which stage actually dominates GPU memory rather than which one looks like it should.
+    __slots__ = ("slots", "level", "scale_exp", "__weakref__")
 
     def __init__(self, slots: np.ndarray, level: int, scale_exp: int = 1):
         self.slots = np.asarray(slots, dtype=complex)
