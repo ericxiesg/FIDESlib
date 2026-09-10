@@ -1,6 +1,22 @@
 # 状态与 TODO
 
-日期：2026-09-04，2026-09-07 更新。分支 `bootstrap-dev`。
+日期：2026-09-04，2026-09-10 更新。分支 `bootstrap-dev`。
+
+> **2026-09-10（最新）**：GPU 上 **stage 06 首次通过**，OOM 移到 stage 07。这一天做了三件事：
+>
+> 1. **把「哪个 stage 最大」从推断改成测量**（[response](RESPONSE-gpu-workingset-measured-20260910.md)）。
+>    `workingset.py` 用弱引用数活着的密文，并按**各自真实的 level** 定价——按 `depth` 定价是上界，
+>    会把顺序排反。`forward` 改成中间结果最后一次使用后立即释放：**峰值 5.43 → 3.43 GiB**。
+> 2. **stage 06 的对角线改成流式**（[response](RESPONSE-gpu-stream-make-copies-20260910.md)）。
+>    `iter_copies` 边造边交，64 条同时只活一条：**stage 06 3.43 → 2.18 GiB**。
+>    峰值换成 stage 05 的 3.04 GiB，压着它的是 stage 02 的 `rotated`（64 条 @L31，2 GiB）。
+> 3. **加了设备侧显存探针 `--device-memory`**（[response](RESPONSE-gpu-device-memory-probe-20260910.md)）。
+>    起因是远程那轮里 **stage 06 以 5.43 GiB 通过、stage 07 以 4.58 GiB 挂掉**——大的过了小的挂了，
+>    说明真正卡住的东西**不在主机侧模型里**。再按模型削减就是猜。探针给出
+>    `pooled / in_use / driver_free / driver_total`，把「池子在囤」和「密钥明文占满」区分开。
+>
+> **下一步等远程带 `--device-memory` 的那一跑**。融合 stage 03/04/05 以拿掉 `rotated` 那 2 GiB
+> 是已知的下一个杠杆，但要改骨架，先看数据再决定。
 
 > **2026-09-07**：远程 agent 跑了一轮 GPU benchmark，报告在
 > [GPU-benchmark-bugs-20260907.md](GPU-benchmark-bugs-20260907.md)，我的复核和修复在
