@@ -152,10 +152,28 @@ class AttentionStages(Stages):
         so ``copies[l]`` is the ciphertext a ciphertext-ciphertext product needs for input diagonal
         ``l``. Costs two levels: the chunk mask and the half-group mask.
         """
+        copies = np.empty((self.g.pack * x.shape[0],), dtype=object)
+        for position, copy in self.iter_copies(x):
+            copies[position] = copy
+        return copies
+
+    def iter_copies(self, x):
+        """The same diagonals as :meth:`make_copies`, yielded as ``(position, ciphertext)`` as they
+        are built rather than returned as a filled array.
+
+        At THOR's geometry that array is 64 ciphertexts near full level - about 1.8 GiB at depth 37,
+        and over half of the layer's largest measured working set. They are built all at once and then
+        used one at a time, so holding the array is the cost, not the arithmetic. A consumer that takes
+        them in the order they are produced holds a handful instead.
+
+        Each round of the outer loop produces two blocks, ``index`` and ``index + n // 2``, because the
+        real and imaginary halves of one complex ciphertext are two different diagonals. That is why
+        this yields positions rather than a flat sequence: the production order is not the natural
+        order, and it is the consumer that has to bend.
+        """
         g = self.g
         low, high, chunks = self.copies
         n = x.shape[0]
-        copies = np.empty((g.pack * n,), dtype=object)
 
         for index in range(n // 2):
             merged = self.add(x[index], self.multiply_1j(x[index + n // 2]))
@@ -172,11 +190,10 @@ class AttentionStages(Stages):
 
                 for offset, half in ((0, first), (1, second)):
                     conjugated = self.conjugate(half)
-                    real = self.add(half, conjugated)
-                    imag = self.multiply_1j(self.subtract(conjugated, half))
-                    copies[index * g.pack + 2 * chunk_index + offset] = real
-                    copies[(index + n // 2) * g.pack + 2 * chunk_index + offset] = imag
-        return copies
+                    yield (index * g.pack + 2 * chunk_index + offset,
+                           self.add(half, conjugated))
+                    yield ((index + n // 2) * g.pack + 2 * chunk_index + offset,
+                           self.multiply_1j(self.subtract(conjugated, half)))
 
 
 def ccmm_masks(g: Geometry) -> dict[int, dict[int, np.ndarray]]:
@@ -275,20 +292,66 @@ class AttentionScore(AttentionStages):
         at scale Delta^2. The score product has four outputs and the context product two, which is why
         the width is taken from the operand rather than fixed on the class.
         """
-        g = self.g
-        out_dim = len(left)
-
         # The two operands reach this point by very different routes - the values come straight from the
         # projection, the weights through a softmax - so they have to be brought to a common level.
         target = min(min(self.engine.level(ct) for ct in left),
                      min(self.engine.level(ct) for ct in diagonals))
 
+        def in_order():
+            for in_index in range(in_dim):
+                yield in_index, diagonals[in_index]
+                # last use of this diagonal: let it go, so the next iteration's ciphertexts
+                # come out of the auxiliary pool rather than off the top of the heap
+                if consume:
+                    diagonals[in_index] = None
+
+        return self._accumulate(left, in_order(), target)
+
+    def _accumulate_streamed(self, left, produce):
+        """:meth:`_accumulate_product` against a generator of ``(in_index, ciphertext)`` pairs.
+
+        The loop below only ever accumulates, so the order the diagonals arrive in does not matter -
+        which means a producer does not have to build them all before the first one can be used. That
+        is worth about 1.8 GiB at stage 06, where :meth:`iter_copies` produces 64 near-full-level
+        ciphertexts in an order that is not the order they are consumed in.
+
+        The one thing the streamed form cannot do is scan every diagonal for the common level before
+        starting, so it takes the first one's and holds the rest to it. Every producer here builds its
+        diagonals by one uniform path, so that is already true; it is checked rather than assumed
+        because a violation would otherwise surface as a silent FIXEDMANUAL scale mismatch much later.
+        """
+        stream = iter(produce)
+        try:
+            first = next(stream)
+        except StopIteration:
+            raise ValueError("_accumulate_streamed needs at least one diagonal") from None
+
+        level = self.engine.level(first[1])
+        target = min(min(self.engine.level(ct) for ct in left), level)
+
+        def checked():
+            yield first
+            for in_index, diagonal in stream:
+                if self.engine.level(diagonal) != level:
+                    raise ValueError(
+                        f"streamed diagonal {in_index} is at level {self.engine.level(diagonal)}, "
+                        f"not {level} like the first: a streamed product cannot align to a level it "
+                        "has not seen yet")
+                yield in_index, diagonal
+
+        return self._accumulate(left, checked(), target)
+
+    def _accumulate(self, left, stream, target):
+        """The accumulation loop itself, over ``(in_index, diagonal)`` pairs in any order."""
+        g = self.g
+        out_dim = len(left)
+
         def aligned(ct):
             surplus = self.engine.level(ct) - target
             return self.level_down(ct, surplus) if surplus > 0 else ct
 
-        # `left` is two or four ciphertexts, so align it once. `diagonals` is `in_dim` of them - 128 at
-        # THOR's geometry - and levelling those eagerly holds a second copy of all of them while the
+        # `left` is two or four ciphertexts, so align it once. The diagonals are `in_dim` of them - 128
+        # at THOR's geometry - and levelling those eagerly holds a second copy of all of them while the
         # caller still holds the originals: about 5 GiB at depth 37, which is what a GV100 runs out of
         # here. Each diagonal is used in exactly one iteration below, so align it there instead and let
         # it go, which keeps one alive rather than 128.
@@ -302,20 +365,20 @@ class AttentionScore(AttentionStages):
             else:
                 self.add_inplace(accumulator[index], value)
 
-        # in_index 0 needs no rotation and no split; level_down aligns it with the rescaled rest.
-        first = aligned(diagonals[0])
-        for i in range(out_dim):
-            accumulator[i, 0] = self.level_down(self.multiply(left[i], first), by=1)
-        del first
-        if consume:
-            diagonals[0] = None
+        for in_index, raw in stream:
+            # in_index 0 needs no rotation and no split; level_down aligns it with the rescaled rest,
+            # so its term lands at the same level as everyone else's and may arrive at any point.
+            if in_index == 0:
+                zeroth = aligned(raw)
+                for i in range(out_dim):
+                    accumulate((i, 0), self.level_down(self.multiply(left[i], zeroth), by=1))
+                continue
 
-        for in_index in range(1, in_dim):
             block, j = divmod(in_index, g.pack)
             rotation = g.group_size * j - g.n_slot * in_index
 
             pieces = np.full((out_dim, 4), None, dtype=object)
-            diagonal = aligned(diagonals[in_index])
+            diagonal = aligned(raw)
             for i in range(out_dim):
                 product = self.multiply(self.rotate(left[i], rotation), diagonal)
                 rescaled = self.rescale(product)
@@ -328,11 +391,6 @@ class AttentionScore(AttentionStages):
                     column = self.accumulator_column(i, offset, j, out_dim)
                     accumulate((i, column), pieces[offset % out_dim, first_column])
                     accumulate((i, column + 1), pieces[offset % out_dim, first_column + 1])
-
-            # last use of this diagonal: let it go, so the next iteration's ciphertexts
-            # come out of the auxiliary pool rather than off the top of the heap
-            if consume:
-                diagonals[in_index] = None
         return accumulator
 
     def _fold_accumulator(self, accumulator):
@@ -349,10 +407,9 @@ class AttentionScore(AttentionStages):
         return merged
 
     def stage_06_attention_score(self, q, k):
-        # make_copies' output is built here and read nowhere else, so the product may release each
-        # diagonal as it finishes with it.
-        accumulator = self._accumulate_product(self._key_as_complex(k), self.make_copies(q),
-                                               self.g.n_out, consume=True)
+        # make_copies' output is built here and read nowhere else, so it never has to exist as an
+        # array: streaming it costs one diagonal alive instead of 64.
+        accumulator = self._accumulate_streamed(self._key_as_complex(k), self.iter_copies(q))
         merged = self._fold_accumulator(accumulator)
 
         half = len(merged)
