@@ -2346,6 +2346,13 @@ size_t CryptoContextImpl<DCRTPoly>::GetAuxiliaryPolyCount() const {
 	return context_gpu->AuxilarPolyCount();
 }
 
+std::array<size_t, 4> CryptoContextImpl<DCRTPoly>::GetDeviceMemory() const {
+	if (this->devices.empty())
+		return {0, 0, 0, 0};
+	const FIDESlib::PoolStats stats = FIDESlib::GetPoolStats(this->devices.front());
+	return {stats.pooled, stats.in_use, stats.driver_free, stats.driver_total};
+}
+
 // ---- Lazy relinearisation ----
 
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMultNoRelin(const Ciphertext<DCRTPoly>& ct1, const Ciphertext<DCRTPoly>& ct2) {

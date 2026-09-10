@@ -118,6 +118,11 @@ class Stages:
         if trim is not None:
             trim()
 
+    def device_memory(self) -> dict:
+        """What the device pool holds, or ``{}`` on an engine that has no device."""
+        probe = getattr(self.engine, "device_memory", None)
+        return probe() if probe is not None else {}
+
     def plaintext(self, value):
         """Turn a mask into whatever the engine wants to multiply by, and remember it.
 

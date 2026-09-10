@@ -6,6 +6,7 @@
 #include <complex>
 #include <cstdint>
 #include <functional>
+#include <array>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
@@ -221,6 +222,15 @@ template <> class CryptoContextImpl<DCRTPoly> {
 
 	/// @brief How many auxiliary polynomials the pool is currently holding.
 	size_t GetAuxiliaryPolyCount() const;
+	/**
+	 * @brief Device pool bytes: {pooled, in_use, driver_free, driver_total}. All zero on a CPU context.
+	 *
+	 * Every memory fix so far was judged by whether a run got further, which is one bit per run. These
+	 * four separate what that bit conflates: a large `pooled - in_use` means the pool is hoarding and
+	 * the circuit is not the problem, while a small `driver_free` with a small `pooled` means the keys
+	 * and plaintexts are. Cheap enough to call at every stage boundary.
+	 */
+	std::array<size_t, 4> GetDeviceMemory() const;
 	/// @brief Number of expansions currently cached.
 	size_t GetLightPlaintextCacheSize() const;
 	/// @brief ExpandLightPlaintext through the FIFO cache.

@@ -244,6 +244,19 @@ class Engine:
     def auxiliary_poly_count(self) -> int:
         return int(self.cc.GetAuxiliaryPolyCount())
 
+    def device_memory(self) -> dict:
+        """Device pool bytes: ``pooled``, ``in_use``, ``driver_free``, ``driver_total``.
+
+        Empty on a CPU-only context, so a caller can print it unconditionally. ``pooled - in_use`` is
+        memory the pool holds but nobody is using: if that is large when an allocation fails, the
+        circuit's working set is not what ran the card out and reclamation is what to look at.
+        """
+        pooled, in_use, driver_free, driver_total = self.cc.GetDeviceMemory()
+        if not driver_total:
+            return {}
+        return {"pooled": pooled, "in_use": in_use,
+                "driver_free": driver_free, "driver_total": driver_total}
+
     def clear_light_plaintext_cache(self):
         self.cc.ClearLightPlaintextCache()
 

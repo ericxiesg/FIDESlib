@@ -113,6 +113,12 @@ class EncoderLayer:
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
+        #: optional ``(stage_name, device_memory_dict)`` callback, invoked at every stage boundary.
+        #: A host-side model says which stage *should* be largest; this says what the device actually
+        #: holds, which is the only way to tell a working set that is too big from a pool that is
+        #: merely hoarding.
+        self.memory_probe = None
+
         qkv_low, qkv_high = block_diagonal_masks(qkv)
         dense_low, dense_high = block_diagonal_masks(dense)
         ff_low, ff_high = block_diagonal_masks(feedforward)
@@ -178,6 +184,10 @@ class EncoderLayer:
             # moment ago, so it is where draining the engine's pooled polynomials actually returns
             # memory rather than just handing it straight back out again.
             attention.release_pooled_memory()
+            # Reading the device after the drain, not before, is the point: it is the memory that
+            # would still be held if the next stage asked for more.
+            if self.memory_probe is not None:
+                self.memory_probe(name, attention.device_memory())
             return value
 
         # An intermediate stays alive as long as a local binds it, and `rotated` alone is 64

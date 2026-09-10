@@ -171,6 +171,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("ClearLightPlaintextCache", &CryptoContextImpl<DCRTPoly>::ClearLightPlaintextCache)
 	  .def("TrimAuxiliaryPolys", &CryptoContextImpl<DCRTPoly>::TrimAuxiliaryPolys, py::arg("keep") = 0)
 	  .def("GetAuxiliaryPolyCount", &CryptoContextImpl<DCRTPoly>::GetAuxiliaryPolyCount)
+	  .def("GetDeviceMemory", &CryptoContextImpl<DCRTPoly>::GetDeviceMemory)
 	  .def("GetLightPlaintextCacheSize", &CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize)
 	  .def_readwrite("light_plaintext_cache_capacity", &CryptoContextImpl<DCRTPoly>::light_plaintext_cache_capacity)
 	  .def("GetConsumedLevels", &CryptoContextImpl<DCRTPoly>::GetConsumedLevels)

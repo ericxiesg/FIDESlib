@@ -423,6 +423,28 @@ static size_t ReclaimFreeSlabs(int id) {
 	return reclaimed;
 }
 
+/**
+ * Snapshot the pool. Cheap enough to call at every stage boundary of a THOR layer.
+ *
+ * `in_use` is derived rather than counted: every block the pool owns is either handed out or sitting
+ * in a size class's free list, so subtracting the free lists from the slabs is exact and needs no
+ * extra bookkeeping on the allocation fast path.
+ */
+PoolStats GetPoolStats(int id) {
+	std::lock_guard<std::mutex> lock(mempool_lock[id]);
+	PoolStats stats{0, 0, 0, 0};
+	for (const PoolSlab& slab : pool_slabs[id])
+		stats.pooled += slab.bytes;
+
+	size_t freed = 0;
+	for (const auto& [block, free_list] : size_to_memory[id])
+		freed += free_list.size() * (size_t)block;
+	stats.in_use = stats.pooled > freed ? stats.pooled - freed : 0;
+
+	cudaMemGetInfo(&stats.driver_free, &stats.driver_total);
+	return stats;
+}
+
 #define MEMPOOL true
 // void* GPUmalloc(int id, int bytes, cudaStream_t stream, FIDESlib::CKKS::Context& cc) {
 void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {

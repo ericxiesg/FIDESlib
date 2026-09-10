@@ -156,5 +156,23 @@ template <bool capture> void run_in_graph(cudaGraphExec_t& exec, Stream& s, std:
 void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache = false);
 void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache = false);
 
+/**
+ * What the device pool is holding, so a caller can see where memory went instead of inferring it.
+ *
+ * Modelling the working set on the host predicts which stage is largest, but it cannot see the pool:
+ * every reduction so far had to be judged by whether a run got further, which is a one-bit answer per
+ * 90-minute run. These four numbers separate the cases that one bit conflates - memory the pool holds
+ * but is not using (`pooled - in_use`) is reclaimable and means the circuit is not really the problem,
+ * while a small `driver_free` with a small `pooled` means the keys and plaintexts are.
+ */
+struct PoolStats {
+	size_t pooled;		 ///< bytes this pool has taken from the driver and never returned
+	size_t in_use;		 ///< of those, bytes currently handed out (pooled minus the free lists)
+	size_t driver_free;	 ///< bytes the driver still has, across everything on the device
+	size_t driver_total; ///< the device's total memory
+};
+
+PoolStats GetPoolStats(int id);
+
 } // namespace FIDESlib
 #endif // FIDESLIB_CUDAUTILS_CUH
