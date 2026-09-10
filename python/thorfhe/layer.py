@@ -174,6 +174,10 @@ class EncoderLayer:
         def keep(name, value):
             if trace is not None:
                 trace[name] = value
+            # A stage boundary is the one place the working set is reliably smaller than it was a
+            # moment ago, so it is where draining the engine's pooled polynomials actually returns
+            # memory rather than just handing it straight back out again.
+            attention.release_pooled_memory()
             return value
 
         attention, dense, norm, ff = self.attention, self.dense, self.norm, self.feedforward
@@ -187,7 +191,10 @@ class EncoderLayer:
         scores = keep("scores", attention.stage_06_attention_score(query, key))
         weighted = keep("softmax", attention.stage_07_softmax(scores, attention_mask, layer_index,
                                                            parameters=softmax_parameters))
-        context = keep("context", attention.stage_08_attention_context(value, weighted))
+        # The softmax diagonals are the layer's largest working set. Nothing reads them after this
+        # except a trace, so release them as they are consumed whenever no trace is being taken.
+        context = keep("context", attention.stage_08_attention_context(value, weighted,
+                                                                       consume=trace is None))
 
         context_rotated = dense.stage_02_make_rotated_copies(context)
         attention_dense = keep("attention_dense",

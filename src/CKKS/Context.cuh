@@ -170,6 +170,8 @@ class ContextData {
 	RNSPoly getAuxilarPoly();
 	void returnAuxilarPoly(RNSPoly&& c);
 	void trimAuxilarPoly(size_t size);
+	/** How many auxiliary polynomials the pool currently holds (diagnostics for TrimAuxiliaryPolys). */
+	[[nodiscard]] size_t AuxilarPolyCount() const;
 	void clearAuxilarPoly();
 	void clearAutomorphismKeys(const KeyHash& KeyID = {});
 	void clearEvalMultKeys(const KeyHash& KeyID = {});

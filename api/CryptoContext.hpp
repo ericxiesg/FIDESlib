@@ -204,6 +204,23 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalAdd(const Ciphertext<DCRTPoly>& ct, const LightPlaintext& lp);
 	/// @brief Drop every cached expansion (call between stages to bound device memory).
 	void ClearLightPlaintextCache();
+
+	/**
+	 * @brief Drop pooled auxiliary polynomials, keeping at most @p keep of them.
+	 *
+	 * A destroyed ciphertext does not free its polynomials; it parks them in the context's auxiliary
+	 * pool so the next one can reuse them. Nothing ever drains that pool, so it settles at the
+	 * high-water mark of simultaneously live ciphertexts and holds it for the rest of the run.
+	 *
+	 * Trimming it is what lets memory actually leave: the discarded polynomials free their limbs to
+	 * the device pool's per-size-class free lists, and a slab all of whose blocks are free can then go
+	 * back to the driver. Without this step reclamation finds nothing to return. Call it at a stage
+	 * boundary, where the working set is genuinely smaller than it was mid-stage.
+	 */
+	void TrimAuxiliaryPolys(size_t keep = 0);
+
+	/// @brief How many auxiliary polynomials the pool is currently holding.
+	size_t GetAuxiliaryPolyCount() const;
 	/// @brief Number of expansions currently cached.
 	size_t GetLightPlaintextCacheSize() const;
 	/// @brief ExpandLightPlaintext through the FIFO cache.

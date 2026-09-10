@@ -181,8 +181,15 @@ pickle**，受限 Unpickler，白名单外的 global 一律拒绝）、WordPiece
       128 条降到 1 条。Python 侧，立即生效。
 - [x] **自举、密钥计划、level 预算三条线都确认对了**（远程 depth=37 实测）：自举完整跑通、
       `0 grown at runtime`、自举后 level 20 够跑完一层。剩下的纯粹是显存。
-- [ ] 辅助 poly 池（`trimAuxilarPoly` 仍无人调用）。以前调了也白调，**有了 slab 回收之后才有意义**——
-      两者是相乘的。
+- [x] **辅助 poly 池现在会被排空**（2026-09-10）。这是断掉的中间一环：密文析构**不 free**，
+      它把多项式塞进 `precom.auxPoly`，而 `trimAuxilarPoly` 全项目无人调用——所以池只涨不落，
+      slab 回收才会「跑了但一块整空的都找不到」。三段缺一不可：
+      `密文析构 → 辅助池 → (trim) → size class 空闲表 → (回收) → driver`。
+      新增 `TrimAuxiliaryPolys` API，`Stages.release_pooled_memory()` 在每个 stage 边界调用
+      （stage 中途排空是负收益，那些多项式马上又要用）。**C++ 部分未编译。**
+- [x] **`_accumulate_product` 的 diagonals 全程活着**：stage 06 是 64 条（约 2.4 GiB），
+      stage 08 是 128 条（约 4.9 GiB，全层最大工作集）。加 `consume` 用完置 None；
+      stage 06 无条件开，stage 08 在不 trace 时开。数值逐位不变。
 - [x] **两堵墙已经相交**（2026-09-08）：在 stage 10 之后插一次自举
       （`--refresh-after-dense`，`LayerNormStages.refresh`），把 37 层的链切成 19+18，
       **最小 depth 52 → 34**，显存 35.3 → **27.4 GiB（余量 4.6 GiB）**。

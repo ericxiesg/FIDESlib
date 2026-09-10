@@ -169,6 +169,8 @@ PYBIND11_MODULE(_core, m) {
 		"Encode into the compact coefficient form (THOR encode_to_light_plaintext)")
 	  .def("ExpandLightPlaintext", &CryptoContextImpl<DCRTPoly>::ExpandLightPlaintext, py::arg("light"), py::arg("level"))
 	  .def("ClearLightPlaintextCache", &CryptoContextImpl<DCRTPoly>::ClearLightPlaintextCache)
+	  .def("TrimAuxiliaryPolys", &CryptoContextImpl<DCRTPoly>::TrimAuxiliaryPolys, py::arg("keep") = 0)
+	  .def("GetAuxiliaryPolyCount", &CryptoContextImpl<DCRTPoly>::GetAuxiliaryPolyCount)
 	  .def("GetLightPlaintextCacheSize", &CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize)
 	  .def_readwrite("light_plaintext_cache_capacity", &CryptoContextImpl<DCRTPoly>::light_plaintext_cache_capacity)
 	  .def("GetConsumedLevels", &CryptoContextImpl<DCRTPoly>::GetConsumedLevels)

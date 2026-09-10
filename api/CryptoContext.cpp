@@ -2331,6 +2331,21 @@ size_t CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize() const {
 	return this->light_plaintext_cache.size();
 }
 
+void CryptoContextImpl<DCRTPoly>::TrimAuxiliaryPolys(size_t keep) {
+	FIDESlib::CudaNvtxRange r("API");
+	if (!this->loaded)
+		return; // CPU-only context: there is no device pool to drain
+	auto& context_gpu = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	context_gpu->trimAuxilarPoly(keep);
+}
+
+size_t CryptoContextImpl<DCRTPoly>::GetAuxiliaryPolyCount() const {
+	if (!this->loaded)
+		return 0;
+	auto& context_gpu = std::any_cast<const FIDESlib::CKKS::Context&>(this->gpu);
+	return context_gpu->AuxilarPolyCount();
+}
+
 // ---- Lazy relinearisation ----
 
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMultNoRelin(const Ciphertext<DCRTPoly>& ct1, const Ciphertext<DCRTPoly>& ct2) {

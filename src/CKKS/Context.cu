@@ -1005,6 +1005,10 @@ void ContextData::trimAuxilarPoly(size_t size) {
 	// precom.auxPoly.erase(precom.auxPoly.begin() + std::min(size, precom.auxPoly.size()), precom.auxPoly.end());
 }
 
+size_t ContextData::AuxilarPolyCount() const {
+	return precom.auxPoly.size();
+}
+
 void ContextData::clearAuxilarPoly() {
 	precom.auxPoly.clear();
 }

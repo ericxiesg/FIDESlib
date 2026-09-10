@@ -377,6 +377,9 @@ struct PoolSlab {
 };
 std::vector<PoolSlab> pool_slabs[MAXG];
 
+
+FIDESlib::Stream s[MAXG];
+
 /**
  * Give back every slab all of whose blocks are currently free. Caller holds mempool_lock[id].
  * Returns how many bytes went back to the driver.
@@ -419,8 +422,6 @@ static size_t ReclaimFreeSlabs(int id) {
 	}
 	return reclaimed;
 }
-
-FIDESlib::Stream s[MAXG];
 
 #define MEMPOOL true
 // void* GPUmalloc(int id, int bytes, cudaStream_t stream, FIDESlib::CKKS::Context& cc) {

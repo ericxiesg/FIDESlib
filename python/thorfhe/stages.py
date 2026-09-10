@@ -107,6 +107,17 @@ class Stages:
             x, y = y, x
         return self.engine.multiply(x, self.plaintext(y))
 
+    def release_pooled_memory(self):
+        """Hand back what the engine is holding for reuse. A no-op on engines without a device pool.
+
+        Called at stage boundaries, where the working set has genuinely shrunk: mid-stage the pooled
+        polynomials are about to be needed again, so draining then would only make the next allocation
+        re-take them.
+        """
+        trim = getattr(self.engine, "trim_auxiliary_polys", None)
+        if trim is not None:
+            trim()
+
     def plaintext(self, value):
         """Turn a mask into whatever the engine wants to multiply by, and remember it.
 

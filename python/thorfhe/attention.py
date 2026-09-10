@@ -259,11 +259,19 @@ class AttentionScore(AttentionStages):
             out[index] = self.add(self.level_down(lower[index], 1), self.multiply_1j(rotated))
         return out
 
-    def _accumulate_product(self, left, diagonals, in_dim: int):
+    def _accumulate_product(self, left, diagonals, in_dim: int, *, consume: bool = False):
         """The shared body of both ciphertext-ciphertext products.
 
         ``left`` is the complex left operand - one ciphertext per output - and ``diagonals`` is
-        ``in_dim`` broadcast diagonals. Returns the ``len(left) x 4`` accumulator, still degree-2 and
+        ``in_dim`` broadcast diagonals.
+
+        ``consume`` says the caller will not look at ``diagonals`` again, so each one can be dropped
+        the moment its iteration is over. At THOR's geometry there are 64 of them, about 38 MiB each at
+        depth 37, so holding the lot is 2.4 GiB against the 3.7 GiB a GV100 has left after key
+        generation. Dropping one does not hand memory back to the driver - the destructor parks its
+        polynomials in the context's auxiliary pool - but the next ciphertext then *reuses* them
+        instead of asking the allocator for more, which is what stops the high-water mark climbing
+        through the loop. Returns the ``len(left) x 4`` accumulator, still degree-2 and
         at scale Delta^2. The score product has four outputs and the context product two, which is why
         the width is taken from the operand rather than fixed on the class.
         """
@@ -299,6 +307,8 @@ class AttentionScore(AttentionStages):
         for i in range(out_dim):
             accumulator[i, 0] = self.level_down(self.multiply(left[i], first), by=1)
         del first
+        if consume:
+            diagonals[0] = None
 
         for in_index in range(1, in_dim):
             block, j = divmod(in_index, g.pack)
@@ -318,6 +328,11 @@ class AttentionScore(AttentionStages):
                     column = self.accumulator_column(i, offset, j, out_dim)
                     accumulate((i, column), pieces[offset % out_dim, first_column])
                     accumulate((i, column + 1), pieces[offset % out_dim, first_column + 1])
+
+            # last use of this diagonal: let it go, so the next iteration's ciphertexts
+            # come out of the auxiliary pool rather than off the top of the heap
+            if consume:
+                diagonals[in_index] = None
         return accumulator
 
     def _fold_accumulator(self, accumulator):
@@ -334,7 +349,10 @@ class AttentionScore(AttentionStages):
         return merged
 
     def stage_06_attention_score(self, q, k):
-        accumulator = self._accumulate_product(self._key_as_complex(k), self.make_copies(q), self.g.n_out)
+        # make_copies' output is built here and read nowhere else, so the product may release each
+        # diagonal as it finishes with it.
+        accumulator = self._accumulate_product(self._key_as_complex(k), self.make_copies(q),
+                                               self.g.n_out, consume=True)
         merged = self._fold_accumulator(accumulator)
 
         half = len(merged)
@@ -369,7 +387,15 @@ class AttentionContext(AttentionScore):
         return np.array([self.add(v[i], self.multiply_1j(v[i + CONTEXT_OUTPUTS]))
                          for i in range(CONTEXT_OUTPUTS)], dtype=object)
 
-    def stage_08_attention_context(self, v, weights):
-        accumulator = self._accumulate_product(self._values_as_complex(v), weights, self.g.dim)
+    def stage_08_attention_context(self, v, weights, *, consume: bool = False):
+        """``consume`` releases each softmax diagonal as it is used - see :meth:`_accumulate_product`.
+
+        There are ``dim`` of them, twice what stage 06 holds and the largest single working set in the
+        layer, so it is worth taking when the caller has no further use for them. It is off by default
+        because the obvious other reader is a trace: ``--per-stage`` decrypts the softmax output after
+        this returns.
+        """
+        accumulator = self._accumulate_product(self._values_as_complex(v), weights, self.g.dim,
+                                               consume=consume)
         merged = self._fold_accumulator(accumulator)
         return np.array([self.rescale(m) for m in merged], dtype=object)

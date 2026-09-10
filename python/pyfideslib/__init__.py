@@ -229,6 +229,21 @@ class Engine:
         """Materialise `light` as a normal plaintext at `level` remaining levels."""
         return self.cc.ExpandLightPlaintext(light, self.depth - int(level))
 
+    def trim_auxiliary_polys(self, keep: int = 0):
+        """Drain the pooled auxiliary polynomials, keeping at most ``keep``.
+
+        A destroyed ciphertext does not free its polynomials - it parks them in the context's pool for
+        the next one to reuse - and nothing drains that pool, so it settles at the high-water mark of
+        live ciphertexts and stays there. This is the step that lets memory actually leave: the
+        discarded polynomials free their limbs to the device pool's free lists, and a slab whose blocks
+        are all free can then go back to the driver. Without it, slab reclamation finds nothing to
+        return. Worth calling at a stage boundary, where the working set really is smaller.
+        """
+        self.cc.TrimAuxiliaryPolys(int(keep))
+
+    def auxiliary_poly_count(self) -> int:
+        return int(self.cc.GetAuxiliaryPolyCount())
+
     def clear_light_plaintext_cache(self):
         self.cc.ClearLightPlaintextCache()
 

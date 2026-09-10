@@ -316,3 +316,44 @@ def test_the_score_product_aligns_one_diagonal_at_a_time():
     # eager alignment would put all 128 diagonal level_downs before the first multiply
     first_multiply = order.index("multiply")
     assert order[:first_multiply].count("level_down") < g.dim
+
+
+# ---------------------------------------------------------------- releasing consumed operands
+def test_the_score_product_releases_diagonals_as_it_consumes_them():
+    """64 diagonals at 38 MiB each is 2.4 GiB against a GV100's 3.7 GiB of headroom.
+
+    Each is used in exactly one iteration, so `consume` drops it there. What that buys is not memory
+    returned to the driver - the destructor parks the polynomials in the context's auxiliary pool -
+    but reuse: the next iteration's ciphertexts come out of that pool instead of off the top of the
+    heap, which is what stops the high-water mark climbing through the loop.
+    """
+    from thorfhe import THOR_BERT
+    from thorfhe.attention import (AttentionScore, attention_rotate_masks, ccmm_masks,
+                                   make_copies_masks, transpose_masks)
+
+    g = THOR_BERT
+    engine = ClearEngine(g, depth=60)
+    low, high = block_diagonal_masks(g)
+    stages = AttentionScore(engine, g, masks=low, complement_masks=high,
+                            transpose=transpose_masks(g), copies=make_copies_masks(g),
+                            attention=attention_rotate_masks(g), ccmm=ccmm_masks(g))
+
+    left = [engine.encrypt(np.zeros(g.slot_count)) for _ in range(4)]
+    diagonals = np.array([engine.encrypt(np.zeros(g.slot_count)) for _ in range(g.dim)],
+                         dtype=object)
+
+    kept = stages._accumulate_product(left, list(diagonals), g.dim)
+    consumed = stages._accumulate_product(left, list(diagonals), g.dim, consume=True)
+    for a, b in zip(kept.ravel(), consumed.ravel()):
+        assert np.abs(engine.decrypt(a) - engine.decrypt(b)).max() == 0.0   # same answer either way
+
+    # ... and with consume the caller's slots really are emptied as the loop goes
+    operands = list(diagonals)
+    stages._accumulate_product(left, operands, g.dim, consume=True)
+    assert all(entry is None for entry in operands)
+
+
+def test_release_pooled_memory_is_a_no_op_without_a_device_pool():
+    """`ClearEngine` has no pool; the call has to be harmless so stage code can make it unguarded."""
+    _, stages = small_stages()
+    stages.release_pooled_memory()   # must not raise
