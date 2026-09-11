@@ -71,7 +71,7 @@ THOR 字样**。
 | # | 主题 | 大致行数 | 依赖 | 风险 |
 |---|---|---:|---|---|
 | 1 | 构建：GPU 架构自动探测 | 66 | 无 | 无 |
-| 2 | 七个正确性修复（不含新 API） | 约 95 | 无 | 低，全是收紧检查 |
+| 2 | 七个正确性修复（不含新 API） | 约 110 | 无 | 低，全是收紧检查 |
 | 3 | CKKS 槽级原语 | 约 200 | 无 | 低，纯新增 |
 | 4 | 惰性重线性化（degree-2 密文） | 约 250 | 无 | 中，动了 `Ciphertext` |
 | 5 | level 截断密钥存储 | 约 900 | 2 | 中，默认开启需讨论 |
@@ -121,8 +121,14 @@ hunk，横跨 PR 3/4/5/6/7。已按行区间切好，见 `../patch/_tools/manife
    在 GV100 上被报出来的位置。就地检查并说清是哪两个数字。
 5. **`KeySwitchingKey` 持有悬垂引用**（`src/CKKS/KeySwitchingKey.cuh`）。原来按引用持有
    `Context`，而 `LoadContext` 会把局部 `Context` move 进 `std::any`，函数返回后引用即悬垂。
-   改成按值持有 `shared_ptr`。副作用：这会形成一个引用环，`ContextData` 不再随
-   `DeregisterCryptoContextGPU` 释放；注释里写明了要真正回收需先 `clearAutomorphismKeys()` 等。
+   **改成 `std::weak_ptr<ContextData>` 加一个 `context()` 访问器。**
+   （中间版本是按值持有 `shared_ptr`，那是错的：key 活在 `ContextData::precom.keys` 里面，
+   持有强引用就成了环，`ContextData` 永远归零不了，每个建了又销毁的 context 都把 eval key、
+   rotation key、bootstrap 明文和辅助缓冲留到进程结束。当时的注释把它写成「deliberate」，
+   是给一个漏内存的设计找说法；2026-09-11 的 review 指出了这一点，已改。）
+   weak_ptr 在 key 活着时不可能过期——key 就是它的成员——`context()` 里 assert 了这一点。
+   调用方在函数开头取一次 `Context cc = context();`，函数体不用改；
+   `Context.cu::AddSecretSwitchingKey` 两处 `ksk.cc->param` 改成 `ksk.context()->param`。
    同一 PR 还修了析构时误清全局 key 表、`SetDevices` 只接受右值两处。
 6. **`EvalSub(double scalar, const Ciphertext& ct)` 符号反了**（`api/CryptoContext.cpp`）。
    原实现是 `multScalar(-1)` → `addScalar(scalar)` → `multScalar(-1)`，算出来是 `ct - scalar`；
@@ -354,9 +360,11 @@ grep -rn "THOR" src/ api/ python/src/ python/pyfideslib/ examples/key-truncation
 >    is possible, with the same consequence as above: a garbage device pointer whose illegal access
 >    surfaces several calls later, in a `GPUfree`, which is where it was first reported from.
 > 5. `KeySwitchingKey` held a dangling `Context` reference: `LoadContext` moves its local context into
->    a `std::any`, so the reference dies when `LoadContext` returns. It is held by value now. This
->    closes a reference cycle, so the context data is no longer freed by
->    `DeregisterCryptoContextGPU`; the comment records that clearing the keys first breaks the cycle.
+>    a `std::any`, so the reference dies when `LoadContext` returns. It is a
+>    `std::weak_ptr<ContextData>` now, reached through a `context()` accessor. Holding a `Context` by
+>    value would fix the dangle too, but the keys live inside `ContextData::precom.keys`, so a strong
+>    reference closes a cycle and every context dropped through the API keeps all of its device
+>    memory. The weak_ptr cannot expire while the key is alive, for exactly that reason.
 >    Two smaller fixes ride along: the destructor wiped the global key map, and `SetDevices` only
 >    accepted an rvalue.
 > 6. `EvalSub(double scalar, const Ciphertext& ct)` had its sign inverted. It computed
@@ -540,11 +548,11 @@ attention、softmax、layernorm、GELU、feed-forward、pooler、benchmark CLI�
 | `src/CKKS/Ciphertext.cpp` | +154 / -9 | 2,4,5 |
 | `src/CKKS/Ciphertext.cuh` | +20 / -0 | 4 |
 | `src/CKKS/CoeffsToSlots.cu` | +25 / -1 | 2 |
-| `src/CKKS/Context.cu` | +88 / -1 | 5,7 |
+| `src/CKKS/Context.cu` | +88 / -1 | 2,5,7 |
 | `src/CKKS/Context.cuh` | +20 / -0 | 5,7 |
 | `src/CKKS/ElemenwiseBatchKernels.cu` | +18 / -0 | 6 |
 | `src/CKKS/ElemenwiseBatchKernels.cuh` | +7 / -0 | 6 |
-| `src/CKKS/KeySwitchingKey.cu` | +81 / -10 | 5 |
+| `src/CKKS/KeySwitchingKey.cu` | +81 / -10 | 2,5 |
 | `src/CKKS/KeySwitchingKey.cuh` | +51 / -1 | 2,5 |
 | `src/CKKS/LimbPartition.cu` | +137 / -4 | 5,6 |
 | `src/CKKS/LimbPartition.cuh` | +21 / -2 | 5,6 |

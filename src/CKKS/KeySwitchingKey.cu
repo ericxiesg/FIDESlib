@@ -29,6 +29,7 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk) {
 
 void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int maxLevel_, Reloader reloader_) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	Context cc = context();
 	CKKS::SetCurrentContext(cc);
 	keyID = rkk.keyid;
 
@@ -60,6 +61,8 @@ void KeySwitchingKey::ensureLevel(int level) {
 	if (maxLevel < 0 || level <= maxLevel)
 		return;
 
+	Context cc = context();
+
 	// A truncated key used above its plan level is almost always a mistake in the (delta -> level) table the
 	// caller passed to SetRotationKeyLevels, and reloading it silently turns that mistake into a per-call
 	// host->device key transfer. Report it precisely instead, unless growth was explicitly asked for.
@@ -79,6 +82,7 @@ void KeySwitchingKey::ensureLevel(int level) {
 }
 
 void KeySwitchingKey::rebuildAtLevel(int newMaxLevel) {
+	Context cc = context();
 	if (!reloader)
 		throw std::runtime_error("KeySwitchingKey::rebuildAtLevel: " + describe() + " has no reloader");
 
@@ -114,7 +118,7 @@ size_t KeySwitchingKey::deviceBytes() const {
 }
 
 KeySwitchingKey::KeySwitchingKey(Context& cc)
-: my_range(loc, LIFETIME), keyID(""), cc((assert(cc != nullptr), CudaNvtxStart(std::string{ sc::current().function_name() }.substr()), cc)),
+: my_range(loc, LIFETIME), keyID(""), cc_weak((assert(cc != nullptr), CudaNvtxStart(std::string{ sc::current().function_name() }.substr()), cc)),
   a(*cc, -1, false, true), b(*cc, -1, false, true) {
 	CudaNvtxStop();
 }
