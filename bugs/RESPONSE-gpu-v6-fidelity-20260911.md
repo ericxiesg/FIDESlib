@@ -100,3 +100,45 @@ python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 \
 |---|---|
 | `python/thorfhe/layer.py` | `EncoderLayer.trace_sink`；stage 08 的 `consume` 只在「trace 且无 sink」时关闭 |
 | `python/thorfhe/bench.py` | `--per-stage` 装上 sink，在 stage 边界解码；`per_stage_fidelity` 接受已解码的数组 |
+
+---
+
+## 补充（同日，等你跑 `--per-stage` 期间在本机测的）
+
+### 我上面那条「先怀疑 `he_invsqrt`」要收回一半
+
+`he_invsqrt` 的契约是「denominator 落在 `[epsilon, 1]`」，而**迭代次数在主机侧就定死了**——
+掉出区间不是变不准，是不收敛。所以值得先量一下真实数据落在哪。用真实 checkpoint 和 16 个 MRPC
+样本（只算非 padding token）：
+
+| | 窗口 `[min_var, max_var]` | 实测方差 min / 中位 / max | 越界比例 |
+|---|---|---|---|
+| norm_1（stage 11，`he_layernorm1`） | [0.15, 10.0] | 0.229 / 0.379 / 0.605 | 0% |
+| norm_2（stage 16，`he_layernorm2`） | [0.2, 150.0] | 1.020 / 2.249 / 7.490 | 0% |
+
+**下界裕度 1.53x（stage 11）和 5.1x（stage 16）**，都不算贴边。CKKS 噪声要把方差压低 35% 才会把
+stage 11 推出收敛域，那是很大的噪声。
+
+所以：**如果 `--per-stage` 的表指向 norm_1 是第一个坏掉的行，也不要停在 stage 11**——
+窗口本身是够的，说明喂给它的输入已经是错的，故障在 stage 10 或更早。
+
+### 但同一组数字露出另一件事：窗口比需要的宽约 16 倍，白烧 level
+
+`max_var` 是 10.0 和 150.0，实测最大只有 0.605 和 7.49。而 `epsilon = min_var / max_var` 直接决定
+Goldschmidt 的迭代次数，**每次迭代 2 个 level**：
+
+| | 现在 | 收紧到 | 安全系数 | 迭代 | level |
+|---|---|---|---|---|---|
+| stage 11 | max_var 10.0 | — | 16.5x | 5 | **10** |
+| stage 11 | | max_var 2.0 | 3.3x | 4 | 8 |
+| stage 11 | | max_var 1.0 | 1.7x | 3 | **6** |
+| stage 16 | max_var 150.0 | — | 20.0x | 6 | **12** |
+| stage 16 | | max_var 30.0 | 4.0x | 5 | **10** |
+
+**stage 11 收到 max_var=2.0（仍有 3.3 倍安全系数）省 2 个 level，收到 1.0 省 4 个；
+stage 16 收到 30.0 省 2 个。** 一层 37 个 level 的预算里，这是 4–6 个。
+
+**但这不是 relRMSE 1.0 的解释**，先说清楚：relRMSE 1.0 是「完全不相关」，不是「噪声大了点」，
+少几个 level 不会把它从 1.0 修到 1e-3。这是一条独立的优化线索，**等保真度的账算清楚再动**——
+而且 16 个样本不足以定标一个安全的窗口，真要收紧得跑整个验证集统计，
+还得记住窗口外不是精度下降而是直接发散。我**没有**改任何默认值。
