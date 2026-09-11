@@ -46,7 +46,7 @@ class NumericMixin:
             half = k // 2
             if k % 2 == 0:
                 basis.setdefault(half, self._power(basis, half))
-                basis[k] = self.rescale(self.square(self.relinearize(basis[half])))
+                basis[k] = self.rescale(self.relinearize(self.square(basis[half])))
             else:
                 basis.setdefault(k - 1, self._power(basis, k - 1))
                 left, right = self.align(basis[k - 1], basis[1])
