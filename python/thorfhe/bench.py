@@ -294,6 +294,17 @@ def softmax_parameters_for(reference_scores, layer_index, args, tokens):
     return calibrate(reaching)
 
 
+def print_stage_rows(index, rows, stream=sys.stderr):
+    """One layer's per-stage fidelity, printed where it is produced and again in the summary."""
+    print(f"\nper-stage fidelity, layer {index} (sample 0), each rescaled by its best fit",
+          file=stream, flush=True)
+    for name, scale, fidelity, error in rows:
+        if error is not None:
+            print(f"  {name:<22}could not compare: {error}", file=stream, flush=True)
+        else:
+            print(f"  {name:<22}scale {scale:8.4f}   {fidelity.format()}", file=stream, flush=True)
+
+
 def run_encrypted(model, encoded, args, timings: Timings, traces):
     """Encrypt, run ``args.layers`` encoder layers, decrypt, finish in plaintext."""
     from .layer import EncoderLayer, encode_layer
@@ -374,24 +385,17 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)
             if trace is not None:
-                stage_rows.append((index, per_stage_fidelity(
-                    engine, trace, traces[sample][f"layer_{index}"], int(np.asarray(mask).sum()))))
+                rows = per_stage_fidelity(engine, trace, traces[sample][f"layer_{index}"],
+                                          int(np.asarray(mask).sum()))
+                stage_rows.append((index, rows))
+                # Print as soon as the layer is measured rather than at the end of the run. This is
+                # the expensive half of a --per-stage run and the half that says which stage is
+                # wrong; a failure anywhere after it - a later layer, the final decode, the
+                # plaintext tail - must not be able to take it down with it.
+                print_stage_rows(index, rows)
 
-        try:
-            with timed(timings, "decrypt"):
-                hidden = decode_six_blocks(engine, state) / args.output_scale
-        except Exception:
-            if stage_rows:
-                for idx, rows in stage_rows:
-                    print(f"\nper-stage fidelity, layer {idx} (sample 0), each rescaled by its best fit",
-                          file=sys.stderr, flush=True)
-                    for sname, scale, fidelity, error in rows:
-                        if error is not None:
-                            print(f"  {sname:<22}could not compare: {error}", file=sys.stderr, flush=True)
-                        else:
-                            print(f"  {sname:<22}scale {scale:8.4f}   {fidelity.format()}",
-                                  file=sys.stderr, flush=True)
-            raise
+        with timed(timings, "decrypt"):
+            hidden = decode_six_blocks(engine, state) / args.output_scale
         hidden_all.append(hidden)
 
         with timed(timings, "plaintext tail"):
@@ -498,12 +502,7 @@ def command_fhe(args):
     print("  " + agreement.format("probabilities"))
 
     for index, rows in stage_rows:
-        print(f"\nper-stage fidelity, layer {index} (sample 0), each rescaled by its best fit")
-        for name, scale, fidelity, error in rows:
-            if error is not None:
-                print(f"  {name:<22}could not compare: {error}")
-            else:
-                print(f"  {name:<22}scale {scale:8.4f}   {fidelity.format()}")
+        print_stage_rows(index, rows, stream=sys.stdout)
     print(f"\ntiming")
     print(timings.format())
 
