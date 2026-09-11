@@ -259,7 +259,12 @@ def per_stage_fidelity(engine, trace, reference, tokens):
         if name not in trace or reference_name not in reference:
             continue
         try:
-            got = reader(engine, trace[name])
+            recorded = trace[name]
+            # With a trace sink the stage was decoded at the boundary and this is already an array;
+            # without one it is still ciphertexts and has to be read here.
+            if isinstance(recorded, Exception):
+                raise recorded
+            got = recorded if isinstance(recorded, np.ndarray) else reader(engine, recorded)
         except Exception as error:                        # noqa: BLE001 - a decoder mismatch
             rows.append((name, None, None, str(error)))
             continue
@@ -303,6 +308,21 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
     engine = make_engine(args, THOR_BERT)
     layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
                          refresh_after_dense=args.refresh_after_dense)
+    def stage_sink(name, value):
+        """Decode a stage at its boundary, so the trace keeps an array instead of ciphertexts.
+
+        A stage with no reader is not compared against anything, so there is nothing to keep: return
+        None and let the ciphertexts go. A decoder that fails is reported by per_stage_fidelity, so
+        the exception is carried rather than raised here.
+        """
+        entry = STAGE_READERS.get(name)
+        if entry is None:
+            return None
+        try:
+            return entry[1](engine, value)
+        except Exception as error:                        # noqa: BLE001 - reported per stage later
+            return error
+
     if args.device_memory:
         gib = float(1 << 30)
 
@@ -346,6 +366,10 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                                f"inv_epsilon 2^{np.log2(parameters['inv_epsilon']):.0f}")
                 print(f"  layer {index} softmax window: {window}", file=sys.stderr, flush=True)
             trace = {} if args.per_stage and sample == 0 else None
+            # Read each stage where it is produced rather than at the end of the layer. Holding all
+            # of them is the whole layer's working set several times over, which is what made
+            # --per-stage impossible to run on the card that most needs it.
+            layer.trace_sink = stage_sink if trace is not None else None
             with timed(timings, f"layer {index}"):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)
