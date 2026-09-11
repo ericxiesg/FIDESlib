@@ -377,8 +377,21 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                 stage_rows.append((index, per_stage_fidelity(
                     engine, trace, traces[sample][f"layer_{index}"], int(np.asarray(mask).sum()))))
 
-        with timed(timings, "decrypt"):
-            hidden = decode_six_blocks(engine, state) / args.output_scale
+        try:
+            with timed(timings, "decrypt"):
+                hidden = decode_six_blocks(engine, state) / args.output_scale
+        except Exception:
+            if stage_rows:
+                for idx, rows in stage_rows:
+                    print(f"\nper-stage fidelity, layer {idx} (sample 0), each rescaled by its best fit",
+                          file=sys.stderr, flush=True)
+                    for sname, scale, fidelity, error in rows:
+                        if error is not None:
+                            print(f"  {sname:<22}could not compare: {error}", file=sys.stderr, flush=True)
+                        else:
+                            print(f"  {sname:<22}scale {scale:8.4f}   {fidelity.format()}",
+                                  file=sys.stderr, flush=True)
+            raise
         hidden_all.append(hidden)
 
         with timed(timings, "plaintext tail"):
