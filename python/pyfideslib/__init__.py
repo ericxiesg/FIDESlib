@@ -141,8 +141,7 @@ class Engine:
             return self.cc.EvalScalarSub(float(x), y)
         if isinstance(x, np.ndarray):
             pt = self.encode(x, level=self.depth - self.level(y))
-            neg_y = self.cc.EvalNegate(y)
-            return self.cc.EvalAddPt(neg_y, pt)
+            return self.cc.EvalNegate(self.cc.EvalSubPt(y, pt))
         if isinstance(y, (int, float)):
             return self.cc.EvalSubScalar(x, float(y))
         if isinstance(y, np.ndarray):
