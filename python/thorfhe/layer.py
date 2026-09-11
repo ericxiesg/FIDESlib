@@ -113,6 +113,11 @@ class EncoderLayer:
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
+        #: optional ``(stage_name, ciphertexts) -> anything`` callback. When set, a trace records what
+        #: it returns instead of the ciphertexts themselves, so tracing costs a decoded array per
+        #: stage rather than a live copy of every stage's output.
+        self.trace_sink = None
+
         #: optional ``(stage_name, device_memory_dict)`` callback, invoked at every stage boundary.
         #: A host-side model says which stage *should* be largest; this says what the device actually
         #: holds, which is the only way to tell a working set that is too big from a pool that is
@@ -179,7 +184,11 @@ class EncoderLayer:
         """
         def keep(name, value):
             if trace is not None:
-                trace[name] = value
+                # A trace that holds ciphertexts holds every stage's output alive to the end of the
+                # layer, which is the whole working set several times over - that is why --per-stage
+                # used to run the card out of memory. With a sink the stage is read here, at the
+                # boundary, and what survives is a small numpy array instead.
+                trace[name] = self.trace_sink(name, value) if self.trace_sink is not None else value
             # A stage boundary is the one place the working set is reliably smaller than it was a
             # moment ago, so it is where draining the engine's pooled polynomials actually returns
             # memory rather than just handing it straight back out again.
@@ -219,9 +228,11 @@ class EncoderLayer:
                                                            parameters=softmax_parameters))
         scores = None
         # The softmax diagonals are the layer's largest working set. Nothing reads them after this
-        # except a trace, so release them as they are consumed whenever no trace is being taken.
+        # except a trace, and a trace with a sink has already read them at the boundary above - so
+        # only a trace that keeps ciphertexts forces them to be held.
+        traced_live = trace is not None and self.trace_sink is None
         context = keep("context", attention.stage_08_attention_context(scope["value"], weighted,
-                                                                       consume=trace is None))
+                                                                       consume=not traced_live))
         drop("value")
         weighted = None
 
