@@ -44,6 +44,19 @@ class Stages:
     #: the keys do not fit. See :meth:`rotation_steps`.
     binary_rotations = False
 
+    #: Optional ``(name, ciphertexts) -> None`` callback for looking inside a stage. A stage's output
+    #: is comparable against the plaintext model, but its intermediates are not, and when a stage is
+    #: wrong the question is which half of it. A probe that only reports magnitudes needs no
+    #: reference: a value that should be a probability and comes back at 1e12, or as a constant, says
+    #: where to look. ``None`` everywhere unless a caller sets it, and never called in a normal run.
+    probe = None
+
+    def probed(self, name, value):
+        """Report an intermediate if anyone is listening, and return it unchanged."""
+        if self.probe is not None:
+            self.probe(name, value)
+        return value
+
     def __init__(self, engine, geometry: Geometry, masks=None, complement_masks=None,
                  binary_rotations: bool | None = None):
         self.engine = engine

@@ -319,6 +319,33 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
     engine = make_engine(args, THOR_BERT)
     layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
                          refresh_after_dense=args.refresh_after_dense)
+    def magnitude_probe(name, value):
+        """Report an intermediate's magnitude and level. No reference needed, and that is the point.
+
+        A stage that is wrong is wrong somewhere, and the plaintext model has nothing to compare its
+        insides against. But a softmax numerator that should be in [0, 1] and comes back at 1e12, or
+        a denominator that is constant across tokens, or a level that is not what the schedule says,
+        each name a specific step without any reference at all.
+        """
+        flat = [ct for ct in np.asarray(value, dtype=object).ravel() if ct is not None]
+        if not flat:
+            return
+        slots = np.concatenate([np.real(np.asarray(engine.decrypt(ct))).ravel() for ct in flat])
+        finite = np.isfinite(slots)
+        levels = sorted({engine.level(ct) for ct in flat})
+        head = f"  [probe] {name:<26} {len(flat):3d} ct  level {levels[0] if len(levels) == 1 else levels}"
+        if not finite.any():
+            print(f"{head}  ALL NON-FINITE", file=sys.stderr, flush=True)
+            return
+        good = slots[finite]
+        # Most slots are masked to zero, so a mean over all of them says more about the mask than
+        # about the values. The magnitude that matters is the one the used slots carry.
+        used = np.abs(good[good != 0])
+        carried = f"  used {used.size}  |x| med {np.median(used):.4g}" if used.size else "  all zero"
+        print(f"{head}  min {good.min():+.4g}  max {good.max():+.4g}{carried}"
+              + (f"  NON-FINITE {(~finite).sum()}/{slots.size}" if not finite.all() else ""),
+              file=sys.stderr, flush=True)
+
     def stage_sink(name, value):
         """Decode a stage at its boundary, so the trace keeps an array instead of ciphertexts.
 
@@ -381,6 +408,9 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             # of them is the whole layer's working set several times over, which is what made
             # --per-stage impossible to run on the card that most needs it.
             layer.trace_sink = stage_sink if trace is not None else None
+            # The probes look inside a stage, which only matters when a stage is the one that is
+            # wrong; they cost a handful of decryptions, so they ride along with --per-stage.
+            layer.attention.probe = magnitude_probe if trace is not None else None
             with timed(timings, f"layer {index}"):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)

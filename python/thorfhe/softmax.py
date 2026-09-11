@@ -99,9 +99,13 @@ class SoftmaxMixin:
         exp_u = [self.he_exp(ct, min_x, max_x, n, wide=wide) for ct in normalised]
         exp_u = [self.rescale(self.multiply(ct, mask)) for ct, mask in zip(exp_u, attention_mask)]
 
+        self.probed("07b.exp", exp_u)
+
         total = self._sum_over_groups(exp_u)
+        self.probed("07c.denominator", [total])
         inv_D, delta, precision = self.he_inv(total, self.ones, epsilon=inv_epsilon,
                                               alpha=self.internal_alpha / 10)
+        self.probed("07d.inverse_denominator", [inv_D])
         for _ in range(int(np.log2(l)) - 1):
             exp_u, inv_D, delta, precision = self.update_inv_D(
                 exp_u, attention_mask, inv_D, delta, precision, alpha=self.internal_alpha)
@@ -177,6 +181,11 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
             conjugated = self.conjugate(merged)
             refreshed[index] = self.add(merged, conjugated)
             refreshed[index + half] = self.multiply_1j(self.subtract(conjugated, merged))
+
+        # The bootstrap is the first thing in the layer that stages 01-06 do not do, so when the
+        # softmax is the first wrong stage this is the line that splits the question in two: the
+        # refreshed scores are 2x the scores stage 06 produced, and those are measurable.
+        self.probed("07a.refreshed_scores", refreshed)
 
         if parameters is None:
             parameters = self.WIDE if layer_index == 2 else self.NARROW
