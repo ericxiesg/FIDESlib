@@ -27,15 +27,19 @@ class ClearCiphertext:
     # `__weakref__` is here so a ciphertext can be tracked without being kept alive. That is what
     # `thorfhe.workingset` needs to measure a stage's peak, and measuring it is the only way to know
     # which stage actually dominates GPU memory rather than which one looks like it should.
-    __slots__ = ("slots", "level", "scale_exp", "__weakref__")
+    __slots__ = ("slots", "level", "scale_exp", "degree", "__weakref__")
 
-    def __init__(self, slots: np.ndarray, level: int, scale_exp: int = 1):
+    def __init__(self, slots: np.ndarray, level: int, scale_exp: int = 1, degree: int = 1):
         self.slots = np.asarray(slots, dtype=complex)
         self.level = level
         self.scale_exp = scale_exp
+        #: 2 between a lazy multiplication and its relinearisation. Exact arithmetic does not care,
+        #: but almost nothing on the device accepts a degree-2 operand, so the contract is checked.
+        self.degree = degree
 
     def __repr__(self):
-        return f"ClearCiphertext(level={self.level}, scale=D^{self.scale_exp}, slots={self.slots.shape})"
+        return (f"ClearCiphertext(level={self.level}, scale=D^{self.scale_exp}, "
+                f"degree={self.degree}, slots={self.slots.shape})")
 
 
 class ClearEngine:
@@ -80,6 +84,23 @@ class ClearEngine:
     def _slots_of(v):
         return v.slots if isinstance(v, ClearCiphertext) else np.asarray(v)
 
+    def _require_degree_one(self, ct, what: str):
+        """Refuse an operand the device would silently mishandle.
+
+        A lazy product leaves a third component behind, and only some operations carry it: add, sub,
+        plaintext and scalar multiplication, rescale, level reduction and copy do; a
+        ciphertext-ciphertext product, a monomial multiply, an integer multiply and every key switch
+        do not. They do not fail either - they drop it - so a missing relinearise reads as a plausible
+        wrong answer many stages downstream. That is exactly how `power_basis` squared without
+        relinearising and made `he_exp` return 1e124 on the device while exact arithmetic, which has
+        no third component to lose, stayed happy.
+        """
+        if self.strict and self._is_ct(ct) and ct.degree != 1:
+            raise ScaleMismatch(
+                f"{what}: the ciphertext is degree {ct.degree}; relinearize it first. "
+                "A lazy product has to be relinearised before anything that key-switches it, "
+                "multiplies it by another ciphertext, or multiplies it by a monomial or an integer.")
+
     def _binary(self, op, x, y, what: str):
         """Add/subtract: a plaintext operand is canonical by definition, ciphertexts must agree."""
         if self._is_ct(x) and self._is_ct(y):
@@ -95,7 +116,8 @@ class ClearEngine:
                     f"{what}: ciphertext is at scale D^{ct.scale_exp}, a fresh plaintext is at D^1; "
                     "rescale the ciphertext first")
             level, scale = ct.level, ct.scale_exp
-        return ClearCiphertext(op(self._slots_of(x), self._slots_of(y)), level, scale)
+        degree = max(x.degree if self._is_ct(x) else 1, y.degree if self._is_ct(y) else 1)
+        return ClearCiphertext(op(self._slots_of(x), self._slots_of(y)), level, scale, degree)
 
     # ---- arithmetic ----
     def add(self, x, y):
@@ -112,27 +134,38 @@ class ClearEngine:
     def multiply(self, x, y):
         """Ciphertext times ciphertext / plaintext / scalar. Integer scalars are level- and scale-free."""
         if isinstance(y, (int, np.integer)) and not isinstance(y, bool):
-            return ClearCiphertext(x.slots * y, x.level, x.scale_exp)
+            self._require_degree_one(x, "multiply by an integer")
+            return ClearCiphertext(x.slots * y, x.level, x.scale_exp, x.degree)
         if isinstance(x, (int, np.integer)) and not isinstance(x, bool):
-            return ClearCiphertext(y.slots * x, y.level, y.scale_exp)
+            self._require_degree_one(y, "multiply by an integer")
+            return ClearCiphertext(y.slots * x, y.level, y.scale_exp, y.degree)
 
         if self._is_ct(x) and self._is_ct(y):
             if self.strict and x.level != y.level:
                 raise ScaleMismatch(f"multiply: levels differ, {x.level} vs {y.level}")
+            # The device's ciphertext-ciphertext product forms (c0*d0, c0*d1 + c1*d0, c1*d1) and has
+            # nowhere to put a third input component, so it ignores one silently.
+            self._require_degree_one(x, "multiply a ciphertext by a ciphertext")
+            self._require_degree_one(y, "multiply a ciphertext by a ciphertext")
             level = min(x.level, y.level)
             scale = x.scale_exp + y.scale_exp
+            degree = 2
         else:
             ct = x if self._is_ct(x) else y
-            level, scale = ct.level, ct.scale_exp + 1
-        return ClearCiphertext(self._slots_of(x) * self._slots_of(y), level, scale)
+            level, scale, degree = ct.level, ct.scale_exp + 1, ct.degree
+        return ClearCiphertext(self._slots_of(x) * self._slots_of(y), level, scale, degree)
 
     def conjugate(self, ct: ClearCiphertext) -> ClearCiphertext:
+        self._require_degree_one(ct, "conjugate")   # an automorphism, so a key switch
         return ClearCiphertext(np.conj(ct.slots), ct.level, ct.scale_exp)
 
     def multiply_1j(self, ct: ClearCiphertext) -> ClearCiphertext:
+        # A monomial multiply, and the device's does not touch the third component.
+        self._require_degree_one(ct, "multiply by i")
         return ClearCiphertext(1j * ct.slots, ct.level, ct.scale_exp)
 
     def rotate(self, ct: ClearCiphertext, delta: int) -> ClearCiphertext:
+        self._require_degree_one(ct, "rotate")      # an automorphism, so a key switch
         """``out[i] = ct[(i + delta) mod slots]`` - the fideslib direction, not THOR's.
 
         THOR's ``he.rotate`` shifts the other way; :class:`thorfhe.stages.Stages` negates once so that
@@ -157,7 +190,7 @@ class ClearEngine:
             raise ScaleMismatch(
                 f"{what}: would leave the ciphertext at level {level}. The level budget does not fit "
                 f"- raise the depth, or the bootstrap level if this is after a bootstrap.")
-        return ClearCiphertext(ct.slots.copy(), level, scale_exp)
+        return ClearCiphertext(ct.slots.copy(), level, scale_exp, ct.degree)
 
     def rescale(self, ct: ClearCiphertext) -> ClearCiphertext:
         if self.strict and ct.scale_exp < 2:
@@ -175,12 +208,13 @@ class ClearEngine:
         """Refresh to ``bootstrap_level``: exact here, so a stage's *schedule* is tested, not its noise."""
         if self.strict and ct.scale_exp != 1:
             raise ScaleMismatch("bootstrap: ciphertext must be canonical (scale D^1)")
+        self._require_degree_one(ct, "bootstrap")
         level = self.bootstrap_level if keep_levels is None else keep_levels
         return ClearCiphertext(ct.slots.copy(), level, 1)
 
     def relinearize(self, ct: ClearCiphertext) -> ClearCiphertext:
-        """No-op: ciphertext degree is not modelled here, only the values, levels and scales."""
-        return ct
+        """Fold the third component away. Exact in value; what it changes here is the degree."""
+        return ClearCiphertext(ct.slots, ct.level, ct.scale_exp, 1)
 
     def ntt(self, ct):
         return ct
