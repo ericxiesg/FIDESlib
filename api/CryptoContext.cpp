@@ -1070,7 +1070,9 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSub(Plaintext& pt, const C
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
 	auto res_gpu                = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
 	auto pt_gpu                 = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu));
-	res_gpu->multScalar(-1.0);
+	// pt - ct, matching the CPU path's EvalSub(pt, ct). negate() rather than multScalar(-1.0):
+	// negating must not consume a scale degree, or the addPt below mixes Delta with Delta^2.
+	res_gpu->negate();
 	res_gpu->addPt(*pt_gpu);
 
 	return result;
@@ -1119,7 +1121,9 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSub(double scalar, const C
 
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
 	auto res_gpu                = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
-	res_gpu->multScalar(-1.0);
+	// scalar - ct. addScalar reads the ciphertext's noise level, so it follows whatever negate()
+	// leaves - but multScalar(-1.0) left Delta^2, and this is the path he_inv takes.
+	res_gpu->negate();
 	res_gpu->addScalar(scalar);
 
 	return result;
@@ -1185,9 +1189,12 @@ void CryptoContextImpl<DCRTPoly>::EvalSubInPlace(double scalar, Ciphertext<DCRTP
 	this->LoadCiphertext(ct1);
 
 	auto res_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct1->gpu));
-	res_gpu->multScalar(-1.0);
+	// scalar - ct, like the out-of-place EvalSub(double, ct) and like the CPU path's
+	// EvalSubInPlace(scalar, ct). The old sequence negated, added and negated again, which is
+	// ct - scalar - the *other* overload's job, EvalSubInPlace(ct, scalar) - and spent two scale
+	// degrees doing it.
+	res_gpu->negate();
 	res_gpu->addScalar(scalar);
-	res_gpu->multScalar(-1.0);
 }
 
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSubMutable(Ciphertext<DCRTPoly>& ct1, Ciphertext<DCRTPoly>& ct2) {
