@@ -105,3 +105,36 @@ python3 -u -m thorfhe.bench fhe --engine fideslib --device cuda:0 \
 | `python/thorfhe/stages.py` | `Stages.probe` / `Stages.probed()`，默认关闭 |
 | `python/thorfhe/softmax.py` | stage 07 内部四个探点 |
 | `python/thorfhe/bench.py` | `--per-stage` 时挂上量级探针（量级 + level，不需要参照） |
+
+---
+
+## 补充（同日，等数据期间算的）：第四节那个「噪声底噪」假设，我自己把它否了
+
+上面我说 `07b.exp` 的量级可能整个掉在噪声底噪以下。算了一下，**不成立**，这里更正，
+免得把你的排查方向带偏。
+
+layer 0 走的是 THOR 的 `NARROW` 表（`softmax_parameters_for` 对这个样本返回 `None`，
+落回 `min_x=-27.2493, max_x=21.72692, n=2, l=2`），`scale=32`。把实际系数代进去：
+
+```
+shifted x 落在      [-0.239, +0.475]
+he_exp 输出         [9.3e-09, 8.5e-04]      （探针实测 max 2.28e-4，同一量级，模型可信）
+|p'/p|              中位数 8.0             （即 exp(8x)，和 exp(u/4)、u=32x 对得上）
+```
+
+于是：
+
+| 误差来源 | 在 `he_exp` 输出上的相对误差 |
+|---|---:|
+| bootstrap 的 1.74e-5，经 `/32` 再过多项式（含一次平方） | **8.7e-06** |
+| Δ=2^50 的新鲜 CKKS 底噪（~1e-8 绝对），在最大的 exp 值上 | 1.2e-05 |
+| 同上，在中位数那批 exp 值（1.35e-6）上 | 0.74% |
+
+最坏情况是**最小的那批 softmax 权重有 1% 误差**——那会表现为 relRMSE 1e-2 量级，
+**不可能是 relRMSE 1.0 加零相关**。softmax 的结果由最大的那几个权重主导，而它们的相对误差是 1e-5。
+
+所以：**第四节可以划掉，`07b` 的量级本身不是病因。**
+这反过来把第二节的结构性论证顶到了唯一位置——
+**bootstrap 仍然是通往 `07a` 的路径上唯一一个前六级没验证过的算子**。
+
+四个探针照跑，`07a` 那一行现在是最关键的一行。
