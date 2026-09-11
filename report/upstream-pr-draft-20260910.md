@@ -8,6 +8,13 @@ THOR 字样**。
 
 正文为纯文本，不含零宽字符、不可见标记或任何形式的隐藏水印；后续编辑请保持这一点。
 
+> **2026-09-11 更新**：已按本草稿把代码实际切开，放在 `../patch/PR1..PR8/`（完整文件，非 diff），
+> 说明见 `../patch/README.md`。切分过程验证了两件事：八个 PR 全部应用回去与工作树**逐字节相同**，
+> 且没有任何 PR 的树引用**更靠后的 PR 才引入的符号**。切的过程也纠正了本草稿三处，已就地改掉：
+> PR2 是**七个**修复不是五个（多出 `EvalSub` 符号反了、`ConstPlaintext` 的 `any_cast` 必抛），
+> 旋转 key 去重那条**必须移到 PR5**（它读 PR5 才有的 `maxLevel`），
+> `Ciphertext.cpp` 横跨 **2/4/5** 而不是 4/7。
+
 ---
 
 ## 一、范围
@@ -47,7 +54,7 @@ THOR 字样**。
 | # | 主题 | 大致行数 | 依赖 | 风险 |
 |---|---|---:|---|---|
 | 1 | 构建：GPU 架构自动探测 | 66 | 无 | 无 |
-| 2 | 五个正确性修复（不含新 API） | 约 90 | 无 | 低，全是收紧检查 |
+| 2 | 七个正确性修复（不含新 API） | 约 95 | 无 | 低，全是收紧检查 |
 | 3 | CKKS 槽级原语 | 约 200 | 无 | 低，纯新增 |
 | 4 | 惰性重线性化（degree-2 密文） | 约 250 | 无 | 中，动了 `Ciphertext` |
 | 5 | level 截断密钥存储 | 约 900 | 2 | 中，默认开启需讨论 |
@@ -55,9 +62,11 @@ THOR 字样**。
 | 7 | 显存池：回收、排空、可观测 | 约 300 | 无 | 中，动了分配器 |
 | 8 | Python 绑定与 pytest | 约 926 | 3–7 | 低 |
 
-**注意 PR 2、5、7 在 `src/CKKS/Context.cu`、`KeySwitchingKey.cu` 上有重叠**——拆分要按 hunk
-cherry-pick，不能按文件。具体：`Context.cu` 里 `AddRotationKey` 的去重逻辑属于 PR 2，
-环境变量与 `keyDeviceBytes` / `grownKeyCount` 属于 PR 5，`AuxilarPolyCount` 属于 PR 7。
+**有六个文件横跨多个 PR**，拆分要按 hunk cherry-pick，不能按文件：`api/CryptoContext.{hpp,cpp}`、
+`api/Definitions.hpp`、`src/CKKS/Context.{cu,cuh}`、`src/CKKS/KeySwitchingKey.cuh`、
+`src/CKKS/LimbPartition.{cu,cuh}`、`src/CKKS/RNSPoly.{cpp,cuh}`、`src/CKKS/Ciphertext.cpp`、
+`src/CKKS/openfhe-interface/RawCiphertext.cu`。最极端的是 `api/CryptoContext.cpp` 里一个 374 行的
+hunk，横跨 PR 3/4/5/6/7。已按行区间切好，见 `../patch/_tools/manifest.py`。
 
 ### PR 1 — 构建：GPU 架构自动探测
 
@@ -68,7 +77,7 @@ cherry-pick，不能按文件。具体：`Context.cu` 里 `AddRotationKey` 的�
 
 文件：`CMakeLists.txt`、`.gitignore`。
 
-### PR 2 — 五个正确性修复
+### PR 2 — 七个正确性修复
 
 都是「原来会静默出错，现在要么正确要么报错」，没有新 API。**我认为这是最该优先合的一个 PR。**
 
@@ -89,16 +98,27 @@ cherry-pick，不能按文件。具体：`Context.cu` 里 `AddRotationKey` 的�
    一个存在但 limb 数不足的分区会得到越界指针，illegal access 在下一次同步时才浮现。
    现在提前检查并报出「要读 N limb、实际只有 M」。**注意**：`pt` 里的 nullptr 是合法的
    （`DotProductPtInternal` 会主动压入 nullptr，内核有两处 `!= nullptr` 保护），检查必须跳过它们。
-4. **同一个旋转 index 注册两次时保留了错的那把**（`src/CKKS/Context.cu`）。
-   `std::map::emplace` 保留先到的、静默丢弃后到的。当调用方按自己的电路声明了截断 level、
-   而 bootstrap 预计算又为同一 index 要一把覆盖更高 level 的 key 时，留下的是截断过头的那把，
-   随后在合法使用点抛错。改成保留覆盖更多的那把（完整 key 胜过任何截断 key）。
-   实现上要 erase + emplace 而不是赋值——`KeySwitchingKey` 含有 const 成员，不可赋值。
+4. **`multMonomial` 没有检查辅助多项式的 limb 数**（`src/CKKS/Ciphertext.cpp`）。
+   `RNSPoly::grow` 在池化多项式已达目标 level 时提前返回，所以 `g.limb[i]` 越界是可能的，
+   后果同上：垃圾设备指针，illegal access 在几次调用之后的 `GPUfree` 里才炸——这正是它最初
+   在 GV100 上被报出来的位置。就地检查并说清是哪两个数字。
 5. **`KeySwitchingKey` 持有悬垂引用**（`src/CKKS/KeySwitchingKey.cuh`）。原来按引用持有
    `Context`，而 `LoadContext` 会把局部 `Context` move 进 `std::any`，函数返回后引用即悬垂。
    改成按值持有 `shared_ptr`。副作用：这会形成一个引用环，`ContextData` 不再随
    `DeregisterCryptoContextGPU` 释放；注释里写明了要真正回收需先 `clearAutomorphismKeys()` 等。
    同一 PR 还修了析构时误清全局 key 表、`SetDevices` 只接受右值两处。
+6. **`EvalSub(double scalar, const Ciphertext& ct)` 符号反了**（`api/CryptoContext.cpp`）。
+   原实现是 `multScalar(-1)` → `addScalar(scalar)` → `multScalar(-1)`，算出来是 `ct - scalar`；
+   而这个重载的语义是 `scalar - ct`。去掉最后那次取反即可。**这是切分代码时才发现的**，
+   不在原来的清单里。
+7. **`EvalMult(ct, pt)` / `EvalMultInPlace(ct, pt)` 的 CPU 回退路径必抛**（`api/CryptoContext.cpp`）。
+   `std::any_cast<const lbcrypto::ConstPlaintext&>(pt->cpu)`，而 `pt->cpu` 里装的是 `Plaintext`。
+   `any_cast` 要求类型精确匹配，所以这条路径一走就 `bad_any_cast`。改成 `const lbcrypto::Plaintext&`。
+   同样是切分时发现的。
+
+> **旋转 key 去重那条修复原本列在这里，已移到 PR 5。** 它的判断读
+> `KeySwitchingKey::maxLevel`——PR 5 才引入的成员。也就是说**那个 bug 只有在密钥可以被截断之后
+> 才存在**，放进「纯修复」PR 里既编不过也讲不通。
 
 ### PR 3 — CKKS 槽级原语
 
@@ -151,6 +171,13 @@ key switch 是这类电路的主要开销。
 **默认值需要讨论。** 现在 `allow_key_grow` 默认 false，即 level 计划算错时**抛异常而不是悄悄
 重建 key**：一个错的计划是调用方的 bug，静默重载会同时隐藏成本和错误。但对上游既有用户来说，
 `truncate_keys` 默认 true 是行为变更；保守起见可以在上游改成默认 false。
+
+**含一个只有截断存在时才存在的 bug 的修复**：同一个旋转 index 会被注册两次——一次来自
+`SetRotationKeyLevels`（调用方电路旋转的 level），一次来自 bootstrap 预计算（StC / CtS 旋转的
+level），两组 index 天然重叠。`std::map::emplace` 保留先到的、静默丢弃后到的，于是留下的可能是
+截断过头的那把，随后在完全合法的使用点抛错。改成保留覆盖更多的那把（完整 key 胜过任何截断 key）。
+实现上要 erase + emplace 而不是赋值——`KeySwitchingKey` 含 const 成员，不可赋值。
+`RawCiphertext.cu` 里 caller 一侧有对应的两处。
 
 配套：`examples/key-truncation/`（两个可执行：一个测量节省量，一个复现 grow 路径）、
 `docs/level_truncated_keys.md`、`tools/memory_model.py`（按 OpenFHE 的 BSGS 参数化估算 key 驻留量）。
@@ -283,7 +310,7 @@ grep -rn "THOR" src/ api/ python/src/ python/pyfideslib/ examples/key-truncation
 
 ### PR 2
 
-> **Fix five silent-corruption paths**
+> **Fix seven silent-corruption paths**
 >
 > Each of these previously produced wrong results or an illegal memory access at a point far from the
 > cause. No new API.
@@ -305,15 +332,22 @@ grep -rn "THOR" src/ api/ python/src/ python/pyfideslib/ examples/key-truncation
 >    synchronisation. It is checked up front now, with both limb counts in the message. A null `pt`
 >    entry is legitimate and is skipped: `DotProductPtInternal` pushes nullptr deliberately and the
 >    kernel guards for it.
-> 4. Registering the same rotation index twice kept the wrong key. `std::map::emplace` keeps the first
->    and silently drops the second, so a key truncated for the caller's circuit could survive and then
->    be used by the bootstrap above the level it was cut to. The key that covers more now wins.
+> 4. `multMonomial` did not check its auxiliary polynomial's limb count. `RNSPoly::grow` returns
+>    early when the pooled polynomial is already at or above the target level, so an indexing overrun
+>    is possible, with the same consequence as above: a garbage device pointer whose illegal access
+>    surfaces several calls later, in a `GPUfree`, which is where it was first reported from.
 > 5. `KeySwitchingKey` held a dangling `Context` reference: `LoadContext` moves its local context into
 >    a `std::any`, so the reference dies when `LoadContext` returns. It is held by value now. This
 >    closes a reference cycle, so the context data is no longer freed by
 >    `DeregisterCryptoContextGPU`; the comment records that clearing the keys first breaks the cycle.
 >    Two smaller fixes ride along: the destructor wiped the global key map, and `SetDevices` only
 >    accepted an rvalue.
+> 6. `EvalSub(double scalar, const Ciphertext& ct)` had its sign inverted. It computed
+>    `multScalar(-1)`, `addScalar(scalar)`, `multScalar(-1)`, which is `ct - scalar`, while the
+>    overload means `scalar - ct`. The trailing negation is removed.
+> 7. The CPU fallback in `EvalMult(ct, pt)` and `EvalMultInPlace(ct, pt)` always threw:
+>    `std::any_cast<const lbcrypto::ConstPlaintext&>` on an `any` holding a `Plaintext`. `any_cast`
+>    requires an exact type match, so that path raised `bad_any_cast` every time it was taken.
 
 ### PR 3
 
@@ -351,6 +385,12 @@ grep -rn "THOR" src/ api/ python/src/ python/pyfideslib/ examples/key-truncation
 >
 > `GetBootstrapKeyLevelPlan` computes the same plan for the bootstrap's own keys: the slots-to-coeffs
 > keys are used only after `EvalMod`, so their bound is `L - GetBootstrapDepth + levelBudget[1]`.
+>
+> Registering the same rotation index twice used to keep the wrong key: `std::map::emplace` keeps the
+> first and silently drops the second, so a key truncated for the caller's circuit could survive and
+> then be used by the bootstrap above the level it was cut to. The key that covers more now wins.
+> This fix lives here rather than with the other bug fixes because it reads `KeySwitchingKey::maxLevel`
+> - the bug only exists once keys can be truncated at all.
 >
 > A key needed above its plan is a caller bug, so `ensureLevel` throws by default, naming the key and
 > both levels; `allow_key_grow` (or `FIDESLIB_KEY_GROW=1`) rebuilds it instead. `GetKeyDeviceBytes`
@@ -459,7 +499,7 @@ attention、softmax、layernorm、GELU、feed-forward、pooler、benchmark CLI�
 | `CMakeLists.txt` | +62 / -1 | 1 |
 | `api/CCParams.cpp` | +7 / -0 | 3 |
 | `api/CCParams.hpp` | +2 / -0 | 3 |
-| `api/CryptoContext.cpp` | +414 / -12 | 3,4,5,6,7 |
+| `api/CryptoContext.cpp` | +414 / -12 | 2,3,4,5,6,7 |
 | `api/CryptoContext.hpp` | +107 / -0 | 3,4,5,6,7 |
 | `api/Definitions.hpp` | +12 / -0 | 3,6 |
 | `api/LightPlaintext.cpp` | +83 / -0 | 6 |
@@ -480,14 +520,14 @@ attention、softmax、layernorm、GELU、feed-forward、pooler、benchmark CLI�
 | `python/tests/test_stage3_lazy_relin.py` | +45 / -0 | 8 |
 | `python/tests/test_stage4_bootstrap.py` | +44 / -0 | 8 |
 | `python/tests/test_stage5_light_plaintext.py` | +127 / -0 | 8 |
-| `src/CKKS/Ciphertext.cpp` | +154 / -9 | 4,7 |
+| `src/CKKS/Ciphertext.cpp` | +154 / -9 | 2,4,5 |
 | `src/CKKS/Ciphertext.cuh` | +20 / -0 | 4 |
 | `src/CKKS/CoeffsToSlots.cu` | +25 / -1 | 2 |
-| `src/CKKS/Context.cu` | +88 / -1 | 2,5,7 |
+| `src/CKKS/Context.cu` | +88 / -1 | 5,7 |
 | `src/CKKS/Context.cuh` | +20 / -0 | 5,7 |
 | `src/CKKS/ElemenwiseBatchKernels.cu` | +18 / -0 | 6 |
 | `src/CKKS/ElemenwiseBatchKernels.cuh` | +7 / -0 | 6 |
-| `src/CKKS/KeySwitchingKey.cu` | +81 / -10 | 2,5 |
+| `src/CKKS/KeySwitchingKey.cu` | +81 / -10 | 5 |
 | `src/CKKS/KeySwitchingKey.cuh` | +51 / -1 | 2,5 |
 | `src/CKKS/LimbPartition.cu` | +137 / -4 | 5,6 |
 | `src/CKKS/LimbPartition.cuh` | +21 / -2 | 5,6 |
@@ -497,7 +537,7 @@ attention、softmax、layernorm、GELU、feed-forward、pooler、benchmark CLI�
 | `src/CKKS/Plaintext.cuh` | +14 / -0 | 6 |
 | `src/CKKS/RNSPoly.cpp` | +62 / -2 | 5,6 |
 | `src/CKKS/RNSPoly.cuh` | +18 / -1 | 5,6 |
-| `src/CKKS/openfhe-interface/RawCiphertext.cu` | +182 / -5 | 5 |
+| `src/CKKS/openfhe-interface/RawCiphertext.cu` | +182 / -5 | 2,5 |
 | `src/CKKS/openfhe-interface/RawCiphertext.cuh` | +15 / -0 | 5 |
 | `src/ConstantsGPU.cu` | +20 / -0 | 2 |
 | `src/CudaUtils.cu` | +134 / -3 | 7 |
