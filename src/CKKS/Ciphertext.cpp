@@ -875,6 +875,29 @@ void Ciphertext::multScalar(const double c, bool rescale) {
 	multScalarNoPrecheck(c, rescale && cc.rescaleTechnique == FIXEDMANUAL);
 }
 
+void Ciphertext::negate() {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	CKKS::SetCurrentContext(cc_);
+
+	// Negation must not cost a scale degree. multScalar(-1.0) treats -1 as a real scalar: it does
+	// `NoiseLevel += 1` and `NoiseFactor *= Delta`, and its rescale is guarded by
+	// `(rescale && FIXEDMANUAL) && FIXEDAUTO`, which is never true - so under FIXEDMANUAL a negated
+	// ciphertext is left at Delta^2 while looking like any other. The value decrypts correctly,
+	// because NoiseFactor is tracked, so this hides until the result is added to a canonical
+	// ciphertext or a plaintext encoded at Delta, and then it is wrong by a factor of Delta.
+	//
+	// -1 is an integer, and multiplying by an integer is free: per limb it is `q_i - 1`, which is the
+	// same construction addScalar uses for a negative constant.
+	std::vector<uint64_t> minus_one(c0.getLevel() + 1);
+	for (size_t i = 0; i < minus_one.size(); ++i)
+		minus_one[i] = cc.prime[i].p - 1;
+
+	c0.multScalar(minus_one);
+	c1.multScalar(minus_one);
+	if (c2)
+		c2->multScalar(minus_one);
+}
+
 void Ciphertext::addScalar(const double c) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);

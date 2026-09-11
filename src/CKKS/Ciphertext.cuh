@@ -324,6 +324,15 @@ class Ciphertext {
 	void multScalar(const double c, bool rescale = false);
 
 	/**
+	 * @brief Negate every coefficient, at no cost in level or scale.
+	 *
+	 * Not `multScalar(-1.0)`: that treats -1 as a real scalar and consumes a scale degree, which
+	 * under FIXEDMANUAL leaves the ciphertext at Delta^2 with no outward sign. -1 is an integer, and
+	 * multiplying by an integer is free.
+	 */
+	void negate();
+
+	/**
 	 * @brief Multiplies a ciphertext `b` by a scalar and stores the result in *this*.
 	 *
 	 * The method copies `b` into *this* and then calls `multScalar(c,
