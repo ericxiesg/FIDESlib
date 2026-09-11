@@ -75,3 +75,32 @@ python3 -u -m thorfhe.bench fhe --engine fideslib --device cuda:0 \
 |---|---|
 | `api/CryptoContext.cpp` | `EvalSub(pt, ct)`、`EvalSub(double, ct)`、`EvalSubInPlace(double, ct)` 全部改用 `negate()`；最后一个同时修 sign **未编译** |
 | `../patch/` | PR2 仍 10 个文件；重建校验与前向引用校验都重跑通过 |
+
+---
+
+## 补充：这一类到此为止，扫干净了
+
+上一轮我「找到机制但没扫全调用点」，这次把这条线走完，记下来免得再有第三轮。
+
+**`api/` 里剩下的 `multScalar(` 只有两处**，都是 `multScalar(scalar)`：
+
+| 行 | 函数 | 判断 |
+|---|---|---|
+| 1298 | `EvalMult(ct, double)` | **设计如此**：实数标量乘本来就该耗一个 scale degree，FIXEDMANUAL 下由调用方 rescale |
+| 1348 | `EvalMultInPlace(ct, double)` | 同上 |
+
+移植侧确实是这么用的——`he_softmax` 里写的就是
+`self.rescale(self.multiply(ct, 1.0 / scale))`，而 `ClearEngine` 的严格 scale 记账会在
+漏掉 rescale 时当场报错。所以这两处不动。
+
+**`src/` 里没有 `multScalar(-1`。**
+
+**Python 绑定的方向也核了一遍**（这是同一类 sign 错最容易藏的地方）：
+
+```cpp
+.def("EvalSubScalar", py::overload_cast<const CT&, double>(&...::EvalSub))  // ct - scalar
+.def("EvalScalarSub", py::overload_cast<double, const CT&>(&...::EvalSub))  // scalar - ct
+```
+
+`Engine.subtract(float x, ct y)` 调的是 `EvalScalarSub(x, y)` → `EvalSub(double, ct)` → `x - y`，
+方向正确。`subtract(ct, float)` → `EvalSubScalar` → `ct - float`，也正确。
