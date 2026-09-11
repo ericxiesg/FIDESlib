@@ -1,6 +1,7 @@
 # FIDESlib 上游 PR 草稿
 
-日期：2026-09-10。分支 `bootstrap-dev`。基线：上游 `main` = `786c760`（`Fix issue #31`）。
+日期：2026-09-10，2026-09-11 更新基线。分支 `bootstrap-dev`。
+基线：上游 `main` = `fa97286`（PR #38、#39 合入之后）。
 
 **这份文档只覆盖引擎侧改动。** THOR 移植不进 PR。第一到第四节里不出现 THOR 的算法细节，
 所有与 THOR 相关的内容集中在第五节；第三节列出**目前还残留在引擎代码里、提交前必须清掉的
@@ -14,6 +15,22 @@ THOR 字样**。
 > PR2 是**七个**修复不是五个（多出 `EvalSub` 符号反了、`ConstPlaintext` 的 `any_cast` 必抛），
 > 旋转 key 去重那条**必须移到 PR5**（它读 PR5 才有的 `maxLevel`），
 > `Ciphertext.cpp` 横跨 **2/4/5** 而不是 4/7。
+>
+> **2026-09-11 二次更新**：上游 `main` 前进到 `fa97286`（三个 commit，`786c760..fa97286`，
+> 只动了 3 个文件 11 行）。已 merge 进 `bootstrap-dev`，**无冲突，我方代码不需要任何修改**，
+> `patch/` 已按新基线重切（重建校验与前向引用校验都仍然通过，块划分不变）。
+> 两处上游修复都落在我们也改的文件上，而且**方向和我们一致**：
+>
+> * `rotate_hoisted` 非融合路径改用 `copyMetadata(*this)`，此前 `slots` 一直是 0。
+>   这不只是元数据不全：`GetRotationKey(index, keyID, slots, actual_index)` 在精确 index 不存在时
+>   会走「模 slot 兼容」回退，循环写作 `for (i = 1; i < N/2/slots; ++i)`——**slots 为 0 就是整数除零**。
+>   我们的 level 截断密钥正是在这条路径上调 `ensureLevel`，所以这条修复对我们是纯收益。
+> * `LimbPartition::multPt` 改用 `limb.at(limbsize - 1)` 而不是 `limb.back()`：
+>   `dropToLevel` 不缩物理存储，所以 `back()` 取到的可能是当前 level 之外的那根 limb。
+>   **light plaintext 恰好是最容易踩到的场景**——同一个池化多项式被反复在不同 level 上展开。
+>   这和我们在 `LTdotProductPtBatch` / `multMonomial` 加的 limb 检查是同一类问题。
+>   顺带：`LimbPartition.cu:2438` 还留着一个 `STREAM(limb.back())`，是流等待不是数据操作，
+>   但同一类隐患，可以提给上游。
 
 ---
 
@@ -485,7 +502,7 @@ attention、softmax、layernorm、GELU、feed-forward、pooler、benchmark CLI�
   一个 transformer 层的前若干阶段（relRMSE 1.03e-8）。
 * **尚未编译过**：`GetPoolStats` / `GetDeviceMemory`（2026-09-10 新增）。**提 PR 前必须先编译。**
 * **Python 套件**：91 passed / 40 skipped（skip 的都是需要 GPU 的用例）。
-* **上游回归：本分支没有跑过上游自带的 C++ 测试。** PR 2、4、7 动了公共路径
+* **上游回归：本分支没有跑过上游自带的 C++ 测试。**（`fa97286` 已 merge，同样没编译过。） PR 2、4、7 动了公共路径
   （`Ciphertext`、`CoeffsToSlots`、分配器），提交前必须跑一遍上游 test suite。
   **这是目前最大的空白，也是提 PR 前唯一的硬阻塞。**
 
