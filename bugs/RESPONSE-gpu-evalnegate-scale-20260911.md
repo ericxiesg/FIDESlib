@@ -115,3 +115,47 @@ python -m thorfhe.bench fhe --engine fideslib --layers 1 --limit 1 \
 | `src/CKKS/Ciphertext.{cpp,cuh}` | 新增 `Ciphertext::negate()`，scale-中性 **未编译** |
 | `api/CryptoContext.cpp` | `EvalNegate` / `EvalNegateInPlace` 改用 `negate()` **未编译** |
 | `../patch/` | PR2 变成 10 个文件；重建校验与前向引用校验都重跑通过 |
+
+---
+
+## 补充：把这一类 bug 一次审完
+
+`EvalNegate` 这个 bug 的形状是「**声称 scale-中性的算子其实不是**」。这类每发现一个就要烧一次
+24 分钟的 GPU 跑，所以我把 THOR 依赖其 scale 行为的算子全读了一遍：
+
+| 算子 | 底层 | 动 `NoiseLevel` / `NoiseFactor` 吗 | 结论 |
+|---|---|---|---|
+| `EvalMultByI` | `multMonomial` | 否 | 干净 |
+| `EvalMultByInteger` | `multIntScalar` | 否 | 干净（但不处理 `c2`，见上） |
+| `EvalConjugate` | `conjugate` | 否 | 干净 |
+| `EvalAddScalar` | `addScalar` | 否，而且**按当前 `NoiseLevel` 编码常数** | 干净，写法正确 |
+| `EvalLevelReduce` | `dropToLevel` | 否 | 干净 |
+| `EvalNegate` | `multScalar(-1.0)` | **是** | **坏的，已修** |
+
+`multScalar(double)` 是唯一的异类。`addScalar` 值得对照看一眼——它读 `this->NoiseLevel`
+去决定常数怎么编码，**主动适配密文的 scale**，这才是对的做法。
+
+## 补充二：为什么这个 bug 能活这么久
+
+`Ciphertext::addPt` 末尾本来就有检查：
+
+```cpp
+assert(NoiseLevel == b.NoiseLevel);
+```
+
+**但 assert 在 Release 构建下被编译掉了。** 而且它上面那一大段自动对齐
+（`if (FLEXIBLEAUTO || FLEXIBLEAUTOEXT || FIXEDAUTO)`）在 FIXEDMANUAL 下整段不执行——
+**FIXEDMANUAL 恰恰是唯一没有兜底、只能靠这个 assert 的模式**，而这正是本项目刻意选的模式。
+
+所以 `addPt` / `subPt` 在 FIXEDMANUAL 下 scale 不匹配时改成 **抛异常**，带上两个数字：
+
+```
+FIDESlib: addPt with mismatched scales - the ciphertext is at noise level 2 and the
+plaintext at 1. Under FIXEDMANUAL the caller must bring them to the same scale first;
+the noise scale degree is MakeCKKSPackedPlaintext's second argument.
+```
+
+其它 scaling technique 保持原样（它们有对齐逻辑，assert 够用）。
+
+这条本身不改变任何正确程序的行为，但**下一个同类 bug 会当场炸在出问题的算子上，
+而不是变成 24 分钟之后的一行 relRMSE 1.0**。这也是这个项目一路走过来最有效的办法。

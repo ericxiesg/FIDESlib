@@ -297,6 +297,18 @@ void Ciphertext::addPt(const Plaintext& b) {
 			return;
 		}
 	}
+	// Under FIXEDMANUAL nothing above runs: there is no adjustment step, so this equality is all that
+	// stands between a scale mismatch and a silently wrong answer - and an assert is compiled out of a
+	// release build, which is exactly how one got through. A plaintext at Delta added to a ciphertext
+	// at Delta^2 is wrong by a factor of Delta and still decrypts to something plausible, so it shows
+	// up as poor accuracy many stages later rather than as a failure here.
+	if (cc.rescaleTechnique == FIXEDMANUAL && NoiseLevel != b.NoiseLevel) {
+		throw std::runtime_error(
+			std::string("FIDESlib: addPt with mismatched scales - the ciphertext is at noise level ") +
+				std::to_string(NoiseLevel) + " and the plaintext at " + std::to_string(b.NoiseLevel) +
+				". Under FIXEDMANUAL the caller must bring them to the same scale first; the noise scale "
+				"degree is MakeCKKSPackedPlaintext's second argument.");
+	}
 	assert(NoiseLevel == b.NoiseLevel);
 	op_count[OPS::ADDPT]++;
 
@@ -329,6 +341,18 @@ void Ciphertext::subPt(const Plaintext& b) {
 			}
 			return;
 		}
+	}
+	// Under FIXEDMANUAL nothing above runs: there is no adjustment step, so this equality is all that
+	// stands between a scale mismatch and a silently wrong answer - and an assert is compiled out of a
+	// release build, which is exactly how one got through. A plaintext at Delta added to a ciphertext
+	// at Delta^2 is wrong by a factor of Delta and still decrypts to something plausible, so it shows
+	// up as poor accuracy many stages later rather than as a failure here.
+	if (cc.rescaleTechnique == FIXEDMANUAL && NoiseLevel != b.NoiseLevel) {
+		throw std::runtime_error(
+			std::string("FIDESlib: subPt with mismatched scales - the ciphertext is at noise level ") +
+				std::to_string(NoiseLevel) + " and the plaintext at " + std::to_string(b.NoiseLevel) +
+				". Under FIXEDMANUAL the caller must bring them to the same scale first; the noise scale "
+				"degree is MakeCKKSPackedPlaintext's second argument.");
 	}
 	assert(NoiseLevel == b.NoiseLevel);
 	op_count[OPS::ADDPT]++;
