@@ -11,6 +11,8 @@ computes the same polynomial, so the two agree up to CKKS noise even though the 
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 
 #: THOR he_exp1: degree-15 minimax fit of exp(x/32) on the softmax range, coefficients low to high.
@@ -335,9 +337,26 @@ class GeluMixin:
     by 64 so that the composite's own argument lands in ``[-1, 1]``, which is where the fit is valid.
     """
 
-    def he_tanh_for_gelu(self, x):
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _gelu_inner_for(carrier: float):
+        """``GELU_INNER`` pre-divided by ``carrier``, so the composite can take the doubled argument.
+
+        Evaluating ``p(x / c)`` is the same as evaluating ``[p_k / c^k]`` at ``x``, and the second form
+        costs nothing: the coefficients are plaintext and this runs once. The first form costs a
+        rescale, which is a whole level, every time GELU runs.
+
+        The outer polynomial already carries a constant of this kind - it is exactly half of THOR's,
+        which is the other side of the same doubled-ciphertext bookkeeping - so this only moves the
+        input scaling to where the output scaling already lives.
+        """
+        inner = np.asarray(GELU_INNER, dtype=float)
+        return inner if carrier == 1.0 else inner * (1.0 / carrier) ** np.arange(len(inner))
+
+    def he_tanh_for_gelu(self, x, carrier: float = 1.0):
         """``tanh(64 x * sqrt(2/pi) * (1 + ...)) / 2``, as the two-polynomial composite. Twelve levels."""
-        return self.evaluate_polynomial(self.evaluate_polynomial(x, GELU_INNER), GELU_OUTER)
+        inner = self.evaluate_polynomial(x, self._gelu_inner_for(carrier))
+        return self.evaluate_polynomial(inner, GELU_OUTER)
 
     def gelu(self, x, carrier: float = 1.0):
         """``carrier * gelu(64 * x / carrier)``, for a ciphertext carrying ``carrier * pre / 64``.
@@ -348,9 +367,13 @@ class GeluMixin:
         pre-activation over 64, since the degree-31 fit is only valid on ``[-1, 1]``. So the tanh is
         evaluated at ``x / carrier`` while the linear factor keeps the full ``x``, and the product
         comes out on the same doubled footing as everything around it.
+
+        That division is folded into the inner coefficients rather than performed on the ciphertext,
+        which is where the twelve levels of the composite become twelve rather than thirteen.
         """
-        argument = x if carrier == 1.0 else self.rescale(self.multiply(x, 1.0 / carrier))
-        shifted = self.add(self.he_tanh_for_gelu(argument), 0.5)
+        # The division by `carrier` lives in the inner polynomial's coefficients, not in a rescale
+        # here: it is the same arithmetic and it is a level cheaper. See `_gelu_inner_for`.
+        shifted = self.add(self.he_tanh_for_gelu(x, carrier=carrier), 0.5)
         # The linear factor stays 64 whatever the carrier: `x` already carries it, so `64 * x` is
         # `carrier * pre_activation` - which is the footing the result is wanted on. Only the tanh's
         # argument has to be un-carried. It also has to stay an integer, because an integer multiply

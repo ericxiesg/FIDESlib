@@ -114,11 +114,16 @@ def test_encoded_contraction_matches_thor(model):
     assert model["e2"].shape == (2, 8, 6, 64)
 
 
-def test_gelu_costs_fourteen_levels_and_leaves_the_shape_alone(chain):
-    """Thirteen for the two-polynomial composite, plus one to un-carry the tanh's argument."""
+def test_gelu_costs_thirteen_levels_and_leaves_the_shape_alone(chain):
+    """Twelve for the two-polynomial composite, plus one for the linear factor's product.
+
+    It used to be fourteen: the tanh's argument was un-carried by rescaling the ciphertext, which is
+    a level. Dividing the inner polynomial's coefficients instead is the same arithmetic - verified
+    bit-identical - and costs nothing, because they are plaintext and folded once.
+    """
     engine, s12, s13, _ = chain
     assert s13.shape == s12.shape == (2, F.n_output_ciphertexts)
-    assert s13[0, 0].level == BOOTSTRAP_LEVEL - 14
+    assert s13[0, 0].level == BOOTSTRAP_LEVEL - 13
     assert s13[0, 0].scale_exp == 1
 
 
