@@ -23,6 +23,7 @@ import pytest
 
 from conftest import rand
 
+from thorfhe.clear import ScaleMismatch
 from thorfhe.numeric import EXP1_COEFFICIENTS, NumericMixin
 from thorfhe.stages import Stages
 
@@ -160,3 +161,33 @@ def test_exp_polynomial_at_benchmark_parameters(device):
     assert np.isfinite(got).all(), "the polynomial produced non-finite values"
     assert np.max(np.abs(got)) < 1e3, f"blew up to {np.max(np.abs(got)):.3g}, expected order 1e-2"
     assert np.max(np.abs(got - want)) < 1e-3
+
+
+# ---------------------------------------------------------------- the contract, in exact arithmetic
+def test_the_old_power_basis_order_is_now_caught(clear_pair):
+    """The exact mistake that produced 1e124, as a loud contract violation with no device involved.
+
+    `power_basis` used to square *after* relinearising rather than before, so the basis element it
+    stored was still degree 2. Multiplying that by another ciphertext is what the device mishandles:
+    it drops the third component and returns a plausible wrong answer. Exact arithmetic had no third
+    component to lose and stayed happy, which is why this cost several GPU runs to find. Now the
+    clear engine refuses it.
+    """
+    _, engine = clear_pair
+    x = engine.encrypt(rand(engine, 21, scale=0.4))
+    stale = engine.rescale(engine.square(engine.relinearize(x)))     # relinearise, then square
+    assert stale.degree == 2
+
+    with pytest.raises(ScaleMismatch):
+        engine.multiply(stale, x)
+    with pytest.raises(ScaleMismatch):
+        engine.rotate(stale, 1)
+    with pytest.raises(ScaleMismatch):
+        engine.multiply_1j(stale)
+
+
+def test_the_current_power_basis_order_is_canonical(clear_pair):
+    """And the order it uses now leaves every basis element degree 1, as the docstring promises."""
+    numeric, engine = clear_pair
+    basis = numeric.power_basis(engine.encrypt(rand(engine, 22, scale=0.4)), [2, 3, 4, 8])
+    assert all(basis[power].degree == 1 for power in basis), {k: v.degree for k, v in basis.items()}
