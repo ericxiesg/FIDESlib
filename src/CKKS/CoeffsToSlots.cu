@@ -108,7 +108,16 @@ void FIDESlib::CKKS::EvalCoeffsToSlots(Ciphertext& ctxt, int slots, bool decode)
 	// Drop the ciphertext to the diagonals of the step about to run, which is what OpenFHE's
 	// AdjustLevelsAndDepth does implicitly. Done per step rather than once, because each layer has its
 	// own diagonals and its own level.
-	const auto alignToDiagonals = [](Ciphertext& ct, const BootstrapPrecomputation::LTstep& step) {
+	//
+	// FIXEDMANUAL only. The other techniques adjust levels themselves and their diagonals are encoded
+	// to match, so there is nothing to align - and forcing the drop anyway takes levels the caller
+	// still needs. That is not hypothetical: unconditional, this drove a FLEXIBLEAUTO bootstrap's
+	// level negative and the example crashed indexing RNSLimbs[-1], on a branch whose only difference
+	// from a working one was this function.
+	const bool alignNeeded = cc.rescaleTechnique == FIXEDMANUAL;
+	const auto alignToDiagonals = [&alignNeeded](Ciphertext& ct, const BootstrapPrecomputation::LTstep& step) {
+		if (!alignNeeded)
+			return;
 		int ptLevel = -1;
 		for (const Plaintext& pt : step.A) {
 			const int level = pt.c0.getLevel();
