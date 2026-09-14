@@ -44,8 +44,14 @@ bert-tiny 隐藏维 128、`numSlots = 2^14` 时 `blockSize = 128`，所以
 
 ```
 slot = group * 2048 + token * 16 + block           # group_size=2048, n_slot=16
-复数槽同时装特征 f 与 f + 64                        # n_in/2 = 64
+复数槽装第 l 条下对角线与第 l+64 条                  # 不是"第 l 行"，见下方勘误
 ```
+
+> **勘误（2026-09-14）**：本节原先写作"复数槽同时装特征 f 与 f+64"，把 `l` 当成了行号。
+> 实际上 `l` 是**下对角线**编号——`utils.py:24` 的 `ld_entry(matrix, l, i)` 返回
+> `matrix[(l+i) % b, i % c]`，行号随 token 滚动。两种读法在 `t=0` 上给出同一个数，
+> 我当时只验了 `t=0`。逐点核验见 `thor-note-conformance-20260914.md` 第 1.2 节。
+> 本节其余结论（行主序方阵 vs 三层结构、必须转置 vs 不必转置、头拆分 vs 头并行、密度 37.5%）不受影响。
 
 `data_encoder.py:41` 的 `encrypt_embedding` 把 `(128, 768)` 转置后 `vsplit` 成 6 片，
 再按上式填入 **4 个密文**。
