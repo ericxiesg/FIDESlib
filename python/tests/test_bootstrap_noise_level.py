@@ -1,56 +1,64 @@
-"""Check that bootstrap resets NoiseLevel to 1 on GPU.
+"""Does bootstrap return a canonical ciphertext?
 
-If bootstrap leaves NoiseLevel at N > 1, then addScalar(1.0) encodes the
-constant at scale Delta but the ciphertext is at scale Delta^N, so the
-addition is wrong by Delta^(N-1).  For N=1 the decoded value increases by
-exactly 1.0; for N>1 it increases by 1/Delta^(N-1) which is essentially 0.
+The question is whether the result is at scale Delta or Delta^N, and it is worth asking directly:
+several rounds of this project went into inferring a scale degree from a wrong answer downstream.
 
-This test encrypts a known value, bootstraps it, adds 1.0, and checks
-whether the result increased by ~1.0.
+An earlier version of this file inferred it from `addScalar(1.0)`, on the reasoning that adding a
+constant encoded at Delta to a ciphertext at Delta^N would move the value by 1/Delta^(N-1) instead
+of by 1. That reasoning does not hold: `Ciphertext::addScalar` passes `this->NoiseLevel` to
+`ElemForEvalAddOrSub`, which multiplies the constant by the scaling factor that many times
+(Context.cu, the loop over `noise_deg`). The constant is encoded to match, the sum is right either
+way, and the check could not fail for the reason it was written to detect.
+
+Two things settle it instead: `noise_level()` reads the field, and adding a *plaintext* - which is
+always encoded at Delta^1 - trips the FIXEDMANUAL guard in `addPt` if the ciphertext is not at
+Delta^1 too.
 """
 import os
+
 import numpy as np
 import pytest
-
-from thorfhe.numeric import NumericMixin
-from thorfhe.stages import Stages
-
-
-class Numeric(NumericMixin, Stages):
-    pass
 
 
 BENCH = dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4)
 
 
+def _values(slots):
+    x = np.zeros(slots, dtype=complex)
+    x[0], x[1], x[2] = 2.0, -3.0, 0.5
+    return x
+
+
 @pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
                     reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
-def test_bootstrap_resets_noise_level(device):
+def test_bootstrap_returns_a_canonical_ciphertext(device):
     import pyfideslib as pf
 
     engine = pf.Engine(device, **BENCH)
-    slots = engine.slots
+    x = _values(engine.slots)
 
-    x = np.zeros(slots, dtype=complex)
-    x[0] = 2.0
-    x[1] = -3.0
-    x[2] = 0.5
+    ct = engine.bootstrap(engine.encrypt(x))
+    got = np.real(np.asarray(engine.decrypt(ct)))[:3]
+    assert np.max(np.abs(got - np.real(x[:3]))) < 1e-3, f"bootstrap changed the value: {got}"
 
-    ct = engine.encrypt(x)
-    ct = engine.bootstrap(ct)
+    # The field itself, now that it is readable.
+    assert engine.noise_level(ct) == 1, (
+        f"bootstrap left the ciphertext at scale degree {engine.noise_level(ct)}; "
+        "anything that adds a plaintext to it afterwards is wrong by that many factors of Delta")
 
-    before = np.real(np.asarray(engine.decrypt(ct)))[:3]
-    print(f"\nAfter bootstrap: {before}")
+    # And the consequence, through the guard: a plaintext is always encoded at Delta^1, so this
+    # throws rather than returning a plausible wrong number if the ciphertext is not.
+    summed = engine.add(ct, np.ones(engine.slots))
+    moved = np.real(np.asarray(engine.decrypt(summed)))[:3] - got
+    assert np.max(np.abs(moved - 1.0)) < 1e-3, f"adding a plaintext 1 moved values by {moved}"
 
-    ct_plus_1 = engine.add(ct, 1.0)
-    after = np.real(np.asarray(engine.decrypt(ct_plus_1)))[:3]
-    print(f"After addScalar(1.0): {after}")
 
-    diff = after - before
-    print(f"Difference: {diff}")
-    print(f"Expected: [1.0, 1.0, 1.0]")
+def test_noise_level_tracks_a_multiplication(engine):
+    """The accessor means what it says, at parameters small enough to run in the normal suite."""
+    from conftest import rand
 
-    assert np.max(np.abs(diff - 1.0)) < 1e-6, (
-        f"addScalar(1.0) moved values by {diff}, not 1.0 — "
-        f"bootstrap likely left NoiseLevel != 1"
-    )
+    x = engine.encrypt(rand(engine, 31, scale=0.4))
+    assert engine.noise_level(x) == 1
+    product = engine.multiply(x, 0.5)
+    assert engine.noise_level(product) == 2, "a float scalar multiply costs a scale degree"
+    assert engine.noise_level(engine.rescale(product)) == 1, "rescale returns it"

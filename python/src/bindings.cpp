@@ -175,6 +175,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("GetLightPlaintextCacheSize", &CryptoContextImpl<DCRTPoly>::GetLightPlaintextCacheSize)
 	  .def_readwrite("light_plaintext_cache_capacity", &CryptoContextImpl<DCRTPoly>::light_plaintext_cache_capacity)
 	  .def("GetConsumedLevels", &CryptoContextImpl<DCRTPoly>::GetConsumedLevels)
+	  .def("GetNoiseLevel", &CryptoContextImpl<DCRTPoly>::GetNoiseLevel)
 	  .def(
 		"MakeCKKSPackedPlaintext",
 		[](CryptoContextImpl<DCRTPoly>& cc, const py::array& value, size_t noiseScaleDeg, uint32_t level, uint32_t slots) {

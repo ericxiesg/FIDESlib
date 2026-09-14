@@ -193,6 +193,15 @@ class Engine:
         """Remaining multiplicative levels (desilofhe `.level`)."""
         return int(self.cc.GetRemainingLevels(x))
 
+    def noise_level(self, x) -> int:
+        """Scale degree: 1 when canonical, 2 between a multiplication and its rescale.
+
+        The other half of a ciphertext's FIXEDMANUAL state, and the half that used to be
+        unreadable - so whether an operation was scale-neutral had to be inferred from a wrong
+        answer several stages later rather than asked.
+        """
+        return int(self.cc.GetNoiseLevel(x))
+
     def bootstrap(self, x, keep_levels: int | None = None):
         """Refresh ``x``. ``keep_levels`` drops the result to exactly that level.
 

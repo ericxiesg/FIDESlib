@@ -238,6 +238,14 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @brief Levels a ciphertext has already consumed, i.e. the `level` MakeCKKSPackedPlaintext expects.
 	uint32_t GetConsumedLevels(const Ciphertext<DCRTPoly>& ct) const;
 	/**
+	 * @brief The ciphertext's scale degree: 1 when canonical, 2 between a multiplication and its rescale.
+	 *
+	 * Under FIXEDMANUAL this is half of a ciphertext's state and, until now, the half nothing could
+	 * read. Several days of this project went into inferring it from wrong answers - whether a
+	 * negation consumed a degree, whether a bootstrap returns one - when the question is a field.
+	 */
+	uint32_t GetNoiseLevel(const Ciphertext<DCRTPoly>& ct) const;
+	/**
 	 * @brief Level plan for the rotation keys registered with EvalRotateKeyGen: index -> maximum number of
 	 * remaining levels the key will ever be applied at (THOR's `create_fixed_rotation_key(sk, delta, level)`).
 	 * Keys are stored level-truncated on the device; keys absent from the map are stored complete.

@@ -72,6 +72,10 @@ class ClearEngine:
     def decrypt_real(self, ct: ClearCiphertext) -> np.ndarray:
         return np.real(ct.slots)
 
+    def noise_level(self, ct: ClearCiphertext) -> int:
+        """Scale degree, mirroring ``pyfideslib.Engine.noise_level``."""
+        return ct.scale_exp
+
     def level(self, ct: ClearCiphertext) -> int:
         return ct.level
 

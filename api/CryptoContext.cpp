@@ -2308,6 +2308,16 @@ Plaintext CryptoContextImpl<DCRTPoly>::GetExpandedLightPlaintext(const LightPlai
 	return pt;
 }
 
+uint32_t CryptoContextImpl<DCRTPoly>::GetNoiseLevel(const Ciphertext<DCRTPoly>& ct) const {
+	if (this->devices.empty() || ct->gpu == 0) {
+		auto& ctImpl = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		return static_cast<uint32_t>(ctImpl->GetNoiseScaleDeg());
+	}
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(
+		const_cast<CryptoContextImpl<DCRTPoly>*>(this)->GetDeviceCiphertext(ct->gpu));
+	return static_cast<uint32_t>(ct_gpu->NoiseLevel);
+}
+
 uint32_t CryptoContextImpl<DCRTPoly>::GetConsumedLevels(const Ciphertext<DCRTPoly>& ct) const {
 	if (this->devices.empty() || ct->gpu == 0) {
 		auto& ctImpl = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
