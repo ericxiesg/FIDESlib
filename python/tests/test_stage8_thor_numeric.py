@@ -228,6 +228,37 @@ def test_he_inv_accepts_the_whole_declared_range(division):
         assert abs(got - 1.0 / value) * value < 0.001
 
 
+@pytest.mark.parametrize("precision_bits,diverges", [(22, False), (16, True), (12, True)])
+def test_he_inv_needs_the_bootstrap_to_be_more_accurate_than_its_denominator(precision_bits,
+                                                                            diverges):
+    """The iteration refreshes the denominator first, so the refresh has to preserve it.
+
+    A CKKS bootstrap's error is set by `q0/Delta`, not by the value it is handed, so refreshing a
+    small number is a fixed absolute perturbation of it. `he_softmax` hands `he_inv` a denominator
+    around 2e-4 while `q0/Delta` is 32: at 22 bits of the bound that is a 4% perturbation and the
+    iteration absorbs it, at 16 bits it is 250% and the result runs away. This is not a modelling
+    artefact - once the error reaches the value, there is no value left to invert.
+
+    Parametrised rather than asserted at one point because what matters is the threshold, and where
+    it sits depends on parameters we may yet change.
+    """
+    engine = ClearEngine(SMALL, depth=60, bootstrap_level=60, noise_model=True,
+                         bootstrap_precision_bits=precision_bits, seed=3)
+    low, high = block_diagonal_masks(SMALL)
+    st = DivisionStages(engine, SMALL, masks=low, complement_masks=high)
+    st.check_ranges = False    # the denominator is deliberately below range; that is a separate test
+    used = used_slots()
+
+    out, delta, _ = st.he_inv(engine.encrypt(np.where(used, 2.0e-4, 0.0)),
+                              engine.encrypt(used.astype(float)), epsilon=2 ** -11, alpha=0.001)
+    peak = float(np.max(np.abs((np.real(engine.decrypt(out)) / delta)[used])))
+
+    if diverges:
+        assert peak > 1e6, "the inverse should have run away, and it is the refresh that did it"
+    else:
+        assert peak < 1e4, "and at a faithful refresh it stays the size 1/D should be"
+
+
 def test_he_inv_keeps_the_ciphertext_off_the_noise_floor(division):
     """The point of the delta bookkeeping: delta shrinks quadratically, the ciphertext must not.
 
