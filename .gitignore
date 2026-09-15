@@ -23,3 +23,7 @@ deps/openfhe-src/
 __pycache__/
 *.pyc
 build-*/
+
+# build artefact, 18 MB - swept in once by a careless `git add -A`
+FIDESlib.zip
+*.zip
