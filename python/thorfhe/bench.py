@@ -369,11 +369,16 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             print(f"{head}  ALL NON-FINITE", file=sys.stderr, flush=True)
             return
         good = slots[finite]
-        # Most slots are masked to zero, so a mean over all of them says more about the mask than
-        # about the values. The magnitude that matters is the one the used slots carry.
-        used = np.abs(good[good != 0])
-        carried = f"  used {used.size}  |x| med {np.median(used):.4g}" if used.size else "  all zero"
-        print(f"{head}  min {good.min():+.4g}  max {good.max():+.4g}{carried}"
+        # Quantiles of |x| rather than a mean, and rather than a median over the non-zero slots.
+        # Most slots carry no data, and on the clear engine they are exactly zero - but on the device
+        # they are the encryption noise, so "non-zero" stops separating the two populations just when
+        # it matters. The spread does separate them: a value that diverges in the slots that carry
+        # data moves p50, while one that diverges only in the padding moves max alone. That
+        # distinction is the difference between a broken circuit and a probe reading the noise.
+        magnitude = np.abs(good)
+        p50, p99 = np.quantile(magnitude, [0.5, 0.99])
+        print(f"{head}  min {good.min():+.4g}  max {good.max():+.4g}"
+              f"  |x| p50 {p50:.4g}  p99 {p99:.4g}"
               + (f"  NON-FINITE {(~finite).sum()}/{slots.size}" if not finite.all() else ""),
               file=sys.stderr, flush=True)
 
