@@ -22,6 +22,15 @@ After rescale:    level=20 noise=1     解密值 0.99787 → 0.99787
 
 ## 2. 但它多花一格 level，而 level 的账没跟着改 [需要你确认]
 
+> **2026-09-15 结案（`d092331` 的实测）：账是对的，不用改，depth 37 稳。**
+> 实测 `Fresh level=37 → Raw EvalBootstrap level=21 → rescale 后 level=20`，
+> 即本体 16 格 + 边界 rescale 1 格 = **17**，而 `resolve_bootstrap_depth` 返回的就是 17，
+> `achievable = 37 − 17 = 20`，和实测精确吻合。**下面这一节的 depth 38 警告作废**，
+> 保留是因为推理过程仍然有效——只是那个 17 恰好已经把这一格算进去了
+> （表里注释给的理由是另一个，数对了理由待查）。详见
+> `RESPONSE-bootstrap-precision-followup-20260915.md` §3。
+
+
 `bench.py:129` 是这么推 bootstrap 落点的：
 
 ```python

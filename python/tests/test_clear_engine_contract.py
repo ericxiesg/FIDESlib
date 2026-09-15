@@ -48,12 +48,17 @@ def test_plaintext_multiply_refuses_an_unrescaled_ciphertext(engine):
         engine.multiply(unrescaled(engine), np.ones(engine.slots))
 
 
-def test_plaintext_multiply_refuses_an_unrescaled_ciphertext(engine):
-    # multPt on the device asserts NoiseLevel < 2 (Ciphertext.cpp:478); a float scalar
-    # (multScalar) does NOT assert and is legal on degree-2, so we test the plaintext path.
-    pt = np.ones(engine.slots)
+def test_float_scalar_multiply_refuses_an_unrescaled_ciphertext(engine):
+    """`EvalMult(ct, double)` reaches `Ciphertext::multScalar`, which asserts NoiseLevel == 1.
+
+    Worth stating because the obvious reading points the other way: `multScalarNoPrecheck` scales c2
+    along with c0 and c1, so a float multiply is fine on a *degree*-2 ciphertext. That is a different
+    field from the scale. The assert is at Ciphertext.cpp:913, outside the FLEXIBLE/FIXEDAUTO branch
+    and so reached under FIXEDMANUAL, and past it the metadata takes `ScalingFactorReal` - the factor
+    for a canonical ciphertext - whatever the operand's actual scale was.
+    """
     with pytest.raises(ScaleMismatch, match="not canonical"):
-        engine.multiply(unrescaled(engine), pt)
+        engine.multiply(unrescaled(engine), 0.5)
 
 
 def test_integer_multiply_accepts_an_unrescaled_ciphertext(engine):

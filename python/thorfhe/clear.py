@@ -187,6 +187,15 @@ class ClearEngine:
         The integer multiply is deliberately not covered: `multIntScalar` touches no metadata
         (ApproxModEval.cu:131-136) and is legal on an unrescaled ciphertext, which is what
         `numeric._restore_magnitude` relies on.
+
+        The float scalar multiply *is* covered, and the reason is worth recording because it looks
+        like it should not be: `multScalarNoPrecheck` does scale c2 along with c0 and c1, so a float
+        multiply is legal on a **degree**-2 ciphertext. That is a different question from the
+        **scale**. `EvalMult(ct, double)` reaches `Ciphertext::multScalar` (CryptoContext.cpp:1298),
+        which carries `assert(this->NoiseLevel == 1)` at Ciphertext.cpp:913 - outside the
+        FLEXIBLE/FIXEDAUTO branch, so under FIXEDMANUAL too - and then adds one to NoiseLevel and
+        multiplies NoiseFactor by `ScalingFactorReal`, the factor for degree 1. On an operand at
+        Delta^2 the metadata comes out describing a scale the ciphertext does not have.
         """
         if self.strict and self._is_ct(ct) and ct.scale_exp != 1:
             raise ScaleMismatch(
@@ -253,13 +262,7 @@ class ClearEngine:
             degree = 2
         else:
             ct = x if self._is_ct(x) else y
-            other = y if self._is_ct(x) else x
-            # A float scalar multiply is multScalar on the device: it scales c0, c1 and c2
-            # uniformly and does not assert on NoiseLevel, so it is legal on a degree-2
-            # ciphertext.  A plaintext multiply is multPt, which asserts NoiseLevel < 2
-            # (Ciphertext.cpp:478) - so the scale check applies to plaintexts, not floats.
-            if not isinstance(other, (float, np.floating)):
-                self._require_canonical_scale(ct, "multiply a ciphertext by a plaintext")
+            self._require_canonical_scale(ct, "multiply a ciphertext by a plaintext or float scalar")
             level, scale, degree = ct.level, ct.scale_exp + 1, ct.degree
         return ClearCiphertext(self._slots_of(x) * self._slots_of(y), level, scale, degree)
 
