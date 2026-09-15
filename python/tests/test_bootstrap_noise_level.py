@@ -100,6 +100,51 @@ def test_eval_bootstrap_itself_returns_a_canonical_ciphertext(device):
         f"plan has to carry: see thorfhe.budget.MEASURED_BOOTSTRAP.")
 
 
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_bootstrap_noise_differs_between_two_runs_of_the_same_input(device):
+    """Random noise or a deterministic fault? Every later step depends on which.
+
+    The bootstrap comes back with an additive error of about 0.015 per slot, independent of the
+    message (a zero ciphertext shows the same distribution as one full of 1.0). Its distribution is
+    an exact fit to a half-normal - p50, p99 and the maximum over 32768 slots all give the same
+    sigma - and the apparent period-2048 structure in it is what grouping 16 samples per class does
+    to noise with none. But a fit is not proof.
+
+    This is: bootstrap one input twice. Noise is redrawn, a wrong constant table is not. If this
+    fails, the error is reproducible, and it can be subtracted out and looked at directly - which is
+    a much better position than hunting for it.
+    """
+    import pyfideslib as pf
+
+    engine = pf.Engine(device, **bench_params())
+    zero = np.zeros(engine.slots, dtype=complex)
+    first = np.real(np.asarray(engine.decrypt(engine.bootstrap(engine.encrypt(zero)))))
+    second = np.real(np.asarray(engine.decrypt(engine.bootstrap(engine.encrypt(zero)))))
+
+    correlation = float(np.corrcoef(first, second)[0, 1])
+    assert abs(correlation) < 0.5, (
+        f"the two runs' errors correlate at {correlation:.3f}, so this is not noise - it is a "
+        f"deterministic error that repeats. Subtract one from the other (they differ by "
+        f"{np.abs(first - second).max():.3g}, against {np.abs(first).max():.3g} each) and look at "
+        f"what is left: a constant offset, a wrong plaintext, or a table read at the wrong index.")
+
+
+def test_a_single_rotation_is_accurate(engine):
+    """CtS and StC are rotations and plaintext multiplies, so a rotation's own error bounds theirs.
+
+    Kept because the bootstrap's 0.015 has to come from somewhere and this rules out the cheapest
+    explanation: if one key switch cost anything like that, nothing in the pipeline would work -
+    a layer performs several thousand of them.
+    """
+    from conftest import rand
+
+    x = rand(engine, 77, scale=0.4)
+    rotated = np.real(np.asarray(engine.decrypt(engine.rotate(engine.encrypt(x), 1))))
+    error = np.max(np.abs(rotated[: len(x)] - np.roll(np.real(x), -1)[: len(x)]))
+    assert error < 1e-6, f"one rotation moved the value by {error:.3g}; a key switch should not"
+
+
 def test_noise_level_tracks_a_multiplication(engine):
     """The accessor means what it says, at parameters small enough to run in the normal suite."""
     from conftest import rand
