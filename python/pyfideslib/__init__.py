@@ -50,6 +50,7 @@ class Engine:
         light_plaintext_cache: int = 64,
     ):
         self.devices = parse_device(device)
+        self.scaling_technique = scaling_technique
         #: level-truncated keys only exist on the GPU backend; OpenFHE always keeps complete keys.
         self.on_gpu = bool(self.devices)
         self.slots = 1 << (log_n - 1)
@@ -213,6 +214,12 @@ class Engine:
         at, so it is not something a caller can assume.
         """
         out = self.cc.EvalBootstrap(x)
+        # Under FIXEDMANUAL the bootstrap leaves NoiseLevel=2 (scale Delta^2) instead of 1.
+        # Without a rescale here every subsequent multiplication amplifies NoiseLevel
+        # exponentially, producing garbage (e.g. he_exp returns 1e124) and a scale-mismatch
+        # crash at the first addPt.  The rescale costs one level but is required for correctness.
+        if self.scaling_technique == _core.FIXEDMANUAL:
+            out = self.cc.Rescale(out)
         if keep_levels is not None:
             got = self.level(out)
             if got < keep_levels:
