@@ -109,7 +109,7 @@ class EncoderLayer:
     def __init__(self, engine, *, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
-                 refresh_after_dense: bool = False):
+                 refresh_after_dense: bool = False, refresh_after_context: bool = False):
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
@@ -150,6 +150,8 @@ class EncoderLayer:
         #: identity - see `LayerNormStages.refresh`. It halves the layer's deepest level
         #: chain, which is the only thing that brings the depth inside a 32 GiB card.
         self.refresh_after_dense = refresh_after_dense
+        #: refresh after stage 08 instead, where the reference implementation does.
+        self.refresh_after_context = refresh_after_context
 
         #: LayerNorm's own starting point is the *slot-0* indicator, not the used-slot one
         self.norm_ones = engine.encrypt(statistic_mask(dense))
@@ -235,6 +237,24 @@ class EncoderLayer:
                                                                        consume=not traced_live))
         drop("value")
         weighted = None
+
+        if self.refresh_after_context:
+            # Where THOR's own schedule and the EasyFHE reference refresh - immediately after A.V,
+            # before the dense layer - and it would cost two bootstraps rather than the four that
+            # `refresh_after_dense` costs, because the context is two ciphertexts where the dense
+            # output is eight.
+            #
+            # Measured, it does not work here: on the clear engine a layer fails at depth 30, 33, 36
+            # and 37 alike, where refreshing after the dense layer completes at 37. The reason is
+            # that the reference makes *two* coupled choices - it refreshes here *and* its LayerNorm
+            # bootstraps internally (both attention_layernorm and feed_forward_layernorm take a
+            # bootstrap_program). Ours never does, because a 20-level budget lets it finish without
+            # one. Taking the earlier refresh without the internal ones leaves the chain from here
+            # through LayerNorm longer than any depth tried can hold.
+            #
+            # Kept, off, with the measurement recorded, because this is an obvious-looking idea - I
+            # proposed it twice - and the next person should be able to see it was tried.
+            context = keep("refreshed_context", norm.refresh(context))
 
         context_rotated = dense.stage_02_make_rotated_copies(context)
         context = None

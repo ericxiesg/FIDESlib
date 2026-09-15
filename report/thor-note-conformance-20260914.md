@@ -153,7 +153,22 @@ context 4  --bootstrap-->  20  --stage10 耗3-->  17  --norm_1 耗14-->  3
 ```
 
 **够，但 GELU 入口前恰好落到 0，没有余量。** 所以这是一个值得测的候选，不是一个可以直接断言的改法。
-建议做法：加一个开关，用 `ClearEngine` 先把整层跑通（秒级），再上 GPU。
+
+> **2026-09-15 实测：搬不过来，这条建议作废。** 加了 `refresh_after_context` 开关，
+> 在 `ClearEngine` 上跑整层：
+>
+> ```
+> refresh 在 dense 之后（现状）  depth 37 → OK（22 次 bootstrap）；36/33/30 → 失败
+> refresh 在 context 之后         depth 37/36/33/30 → 全部失败
+> ```
+>
+> **原因是它不是一个孤立选择，而是两个耦合的选择。** 参考实现（`easyfhe-examples/thor`）
+> 在 A·V 之后刷新，**同时**它的两个 LayerNorm 都内部自举
+> （`attention_layernorm` 和 `feed_forward_layernorm` 都收 `bootstrap_program`）。
+> 我们的 LayerNorm 从不自举——因为 20 格预算够它跑完（见 3.3）。
+> **只搬早刷新、不搬内部自举，从这里到 LayerNorm 的链就比任何试过的 depth 都长。**
+>
+> 开关留着（默认关）并记下这个结果，因为这是个看起来很显然的想法——我自己提过两次。
 
 ### 3.3 LayerNorm 内部 bootstrap：THOR ~3 次 ×2，我们 0 次 —— **我们更省**
 
