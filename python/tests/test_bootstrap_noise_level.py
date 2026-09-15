@@ -20,7 +20,18 @@ import numpy as np
 import pytest
 
 
-BENCH = dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4)
+def bench_params():
+    """The engine `thorfhe.bench` actually builds, resolved lazily so this module imports without
+    the extension.
+
+    Matching it exactly matters: FIDESlib selects a different Chebyshev coefficient set for the
+    bootstrap according to the secret key distribution, so an engine built with the other one is
+    not testing the configuration that runs.
+    """
+    import pyfideslib as pf
+
+    return dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4,
+                secret_key_dist=pf.SPARSE_TERNARY)
 
 
 def _values(slots):
@@ -34,7 +45,7 @@ def _values(slots):
 def test_bootstrap_returns_a_canonical_ciphertext(device):
     import pyfideslib as pf
 
-    engine = pf.Engine(device, **BENCH)
+    engine = pf.Engine(device, **bench_params())
     x = _values(engine.slots)
 
     ct = engine.bootstrap(engine.encrypt(x))

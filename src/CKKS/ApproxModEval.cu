@@ -130,6 +130,7 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 
 void FIDESlib::CKKS::multIntScalar(Ciphertext& ctxt, uint64_t op) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
+	ctxt.requireDegreeOne("multIntScalar");
 	std::vector<uint64_t> op_(ctxt.getLevel() + 1, op);
 	ctxt.c0.multScalar(op_);
 	ctxt.c1.multScalar(op_);

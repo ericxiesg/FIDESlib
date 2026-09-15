@@ -139,7 +139,18 @@ def test_device(check, device_pair):
 #: modulus chain's length would not show at SMALL. This builds the real thing. It is opt-in because
 #: key generation at those parameters is minutes, not milliseconds - but still far less than the
 #: 25-minute benchmark it replaces.
-BENCH = dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4)
+def bench_params():
+    """The engine `thorfhe.bench` actually builds, resolved lazily so this module imports without
+    the extension.
+
+    Matching it exactly matters: FIDESlib selects a different Chebyshev coefficient set for the
+    bootstrap according to the secret key distribution, so an engine built with the other one is
+    not testing the configuration that runs.
+    """
+    import pyfideslib as pf
+
+    return dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4,
+                secret_key_dist=pf.SPARSE_TERNARY)
 
 
 @pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
@@ -147,7 +158,7 @@ BENCH = dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4)
 def test_exp_polynomial_at_benchmark_parameters(device):
     import pyfideslib as pf
 
-    engine = pf.Engine(device, **BENCH)
+    engine = pf.Engine(device, **bench_params())
     numeric = Numeric(engine, None)
 
     rng = np.random.default_rng(15)

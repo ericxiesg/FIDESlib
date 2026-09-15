@@ -54,6 +54,15 @@ class Ciphertext {
 	 */
 	std::unique_ptr<RNSPoly> c2;
 
+	/**
+	 * @brief Throw if this ciphertext is degree 2, naming the operation that would drop c2.
+	 *
+	 * For the operations that carry c0 and c1 only - key switching, monomial and integer
+	 * multiplication. They discard the third component silently, so the caller gets a ciphertext
+	 * that decrypts to an unrelated value instead of an error.
+	 */
+	void requireDegreeOne(const char* what) const;
+
 	/** @brief True when the ciphertext carries a c2 component (degree 2). */
 	[[nodiscard]] bool isDegree2() const { return static_cast<bool>(c2); }
 	/**

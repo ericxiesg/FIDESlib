@@ -205,6 +205,11 @@ void Ciphertext::add(const Ciphertext& b) {
 	if (b.c2) {
 		if (!c2) {
 			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			// The pool hands back a polynomial carrying whatever level it was returned at, and
+			// RNSPoly::grow returns early when that is already at or above the target - so without
+			// this reset the limbs can be fewer than the level claims. The constructor resets c0
+			// and c1 for exactly this reason; c2 was the one place that did not.
+			c2->dropToLevel(-1);
 			c2->grow(b.c2->getLevel());
 			c2->dropToLevel(b.c2->getLevel());
 			c2->SetModUp(false);
@@ -255,6 +260,11 @@ void Ciphertext::sub(const Ciphertext& b) {
 		if (!c2) {
 			// 0 - b.c2
 			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			// The pool hands back a polynomial carrying whatever level it was returned at, and
+			// RNSPoly::grow returns early when that is already at or above the target - so without
+			// this reset the limbs can be fewer than the level claims. The constructor resets c0
+			// and c1 for exactly this reason; c2 was the one place that did not.
+			c2->dropToLevel(-1);
 			c2->grow(b.c2->getLevel());
 			c2->dropToLevel(b.c2->getLevel());
 			c2->SetModUp(false);
@@ -761,6 +771,11 @@ void Ciphertext::multNoRelin(const Ciphertext& b) {
 	const bool square = (&b == this);
 	if (!c2) {
 		c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+		// The pool hands back a polynomial carrying whatever level it was returned at, and
+		// RNSPoly::grow returns early when that is already at or above the target - so without
+		// this reset the limbs can be fewer than the level claims. The constructor resets c0
+		// and c1 for exactly this reason; c2 was the one place that did not.
+		c2->dropToLevel(-1);
 		c2->SetModUp(false);
 	}
 	c2->grow(c1.getLevel());
@@ -967,7 +982,29 @@ void Ciphertext::extend(bool init) {
 	}
 }
 
+/**
+ * Refuse an operand whose third component this operation would silently drop.
+ *
+ * A lazy product leaves `c2` behind, and only some operations carry it: add, sub, plaintext and
+ * scalar multiplication, rescale, level reduction and copy do. Key switching, monomial and integer
+ * multiplication do not - and they do not fail either, they compute with c0 and c1 and throw the
+ * rest away. The result is a valid-looking ciphertext that decrypts to a number with no relation to
+ * the intended one, which is how a missing relinearise in the caller's power basis turned up as
+ * 1e124 out of a polynomial many stages later rather than as a failure at the operation.
+ *
+ * A throw rather than an assert, because the assert that was already there was compiled out of the
+ * release build that produced the 1e124.
+ */
+void Ciphertext::requireDegreeOne(const char* what) const {
+	if (c2)
+		throw std::runtime_error(
+			std::string("FIDESlib: ") + what + " on a degree-2 ciphertext. Call relinearize() first: "
+			"this operation carries c0 and c1 only and would discard the third component, leaving a "
+			"ciphertext that decrypts to an unrelated value rather than failing.");
+}
+
 void Ciphertext::rotate(const int index__, const bool moddown) {
+	requireDegreeOne("rotate");
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	op_count[OPS::ROTATE]++;
@@ -1044,6 +1081,7 @@ void Ciphertext::rotate(const Ciphertext& c, const int index) {
 }
 
 void Ciphertext::conjugate(const Ciphertext& c) {
+	requireDegreeOne("conjugate");
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	op_count[OPS::CONJUGATE]++;
@@ -1091,6 +1129,7 @@ void Ciphertext::conjugate(const Ciphertext& c) {
 }
 
 void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ciphertext*> results, const bool ext) {
+	requireDegreeOne("rotate_hoisted");
 	std::vector<int> indexes;
 	for (auto i : indexes_) {
 		indexes.push_back(normalyzeIndex(i));
@@ -1464,6 +1503,11 @@ void Ciphertext::copy(const Ciphertext& ciphertext) {
 	if (ciphertext.c2) {
 		if (!c2) {
 			c2 = std::make_unique<RNSPoly>(cc.getAuxilarPoly());
+			// The pool hands back a polynomial carrying whatever level it was returned at, and
+			// RNSPoly::grow returns early when that is already at or above the target - so without
+			// this reset the limbs can be fewer than the level claims. The constructor resets c0
+			// and c1 for exactly this reason; c2 was the one place that did not.
+			c2->dropToLevel(-1);
 			c2->SetModUp(false);
 		}
 		c2->grow(ciphertext.c2->getLevel());
@@ -1802,6 +1846,7 @@ void Ciphertext::dotProduct(const std::vector<Ciphertext*>& a, const std::vector
 }
 
 void Ciphertext::multMonomial(/*Ciphertext& ctxt,*/ int power) {
+	requireDegreeOne("multMonomial");
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
 	CKKS::SetCurrentContext(cc_);
 

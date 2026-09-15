@@ -736,7 +736,12 @@ def build_parser():
                              "contract; 'fideslib' is the CUDA backend")
     engine.add_argument("--layers", type=int, default=1,
                         help="how many encoder layers to run encrypted; the rest run in plaintext")
-    engine.add_argument("--depth", type=int, default=90)
+    # 37 is the level budget a layer actually needs, measured: the deepest inter-bootstrap
+    # segment is 19 and a bootstrap costs 17. It only fits with --refresh-after-dense; without
+    # that flag the chain runs out and the clear engine says so before any GPU time is spent.
+    engine.add_argument("--depth", type=int, default=37,
+                        help="multiplicative depth. The measured working point is 37 together "
+                             "with --refresh-after-dense (docs/thor_port.md).")
     engine.add_argument("--bootstrap-level", type=int, default=None,
                         help="level a bootstrap restores to. Defaults to depth - --bootstrap-depth, "
                              "which is what the hardware actually gives; override only to explore")
