@@ -11,7 +11,19 @@ except ImportError as exc:  # the pybind11 extension is not built
 DEVICES = [d.strip() for d in os.environ.get("PYFIDESLIB_DEVICES", "cpu,cuda:0").split(",") if d.strip()]
 
 # Small parameters for the functional stages (fast on CPU). Stage 4 (bootstrap) uses its own engine.
-SMALL = dict(log_n=13, depth=12, scaling_bits=50, first_mod_bits=55, dnum=3)
+# `secret_key_dist` is explicit because the default is not what the benchmark runs. `Engine` defaults
+# to UNIFORM_TERNARY, which is the conservative choice and the one OpenFHE makes; `thorfhe.bench`
+# passes SPARSE_TERNARY, which is THOR's. They are not interchangeable for anything that bootstraps:
+# FIDESlib picks the Chebyshev coefficient set and the number of double-angle iterations from this
+# (3 and depth 10 for sparse, 6 and depth 13 for uniform), so a suite left on the default tests a
+# different approximation from the one that runs - and it is bootstrap accuracy that is in question.
+SMALL = dict(log_n=13, depth=12, scaling_bits=50, first_mod_bits=55, dnum=3,
+             secret_key_dist=None)   # filled in below, once pyfideslib is known to be importable
+
+if pf is not None:
+    SMALL["secret_key_dist"] = pf.SPARSE_TERNARY
+else:
+    SMALL.pop("secret_key_dist")
 
 
 @pytest.fixture(scope="session", params=DEVICES)

@@ -65,12 +65,36 @@
 
 ---
 
-## 4. 请给三个数
+## 4. 请给四个数
 
 1. **`engine.bootstrap` 对 {2.0, -3.0, 0.5} 的实测绝对误差** —— 就是你放宽容差时看到的那个数。
-   这一个数基本就能定性。
-2. **`ApproxModEval.cu:80` 前的 `ctxtEnc.NoiseLevel`** —— 2 还是 3。
-3. `07c.denominator` 的 `p50`（上一封要的，仍然要）。
+2. **同一件事，但消息幅度换成 17.57** —— 见下面 §4.1，这是用来把"实现不准"和"幅度太大"分开的。
+3. **`ApproxModEval.cu:80` 前的 `ctxtEnc.NoiseLevel`** —— 2 还是 3。
+4. `07c.denominator` 的 `p50`（上一封要的，仍然要）。
+
+### 4.1 为什么要第 2 个数 [实测]
+
+我量了整层 22 次 bootstrap 的输入幅度（随机权重、depth 37、refresh_after_dense）：
+
+| stage | 站点 | n | max \|m\| |
+|---|---|---:|---:|
+| **output_dense** | **`layernorm.py:172`（stage 15）** | **4** | **17.57** |
+| scores | `softmax.py:178` | 4 | 0.3146 |
+| attention_dense | `layernorm.py:155` | 4 | 0.1238 |
+| intermediate | `feedforward.py:86` | 8 | 0.08626 |
+| scores | `numeric.py:190`（he_inv 内） | 2 | 0.0069 / 0.00022 |
+
+中位数 0.12，**但有一处是 17.57 —— 其余站点的 140 倍，也是我们那个界 `q0/Delta = 32` 的 55%**。
+bootstrap 的精度随 `|m|/q0` 恶化，所以这一处本身就是嫌疑。
+
+（那个加倍是**有意的**：`stage_15_prepare_layernorm` 的 docstring 说下游的 `variance_window`
+接受四倍方差来补偿。所以不是 bug，是一个需要单独量的风险点。）
+
+**判别很清楚**：你放宽容差用的值 `{2.0, -3.0, 0.5}` 相对 32 都很小。
+
+* 如果**在这些小值上就不准** → 不是幅度问题，是实现问题（§3 那三个方向）；
+* 如果小值准、17.57 不准 → stage 15 那一处要单独处理；
+* 两个都不准 → 两件事都有。
 
 ---
 
