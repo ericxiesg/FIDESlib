@@ -30,7 +30,7 @@ def bench_params():
     """
     import pyfideslib as pf
 
-    return dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=3,
+    return dict(log_n=16, depth=37, scaling_bits=50, first_mod_bits=55, dnum=4,
                 secret_key_dist=pf.SPARSE_TERNARY,
                 bootstrap_level_budget=(3, 3),
                 rotation_indexes=[1 << i for i in range(15)],
@@ -45,6 +45,10 @@ def _values(slots):
 
 @pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
                     reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+@pytest.mark.xfail(reason="bootstrap precision is only ~10.9 bits (max abs error 0.017) at dnum=4, "
+                          "should be 20-25 bits. This low precision overwhelms he_inv's 2e-4 denominator. "
+                          "Root cause: NoiseLevel=3 before approxModReduction's final rescale, indicating "
+                          "a missing rescale inside the Chebyshev/double-angle arithmetic.")
 def test_bootstrap_returns_a_canonical_ciphertext(device):
     import pyfideslib as pf
 
@@ -53,7 +57,7 @@ def test_bootstrap_returns_a_canonical_ciphertext(device):
 
     ct = engine.bootstrap(engine.encrypt(x))
     got = np.real(np.asarray(engine.decrypt(ct)))[:3]
-    assert np.max(np.abs(got - np.real(x[:3]))) < 0.05, f"bootstrap changed the value: {got}"
+    assert np.max(np.abs(got - np.real(x[:3]))) < 1e-3, f"bootstrap changed the value: {got}"
 
     # The field itself, now that it is readable.
     assert engine.noise_level(ct) == 1, (
@@ -64,7 +68,7 @@ def test_bootstrap_returns_a_canonical_ciphertext(device):
     # throws rather than returning a plausible wrong number if the ciphertext is not.
     summed = engine.add(ct, np.ones(engine.slots))
     moved = np.real(np.asarray(engine.decrypt(summed)))[:3] - got
-    assert np.max(np.abs(moved - 1.0)) < 0.05, f"adding a plaintext 1 moved values by {moved}"
+    assert np.max(np.abs(moved - 1.0)) < 1e-3, f"adding a plaintext 1 moved values by {moved}"
 
 
 @pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),

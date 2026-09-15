@@ -253,7 +253,13 @@ class ClearEngine:
             degree = 2
         else:
             ct = x if self._is_ct(x) else y
-            self._require_canonical_scale(ct, "multiply a ciphertext by a plaintext or float scalar")
+            other = y if self._is_ct(x) else x
+            # A float scalar multiply is multScalar on the device: it scales c0, c1 and c2
+            # uniformly and does not assert on NoiseLevel, so it is legal on a degree-2
+            # ciphertext.  A plaintext multiply is multPt, which asserts NoiseLevel < 2
+            # (Ciphertext.cpp:478) - so the scale check applies to plaintexts, not floats.
+            if not isinstance(other, (float, np.floating)):
+                self._require_canonical_scale(ct, "multiply a ciphertext by a plaintext")
             level, scale, degree = ct.level, ct.scale_exp + 1, ct.degree
         return ClearCiphertext(self._slots_of(x) * self._slots_of(y), level, scale, degree)
 

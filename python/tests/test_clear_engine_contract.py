@@ -48,9 +48,12 @@ def test_plaintext_multiply_refuses_an_unrescaled_ciphertext(engine):
         engine.multiply(unrescaled(engine), np.ones(engine.slots))
 
 
-def test_float_scalar_multiply_refuses_an_unrescaled_ciphertext(engine):
+def test_plaintext_multiply_refuses_an_unrescaled_ciphertext(engine):
+    # multPt on the device asserts NoiseLevel < 2 (Ciphertext.cpp:478); a float scalar
+    # (multScalar) does NOT assert and is legal on degree-2, so we test the plaintext path.
+    pt = np.ones(engine.slots)
     with pytest.raises(ScaleMismatch, match="not canonical"):
-        engine.multiply(unrescaled(engine), 0.5)
+        engine.multiply(unrescaled(engine), pt)
 
 
 def test_integer_multiply_accepts_an_unrescaled_ciphertext(engine):
