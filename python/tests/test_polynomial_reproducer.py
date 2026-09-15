@@ -69,11 +69,14 @@ def _float_scalar_on_degree_two(numeric, engine):
     """A float scalar times a ciphertext that has not been relinearised yet.
 
     multScalar has to scale the third component as well as c0 and c1, or the relinearisation
-    afterwards folds in a term that was left behind.
+    afterwards folds in a term that was left behind.  The ciphertext is rescaled first:
+    `Ciphertext::multScalar` asserts `NoiseLevel == 1` (Ciphertext.cpp:913), so a float
+    multiply on an unrescaled degree-2 product is illegal under FIXEDMANUAL - the ClearEngine
+    models that guard, and this test has to match it.
     """
     x = rand(engine, 12, scale=0.4)
     cx = engine.encrypt(x)
-    squared = engine.multiply(cx, cx)                       # degree 2, scale Delta^2
+    squared = engine.rescale(engine.multiply(cx, cx))       # degree 2, rescaled to Delta^1
     scaled = engine.rescale(engine.multiply(squared, 0.375))
     got = _decrypt(engine, engine.relinearize(scaled), len(x))
     assert np.max(np.abs(got - 0.375 * x[:len(got)] ** 2)) < 1e-5
