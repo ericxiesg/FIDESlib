@@ -90,9 +90,17 @@ def test_softmax_matches_the_real_thing(mask_families):
 
 
 def test_softmax_is_a_distribution_on_a_peaked_input(mask_families):
-    """A near-one-hot row must come out near-one-hot: the sharpening has to actually sharpen."""
+    """A near-one-hot row must come out near-one-hot: the sharpening has to actually sharpen.
+
+    The background scores span the same range as the test above, and that is not cosmetic. NARROW's
+    `inv_epsilon` states the window the Goldschmidt iteration is set up for, and a background an
+    order of magnitude tighter puts the denominator below it - this test used to do exactly that,
+    with a median of 2.5e-4 against a bound of 4.9e-4, and passed anyway because exact arithmetic
+    and the later refinements recover from a saturated first inverse. The device has neither
+    luxury. `he_inv` now refuses the out-of-range denominator, which is what turned this up.
+    """
     rng = np.random.default_rng(62)
-    scores = rng.uniform(-2, 2, (G.n_blocks, G.dim, G.dim))
+    scores = rng.uniform(-8, 8, (G.n_blocks, G.dim, G.dim))
     scores[0, 0, 7] = 15.0  # one clear winner
 
     engine, stages = build(mask_families)

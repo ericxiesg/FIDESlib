@@ -106,6 +106,13 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
         layer = EncoderLayer(engine, qkv=g, dense=dense, feedforward=feedforward,
                              binary_rotations=dry_binary,
                              refresh_after_dense=refresh_after_dense)
+        # The dummy weights are zeros, so every intermediate value is an artefact of that rather than
+        # of the circuit: the scores are uniform and he_inv's denominator lands far below the range
+        # real activations put it in. What is being measured here is which rotations happen at which
+        # level, which the values do not affect - so turn the range check off rather than calibrate
+        # dummy data to satisfy it.
+        for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
+            owner.check_ranges = False
         state = np.array([engine.encrypt(m)
                           for m in encode_activations(g, np.zeros((g.dim, g.features)))],
                          dtype=object)

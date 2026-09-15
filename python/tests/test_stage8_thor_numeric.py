@@ -177,6 +177,57 @@ def test_he_inv_inverts_over_its_declared_range(division):
     assert engine.level(out) == depth - DivisionMixin.goldschmidt_iterations(epsilon, alpha)
 
 
+def test_he_inv_refuses_a_denominator_below_its_declared_range(division):
+    """The range in the docstring is a precondition, not advice, and nothing used to check it."""
+    engine, st, _ = division
+    epsilon = 2 ** -11
+    used = used_slots()
+    denominator = np.where(used, epsilon / 4, 0.0)
+
+    with pytest.raises(ValueError, match="iteration is set up for"):
+        st.he_inv(engine.encrypt(denominator), engine.encrypt(used.astype(float)),
+                  epsilon=epsilon, alpha=0.001)
+
+
+def test_he_inv_saturates_rather_than_failing_below_its_range(division):
+    """What the check above exists to prevent: a finite, plausible, wrong answer.
+
+    Goldschmidt's step count and its per-step `k` come from `epsilon` alone, so a denominator under
+    it is not merely less accurate - the iteration runs out of schedule and the answer stops growing.
+    Measured here, with the check disabled: at `epsilon/2` the result is 3.6% low, at `epsilon/4` 22%
+    low, and by `epsilon/1000` it is pinned near 11500 instead of the 2.0e6 it should be. Nothing
+    raises, nothing overflows, and a softmax built on it classifies at chance.
+    """
+    engine, st, _ = division
+    epsilon, alpha = 2 ** -11, 0.001
+    used = used_slots()
+    errors = {}
+    for ratio in (1.0, 0.5, 0.25, 0.001):
+        value = epsilon * ratio
+        st._check_inversion_range = lambda *a, **k: None   # the point is what happens without it
+        out, delta, _ = st.he_inv(engine.encrypt(np.where(used, value, 0.0)),
+                                  engine.encrypt(used.astype(float)), epsilon=epsilon, alpha=alpha)
+        got = float(np.median((np.real(engine.decrypt(out)) / delta)[used]))
+        errors[ratio] = abs(got - 1.0 / value) * value
+
+    assert errors[1.0] < alpha, "inside the range it is accurate"
+    assert 0.02 < errors[0.5] < 0.06, "half the bound already costs a few percent"
+    assert 0.15 < errors[0.25] < 0.30, "a quarter of it costs a fifth of the answer"
+    assert errors[0.001] > 0.9, "and far below, the answer saturates instead of growing"
+
+
+def test_he_inv_accepts_the_whole_declared_range(division):
+    """Both ends of [epsilon, 1] have to pass, or the check would be narrowing the contract."""
+    engine, st, _ = division
+    epsilon = 2 ** -11
+    used = used_slots()
+    for value in (epsilon, 1.0):
+        out, delta, _ = st.he_inv(engine.encrypt(np.where(used, value, 0.0)),
+                                  engine.encrypt(used.astype(float)), epsilon=epsilon, alpha=0.001)
+        got = float(np.median((np.real(engine.decrypt(out)) / delta)[used]))
+        assert abs(got - 1.0 / value) * value < 0.001
+
+
 def test_he_inv_keeps_the_ciphertext_off_the_noise_floor(division):
     """The point of the delta bookkeeping: delta shrinks quadratically, the ciphertext must not.
 

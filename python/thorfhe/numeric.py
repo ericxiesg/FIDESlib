@@ -154,6 +154,11 @@ class DeltaCiphertext:
 
 
 class DivisionMixin:
+    #: Check that a denominator lies in the range its iteration was set up for, where the values can
+    #: be read. Off for a dry run over dummy data - :func:`thorfhe.he.plan_rotations` measures the
+    #: *schedule*, and the zeros it feeds the layer make every value-based check meaningless.
+    check_ranges = True
+
     """Goldschmidt division, as ``he.py``'s ``he_inv``."""
 
     #: keep the ciphertext's magnitude within this many bits of the scale before rescaling by an integer.
@@ -179,6 +184,7 @@ class DivisionMixin:
         ``precision`` is the achieved lower bound on the normalised denominator (it ends above
         ``1 - alpha``). One level per iteration.
         """
+        self._check_inversion_range(denominator, ones, epsilon)
         # `ones` is a fresh encryption and the denominator has been through a stage, so they are
         # almost never at the same level; FIXEDMANUAL will not multiply across levels.
         start, refreshed = self.align(ones, self.bootstrap(denominator))
@@ -200,6 +206,42 @@ class DivisionMixin:
             a, b = self._restore_magnitude(a, b)
 
         return a.ciphertext, a.delta, error
+
+    def _check_inversion_range(self, denominator, ones, epsilon: float):
+        """Refuse a denominator outside ``[epsilon, 1]`` where the values can be read.
+
+        The iteration's schedule - how many steps, and the ``k`` at each - is derived from ``epsilon``
+        alone, so a denominator below it is not merely less accurate. It **saturates**: measured on
+        the clear engine at ``epsilon = 2^-11``, a denominator of ``epsilon/2`` comes back 3.6% low,
+        ``epsilon/4`` 22% low, ``epsilon/10`` 56% low, and past that the answer stops growing at all,
+        pinned near 11500 however small the input gets. Nothing raises, and the result is an ordinary
+        finite number - which is why a softmax built on it produces attention weights that look like
+        weights and classify at chance.
+
+        Only the slots ``ones`` marks are examined: the rest are empty by construction, and it is the
+        ``ones`` operand that confines the iteration to the ones that are not.
+
+        The device cannot do this - it has no way to read a ciphertext - so the check lives on the
+        engines that can, and the corresponding device-side signal is the magnitude probe's ``p50``
+        against the same ``epsilon``.
+        """
+        if not (self.check_ranges and getattr(self.engine, "inspectable", False)):
+            return
+        values = np.real(np.asarray(self.engine.decrypt(denominator)))
+        carried = np.abs(np.real(np.asarray(self.engine.decrypt(ones)))) > 1e-9
+        if not carried.any():
+            return
+        low, high = float(values[carried].min()), float(values[carried].max())
+        if low >= epsilon and high <= 1.0:
+            return
+        median = float(np.median(values[carried]))
+        raise ValueError(
+            f"he_inv: the denominator runs over [{low:.4g}, {high:.4g}] (median {median:.4g}) on the "
+            f"{int(carried.sum())} slots that carry data, but the iteration is set up for "
+            f"[{epsilon:.4g}, 1]. Below the lower bound Goldschmidt saturates rather than failing - "
+            f"it returns a finite, plausible, wrong number - so this cannot be left to surface "
+            f"downstream. Re-calibrate: the scale folded into the key projection is what places the "
+            f"denominator in this window (see thorfhe.softmax.calibrate).")
 
     def _times(self, x, y):
         """Ciphertext product, relinearised and brought back to canonical scale."""
