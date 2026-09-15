@@ -8,6 +8,7 @@
 #include "CKKS/Context.cuh"
 #include "CKKS/LinearTransform.cuh"
 #include "CKKS/Plaintext.cuh"
+#include <iostream>
 #include <ranges>
 #include <vector>
 
@@ -115,14 +116,35 @@ void FIDESlib::CKKS::EvalCoeffsToSlots(Ciphertext& ctxt, int slots, bool decode)
 	// level negative and the example crashed indexing RNSLimbs[-1], on a branch whose only difference
 	// from a working one was this function.
 	const bool alignNeeded = cc.rescaleTechnique == FIXEDMANUAL;
+	//
+	// Taking the *minimum* level assumes every diagonal of a step is encoded at the same one. If they
+	// are not, dropping to the lowest leaves the higher ones truncated by `multPt`, which sizes the
+	// plaintext read from the ciphertext - the limbs it cuts carry that diagonal's residues under the
+	// primes it dropped. The value survives, but it comes out wrong, and wrong differently per slot
+	// because each diagonal feeds different slots. That is a candidate for the bootstrap's measured
+	// 10.5-bit accuracy (bugs/RESPONSE-bootstrap-precision-cts-20260915.md), so the assumption is
+	// reported rather than assumed. Once per process, and only when it does not hold.
+	static bool reportedUnevenDiagonals = false;
 	const auto alignToDiagonals = [&alignNeeded](Ciphertext& ct, const BootstrapPrecomputation::LTstep& step) {
 		if (!alignNeeded)
 			return;
-		int ptLevel = -1;
+		int ptLevel = -1, ptLevelMax = -1;
 		for (const Plaintext& pt : step.A) {
 			const int level = pt.c0.getLevel();
-			if (level >= 0 && (ptLevel < 0 || level < ptLevel))
+			if (level < 0)
+				continue;
+			if (ptLevel < 0 || level < ptLevel)
 				ptLevel = level;
+			if (level > ptLevelMax)
+				ptLevelMax = level;
+		}
+		if (ptLevel >= 0 && ptLevelMax > ptLevel && !reportedUnevenDiagonals) {
+			reportedUnevenDiagonals = true;
+			std::cerr << "FIDESlib: the diagonals of a bootstrap linear-transform step are not all at "
+					  << "one level (" << ptLevel << " to " << ptLevelMax << ", " << step.A.size()
+					  << " diagonals). Aligning the ciphertext to the lowest truncates the rest, which "
+					  << "decrypts to a wrong value rather than failing. See "
+					  << "bugs/RESPONSE-bootstrap-precision-cts-20260915.md." << std::endl;
 		}
 		if (ptLevel >= 0 && ct.getLevel() > ptLevel)
 			ct.dropToLevel(ptLevel);
