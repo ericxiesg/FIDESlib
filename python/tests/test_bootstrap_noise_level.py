@@ -64,6 +64,34 @@ def test_bootstrap_returns_a_canonical_ciphertext(device):
     assert np.max(np.abs(moved - 1.0)) < 1e-3, f"adding a plaintext 1 moved values by {moved}"
 
 
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_eval_bootstrap_itself_returns_a_canonical_ciphertext(device):
+    """The contract at the C++ boundary, not at the wrapper that works around it.
+
+    `Engine.bootstrap` rescales until the result is canonical, so the test above passes whether or
+    not `EvalBootstrap` meets its contract - it measures the workaround. This one calls the binding
+    directly, so the underlying behaviour stays pinned and the workaround can be removed the day it
+    is fixed rather than living on unexamined.
+
+    It is expected to fail today: the device returns scale degree 2 (see
+    `bugs/BUG-bootstrap-noise-level-2-20260915.md`). `approxModReduction` already rescales once
+    under FIXEDMANUAL for exactly this purpose, so the intent is not in question - the level it
+    costs is, because it is the difference between depth 37 fitting the layer and not.
+    """
+    import pyfideslib as pf
+
+    engine = pf.Engine(device, **bench_params())
+    ct = engine.encrypt(_values(engine.slots))
+    assert engine.noise_level(ct) == 1, "a fresh encryption should be canonical"
+
+    raw = engine.cc.EvalBootstrap(ct)
+    assert engine.noise_level(raw) == 1, (
+        f"EvalBootstrap returned scale degree {engine.noise_level(raw)}, not 1. Engine.bootstrap "
+        f"rescales that away at the cost of {engine.noise_level(raw) - 1} level(s), which the level "
+        f"plan has to carry: see thorfhe.budget.MEASURED_BOOTSTRAP.")
+
+
 def test_noise_level_tracks_a_multiplication(engine):
     """The accessor means what it says, at parameters small enough to run in the normal suite."""
     from conftest import rand

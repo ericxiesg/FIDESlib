@@ -44,6 +44,7 @@ class Engine:
         security=_core.HEStd_NotSet,
         secret_key_dist=_core.UNIFORM_TERNARY,
         bootstrap_level_budget: tuple[int, int] | None = None,
+        bootstrap_level: int | None = None,
         rotation_indexes: dict[int, int] | list[int] | None = None,
         truncate_keys: bool = True,
         allow_key_grow: bool = False,
@@ -92,6 +93,12 @@ class Engine:
             self.cc.EvalRotateKeyGen(self.keys.secretKey, idx)
 
         self.bootstrap_enabled = bootstrap_level_budget is not None
+        #: The level the caller's level plan assumes a bootstrap restores to. Not a request - the
+        #: hardware decides - but the number the plan was built against, so `bootstrap` can say so
+        #: the first time the two disagree. Without it a shortfall is silent: the rotation keys were
+        #: truncated to levels the run never reaches, and the deficit surfaces many stages later as
+        #: a rescale or level-reduce failure, naming the wrong operation in the wrong place.
+        self.bootstrap_level = bootstrap_level
         if self.bootstrap_enabled:
             self.cc.EvalBootstrapSetup(list(bootstrap_level_budget), [0, 0], self.slots, 0)
             self.cc.EvalBootstrapKeyGen(self.keys.secretKey, self.slots)
@@ -213,15 +220,48 @@ class Engine:
         distribution and (see ``EvalCoeffsToSlots``) the level its precomputed diagonals were encoded
         at, so it is not something a caller can assume.
         """
-        out = self.cc.EvalBootstrap(x)
-        # Under FIXEDMANUAL the bootstrap leaves NoiseLevel=2 (scale Delta^2) instead of 1.
-        # Without a rescale here every subsequent multiplication amplifies NoiseLevel
-        # exponentially, producing garbage (e.g. he_exp returns 1e124) and a scale-mismatch
-        # crash at the first addPt.  The rescale costs one level but is required for correctness.
         if self.scaling_technique == _core.FIXEDMANUAL:
-            out = self.cc.Rescale(out)
+            entering = self.noise_level(x)
+            if entering != 1:
+                raise ValueError(
+                    f"bootstrap wants a canonical ciphertext, got scale degree {entering}. Rescale "
+                    f"first: how many levels the bootstrap costs depends on what it is handed, and "
+                    f"the level plan assumes a fixed cost.")
+        out = self.cc.EvalBootstrap(x)
+        # The GPU bootstrap is supposed to return a canonical ciphertext - `approxModReduction`
+        # rescales once under FIXEDMANUAL for exactly that reason (ApproxModEval.cu) - but it comes
+        # back at scale degree 2, so it is not meeting its own contract. Under FIXEDMANUAL nothing
+        # corrects that later: the degree *adds* on every multiply and only comes down on rescale, so
+        # starting at 2 reaches 12108 by the end of a softmax and the first addPt fails on mismatched
+        # scales. Before that it is silent, and he_exp simply returns 1e124.
+        #
+        # A loop rather than a single rescale, because the number to correct is the one measured, not
+        # the one assumed: `noise_level` reads the field, so this costs exactly as many levels as the
+        # ciphertext is actually off by - and on the CPU path, where OpenFHE's own bootstrap returns
+        # a canonical ciphertext, it costs none. Remove it once the device meets the contract; the
+        # level it spends is not free (see `thorfhe.budget`: it is the difference between depth 37
+        # fitting and not).
+        if self.scaling_technique == _core.FIXEDMANUAL:
+            for _ in range(8):   # bounded: a runaway would eat the level budget without saying so
+                if self.noise_level(out) <= 1:
+                    break
+                out = self.cc.Rescale(out)
+            remaining = self.noise_level(out)
+            if remaining != 1:
+                raise RuntimeError(
+                    f"bootstrap returned scale degree {remaining} and rescaling did not bring it to "
+                    f"1. Every multiplication after this point compounds it, and the failure "
+                    f"surfaces as a scale mismatch several stages away.")
+        got = self.level(out)
+        if self.bootstrap_level is not None and got != self.bootstrap_level:
+            raise ValueError(
+                f"bootstrap restored level {got}, but the level plan was built assuming "
+                f"{self.bootstrap_level}. Every rotation key was truncated to the levels that plan "
+                f"predicted, so continuing would spend keys that do not reach. Re-measure what "
+                f"EvalBootstrap plus the FIXEDMANUAL rescale actually cost and put it in "
+                f"thorfhe.budget.MEASURED_BOOTSTRAP, or pass --bootstrap-depth "
+                f"{self.depth - got}.")
         if keep_levels is not None:
-            got = self.level(out)
             if got < keep_levels:
                 raise ValueError(
                     f"bootstrap left level {got}, but keep_levels={keep_levels} asked for more. "

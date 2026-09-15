@@ -182,7 +182,8 @@ def make_engine(args, geometry):
     return pyfideslib.Engine(args.device, log_n=args.log_n, depth=args.depth,
                              scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
                              dnum=args.dnum, rotation_indexes=plan,
-                             bootstrap_level_budget=budget, secret_key_dist=dist,
+                             bootstrap_level_budget=budget, bootstrap_level=level,
+                             secret_key_dist=dist,
                              light_plaintext_cache=args.light_plaintext_cache,
                              truncate_keys=not args.no_truncate_keys,
                              allow_key_grow=args.allow_key_grow)
