@@ -108,18 +108,43 @@ def run_reference(model, encoded, timings: Timings, *, trace=False):
 
 
 # ---------------------------------------------------------------------- encrypted
+def describe_rotations(args, rotations=None):
+    """One phrase naming the rotation basis, for the budget report's header line."""
+    if args.extra_rotation_keys:
+        count = "" if rotations is None else f", {rotations.rotations}/layer"
+        return f"binary + {args.extra_rotation_keys} measured{count}"
+    return "binary" if args.binary_rotations else "one key per index"
+
+
+def rotation_mode(args):
+    """What a layer takes as its ``binary_rotations``.
+
+    With ``--extra-rotation-keys`` this is the basis the key plan was built from, not a flag: the
+    plan and the run have to agree on which keys exist, and a run that reaches for a key the plan
+    did not build fails as a wrong plaintext rather than as an error.
+    """
+    basis = getattr(args, "_rotation_basis", None)
+    return args.binary_rotations if basis is None else basis
+
+
 def make_engine(args, geometry):
     """The clear (numpy) engine, or fideslib when it is built and asked for."""
     if args.engine == "clear":
         from .clear import ClearEngine
         level = (args.depth - resolve_bootstrap_depth(args) if args.bootstrap_level is None
                  else args.bootstrap_level)
+        if args.extra_rotation_keys:
+            from .he import plan_rotations
+            args._rotation_basis = plan_rotations(
+                geometry, depth=args.depth, bootstrap_level=level,
+                extra_rotation_keys=args.extra_rotation_keys,
+                refresh_after_dense=args.refresh_after_dense).basis
         return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
                            strict=not args.lenient)
 
     import pyfideslib
 
-    from .he import plan_rotation_keys
+    from .he import plan_rotations
 
     # The rotation plan is computed, not hand-written: `plan_rotation_keys` runs the same layer on the
     # clear engine and records the level every rotation actually happens at, so the key set cannot
@@ -134,9 +159,15 @@ def make_engine(args, geometry):
         print(f"warning: --bootstrap-level {level} is above what depth {args.depth} can give "
               f"({achievable} = depth - {resolve_bootstrap_depth(args)}). The plan will assume levels the "
               f"hardware never reaches.", file=sys.stderr)
-    plan = plan_rotation_keys(geometry, depth=args.depth, bootstrap_level=level,
-                              binary_rotations=args.binary_rotations,
-                              refresh_after_dense=args.refresh_after_dense)
+    rotations = plan_rotations(geometry, depth=args.depth, bootstrap_level=level,
+                               binary_rotations=args.binary_rotations,
+                               extra_rotation_keys=args.extra_rotation_keys,
+                               refresh_after_dense=args.refresh_after_dense)
+    plan = rotations.levels
+    args._rotation_basis = rotations.basis if args.extra_rotation_keys else None
+    if args.extra_rotation_keys and not args.quiet:
+        print(f"rotation basis: {len(plan)} keys, {rotations.rotations} rotations per layer",
+              file=sys.stderr)
     budget = None if args.no_bootstrap else tuple(args.bootstrap_level_budget)
     dist = (pyfideslib.SPARSE_TERNARY if args.secret_key_dist == "sparse"
             else pyfideslib.UNIFORM_TERNARY)
@@ -317,7 +348,7 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                    for index in range(args.layers)]
 
     engine = make_engine(args, THOR_BERT)
-    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
+    layer = EncoderLayer(engine, binary_rotations=rotation_mode(args),
                          refresh_after_dense=args.refresh_after_dense)
     def magnitude_probe(name, value):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
@@ -610,7 +641,7 @@ def command_workingset(args):
 
     level = args.depth - resolve_bootstrap_depth(args)
     engine, tracker = tracking_engine(g, depth=args.depth, bootstrap_level=level)
-    layer = EncoderLayer(engine, binary_rotations=args.binary_rotations,
+    layer = EncoderLayer(engine, binary_rotations=rotation_mode(args),
                          refresh_after_dense=args.refresh_after_dense)
 
     for owner, names in ((layer.attention, ("stage_01_complexify_x", "stage_02_make_rotated_copies",
@@ -662,22 +693,25 @@ def command_workingset(args):
 def command_budget(args):
     """Predict the GPU footprint of a parameter set without building a context."""
     from .budget import estimate
-    from .he import plan_rotation_keys
+    from .he import plan_rotations
 
     plan = None
+    rotations = None
     if not args.keys:
         level = (args.depth - resolve_bootstrap_depth(args) if args.bootstrap_level is None
                  else args.bootstrap_level)
-        plan = plan_rotation_keys(THOR_BERT, depth=args.depth, bootstrap_level=level,
-                                  binary_rotations=args.binary_rotations,
-                                  refresh_after_dense=args.refresh_after_dense)
+        rotations = plan_rotations(THOR_BERT, depth=args.depth, bootstrap_level=level,
+                                   binary_rotations=args.binary_rotations,
+                                   extra_rotation_keys=args.extra_rotation_keys,
+                                   refresh_after_dense=args.refresh_after_dense)
+        plan = rotations.levels
     predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
                          rotation_levels=plan, rotation_keys=args.keys,
                          level_budget=None if args.no_bootstrap else tuple(args.bootstrap_level_budget),
                          special_primes=args.special_primes, truncate=not args.no_truncate)
     print(f"log_n={args.log_n} depth={args.depth} dnum={args.dnum} "
           f"level_budget={args.bootstrap_level_budget} "
-          f"{'binary' if args.binary_rotations else 'one key per index'} rotations")
+          f"{describe_rotations(args, rotations)} rotations")
     print(predicted.format(args.card_gib * (1 << 30)))
     return 0
 
@@ -762,6 +796,11 @@ def build_parser():
                         help="perform every rotation as a sequence of power-of-two rotations: 15 "
                              "rotation keys instead of 210 (3.6 GiB instead of 51), at 4.5x the "
                              "rotation count. The only way a full layer's keys fit a 32 GB card")
+    engine.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N",
+                        help="keep N rotation keys beyond the powers of two, chosen by measuring "
+                             "which indices the layer rotates by most. Six of them halve the "
+                             "rotation count (8138 -> 4117) for 1.0 GiB more key memory; past nine "
+                             "the keys stop fitting a 32 GB card. Implies --binary-rotations")
     engine.add_argument("--device-memory", action="store_true",
                         help="print the device pool at every stage boundary. An OOM says which stage "
                              "was unlucky, not which one was large; this says where the memory is.")
@@ -810,6 +849,7 @@ def build_parser():
     budget.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3), metavar="E,D")
     budget.add_argument("--no-bootstrap", action="store_true")
     budget.add_argument("--binary-rotations", action="store_true")
+    budget.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N")
     budget.add_argument("--refresh-after-dense", action="store_true")
     budget.add_argument("--keys", type=int, default=None,
                         help="skip the (slow) rotation plan and assume this many untruncated keys")
@@ -830,6 +870,7 @@ def build_parser():
     working.add_argument("--bootstrap-level", type=int, default=None)
     working.add_argument("--no-bootstrap", action="store_true")
     working.add_argument("--binary-rotations", action="store_true", default=True)
+    working.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N")
     working.add_argument("--refresh-after-dense", action="store_true", default=True)
     working.add_argument("--quiet", action="store_true")
     working.set_defaults(handler=command_workingset)

@@ -39,9 +39,11 @@ from .geometry import Geometry
 class Stages:
     """Stage 01-05 of one BERT layer, over ``engine`` (``pyfideslib.Engine`` or ``ClearEngine``)."""
 
-    #: Perform every rotation as a sequence of power-of-two rotations, so the layer needs 29 rotation
-    #: keys instead of 210. Off by default: it is a memory-for-time trade, and only worth making when
-    #: the keys do not fit. See :meth:`rotation_steps`.
+    #: How rotations reach an index that has no key of its own. ``False`` gives every index its own
+    #: key (210 for a layer, 28 GiB - it does not fit); ``True`` keeps only the powers of two, so an
+    #: index costs about eight rotations; a :class:`~thorfhe.rotation.RotationBasis` keeps the powers
+    #: of two *plus* a few measured indices, which halves the rotation count for six more keys. Off by
+    #: default: it is a memory-for-time trade. See :meth:`rotation_steps` and :mod:`thorfhe.rotation`.
     binary_rotations = False
 
     #: Optional ``(name, ciphertexts) -> None`` callback for looking inside a stage. A stage's output
@@ -79,8 +81,8 @@ class Stages:
         so a zero would put index 0 into ``plan_rotation_keys``' output, and the GPU would then be
         asked to generate a rotation key that OpenFHE has no index for - a 123 MiB key for a no-op.
 
-        With ``binary_rotations`` set, an index that is not a power of two is performed as the
-        sequence of power-of-two rotations that sums to it. See :attr:`binary_rotations`.
+        With ``binary_rotations`` set, an index that has no key of its own is performed as the
+        sequence of rotations that sums to it. See :attr:`binary_rotations`.
         """
         index = -int(delta) % self.g.slot_count
         if index == 0:
@@ -100,7 +102,17 @@ class Stages:
         more than a 32 GB card holds even fully truncated - while the powers of two are 29 keys and
         about 7 GiB. The cost is a rotation per set bit (about eight on average here) instead of one,
         and a key-switch's worth of noise with it.
+
+        A :class:`~thorfhe.rotation.RotationBasis` is the same trade made less bluntly: it adds the
+        handful of non-power-of-two indices the layer asks for most, which brings those eight steps
+        down to two at the heaviest sites. The powers of two stay in it as the fallback.
         """
+        basis = self.binary_rotations
+        if basis is not True:
+            # An explicit basis owns the decomposition, so the key plan derived from it and the run
+            # that spends the keys cannot disagree about which keys exist - a key that was planned
+            # but not built does not raise here, it surfaces much later as a wrong plaintext.
+            return list(basis.steps(index))
         return [1 << bit for bit in range(index.bit_length()) if index >> bit & 1]
 
     def add(self, x, y):

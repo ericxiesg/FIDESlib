@@ -12,6 +12,8 @@ being debugged through decryption noise on a GPU.
 """
 from __future__ import annotations
 
+import collections
+
 import numpy as np
 
 from .geometry import Geometry
@@ -59,6 +61,10 @@ class ClearEngine:
         #: ``rotation_contexts`` table, derived from a dry run instead of transcribed by hand;
         #: it is exactly what ``SetRotationKeyLevels`` wants (see ``thorfhe.he.plan_rotation_keys``).
         self.rotation_levels: dict[int, int] = {}
+        #: rotation index -> how many times it was applied. The levels alone say which keys are
+        #: needed; the counts say which ones are worth spending a key on, which is what
+        #: ``thorfhe.rotation.factored_basis`` chooses from.
+        self.rotation_counts: collections.Counter = collections.Counter()
 
     # ---- encoding ----
     def encrypt(self, message, level: int = 0) -> ClearCiphertext:
@@ -178,6 +184,7 @@ class ClearEngine:
         delta %= self.slots
         self.rotations_used.add(delta)
         self.rotation_levels[delta] = max(self.rotation_levels.get(delta, -1), ct.level)
+        self.rotation_counts[delta] += 1
         return ClearCiphertext(np.roll(ct.slots, -delta), ct.level, ct.scale_exp)
 
     # ---- level management ----

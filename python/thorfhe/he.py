@@ -8,26 +8,50 @@ the keys, the way THOR's hand-maintained ``rotation_contexts`` table can.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .clear import ClearEngine
 from .encoding import block_diagonal_masks, encode_activations, encode_bias, encode_weight
 from .geometry import Geometry
+from .rotation import RotationBasis, factored_basis, key_levels, rotation_cost
 from .stages import Stages
 
 
-def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
-                       bootstrap_level: int | None = None, scope: str = "layer",
-                       dense: Geometry | None = None,
-                       feedforward: Geometry | None = None,
-                       binary_rotations: bool = False,
-                       refresh_after_dense: bool = False) -> dict[int, int]:
-    """``{rotation index: highest level it is used at}``, ready for ``SetRotationKeyLevels``.
+@dataclass(frozen=True)
+class RotationPlan:
+    """What the key set will be, and how the run must reach the indices it does not contain.
+
+    ``levels`` goes to ``SetRotationKeyLevels``; ``basis`` goes to the layer as its
+    ``binary_rotations``. They are returned together because they are two views of one decision: a
+    plan built from one basis and spent by another is missing keys, and that failure does not raise -
+    it decrypts to an unrelated value.
+    """
+
+    levels: dict[int, int]
+    basis: "RotationBasis | bool"
+    #: how many engine rotations a layer costs under this basis, when it is known
+    rotations: int | None = None
+
+
+def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
+                   bootstrap_level: int | None = None, scope: str = "layer",
+                   dense: Geometry | None = None,
+                   feedforward: Geometry | None = None,
+                   binary_rotations: bool = False,
+                   extra_rotation_keys: int = 0,
+                   refresh_after_dense: bool = False) -> "RotationPlan":
+    """The rotation keys this scope needs, and how the run must reach the indices they do not cover.
 
     Derived by running the stages on the clear engine with dummy data: every ``rotate`` records the
     level of its operand, which is exactly what a level-truncated rotation key has to cover. This is
     THOR's ``rotation_contexts`` table, computed rather than transcribed, so it cannot drift away from
     the code that uses the keys.
+
+    ``extra_rotation_keys`` asks for that many keys beyond the powers of two, chosen from the indices
+    the dry run rotated by most (see :mod:`thorfhe.rotation`); the returned ``basis`` then has to go
+    to the layer as its ``binary_rotations``, or the run will spend keys the plan did not build.
 
     ``scope="layer"`` covers a whole encoder layer (about 210 indices) and needs the production
     geometries, since stages 10-16 change representation. ``scope="qkv"`` covers stages 01-05 only
@@ -37,6 +61,10 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
     iteration count, and that comes from scalars, not from the ciphertext.
     """
     g = geometry
+    # With an explicit basis the dry run must use one key per index: its counts and levels have to
+    # describe the rotations the layer *wants*, not the steps some other basis would have split them
+    # into. Choosing a basis from a basis' own output would compound the decomposition.
+    dry_binary = False if extra_rotation_keys > 0 else binary_rotations
     # The plan has to be made on the level schedule the run will use. `ClearEngine` defaults to a
     # bootstrap level of 14 and stages 12-14 alone need 17 (GELU is 13 of them), so leaving it at the
     # default sends the tail of the layer below level 0 and the plan comes out short.
@@ -46,7 +74,7 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
     if scope == "qkv":
         low, high = block_diagonal_masks(g)
         stages = Stages(engine, g, masks=low, complement_masks=high,
-                        binary_rotations=binary_rotations)
+                        binary_rotations=dry_binary)
         zeros_x = np.zeros((g.dim, g.features))
         x = np.array([engine.encrypt(m) for m in encode_activations(g, zeros_x)], dtype=object)
         _, x_cplx = stages.stage_01_complexify_x(x, layer_index=layer_index)
@@ -76,7 +104,7 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
 
         weights = encode_layer(dummy, layer_index, qkv=g, dense=dense, feedforward=feedforward)
         layer = EncoderLayer(engine, qkv=g, dense=dense, feedforward=feedforward,
-                             binary_rotations=binary_rotations,
+                             binary_rotations=dry_binary,
                              refresh_after_dense=refresh_after_dense)
         state = np.array([engine.encrypt(m)
                           for m in encode_activations(g, np.zeros((g.dim, g.features)))],
@@ -98,7 +126,24 @@ def plan_rotation_keys(geometry: Geometry, depth: int, layer_index: int = 0, *,
             f"{dict(list(starved.items())[:3])}). Stages 12-14 need 17 levels after the last "
             f"bootstrap, GELU being 13 of them. Dropping these silently would produce a plan that is "
             f"missing keys the layer actually uses.")
-    return plan
+
+    if extra_rotation_keys > 0:
+        # The dry run above used one key per index, so its counts and levels describe the rotations
+        # the layer *wants*, independent of how they will be reached. Choose the basis from that, then
+        # re-derive the plan through the basis' own decomposition so the keys built are exactly the
+        # keys spent - see `thorfhe.rotation`.
+        basis = factored_basis(engine.rotation_counts, geometry.slot_count,
+                               extra_keys=extra_rotation_keys)
+        return RotationPlan(levels=key_levels(basis, plan), basis=basis,
+                            rotations=rotation_cost(basis, engine.rotation_counts))
+    return RotationPlan(levels=plan, basis=binary_rotations,
+                        rotations=sum(engine.rotation_counts.values())
+                        if not binary_rotations else None)
+
+
+def plan_rotation_keys(*args, **kwargs) -> dict[int, int]:
+    """``{rotation index: highest level it is used at}`` alone - see :func:`plan_rotations`."""
+    return plan_rotations(*args, **kwargs).levels
 
 
 class LightWeights:
