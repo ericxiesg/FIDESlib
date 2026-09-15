@@ -108,7 +108,7 @@ class Stages:
         down to two at the heaviest sites. The powers of two stay in it as the fallback.
         """
         basis = self.binary_rotations
-        if basis is not True:
+        if not isinstance(basis, bool):
             # An explicit basis owns the decomposition, so the key plan derived from it and the run
             # that spends the keys cannot disagree about which keys exist - a key that was planned
             # but not built does not raise here, it surfaces much later as a wrong plaintext.
