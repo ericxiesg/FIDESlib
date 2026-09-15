@@ -138,7 +138,34 @@ j∈[0,16)、block∈[0,8) 的完整二维网格。那 127 个索引每一个都
 | binary+6 | 4117 | 4117 | 21 | 29.28 G | 0.52 G | 是 |
 | binary+9 | 3667 | 3667 | 24 | 29.75 G | 0.05 G | 是 |
 
-### 2.6 正确性
+### 2.6 与 bootstrap rescale 的耦合 [实测]
+
+上面那张表是 depth 37 的。`72dc818` 在 FIXEDMANUAL 下给 bootstrap 补了一次 rescale
+（`EvalBootstrap` 返回 NoiseLevel=2，不补就指数放大——见
+`bugs/RESPONSE-bootstrap-noise-level-20260915.md`），这多花一格 level。
+两次 bootstrap 之间最深的一段要 19 格，所以 depth 37 可能不够：
+
+```
+depth  bootstrap落点  结果
+   37            20  OK   出口 level 1
+   37            19  FAIL rescale: would leave the ciphertext at level -1
+   38            20  OK   出口 level 1
+```
+
+depth 38 每把钥匙多一层 limb，吃掉 0.44 GiB 余量（旋转次数不变，基的选择与 depth 无关）：
+
+| depth | 额外 key | 旋转/层 | 总驻留 | 32 GB 余量 |
+|---:|---:|---:|---:|---:|
+| 37 | 4 | 4413 | 28.97 G | 0.83 G |
+| 37 | 6 | 4117 | 29.28 G | 0.52 G |
+| 38 | 4 | 4413 | 29.42 G | **0.38 G** |
+| 38 | 6 | 4117 | 29.74 G | **0.06 G** |
+
+**要不要上 38，取决于 `EvalBootstrap` 本身吃 16 格还是 17 格**，这个数还没在 bench
+的配置下量过。真上 38 的话，额外钥匙的上限从 +9 掉到 +4，`--extra-rotation-keys 4`
+就同时是建议值和天花板。
+
+### 2.7 正确性
 
 分解的充要条件是 `sum(steps) ≡ index (mod slot_count)`。`tests/test_rotation_basis.py`
 对全部 32768 个索引穷举验证了这一条（三种基），另外验证了：
@@ -150,7 +177,7 @@ j∈[0,16)、block∈[0,8) 的完整二维网格。那 127 个索引每一个都
 
 规划与执行共用同一个 `RotationBasis.steps`，这是上面那条不一致的结构性防线。
 
-### 2.7 改了哪些文件
+### 2.8 改了哪些文件
 
 | 文件 | 改动 |
 |---|---|
