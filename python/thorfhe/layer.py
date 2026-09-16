@@ -127,7 +127,7 @@ class EncoderLayer:
     """Stages 01-16 over one engine, with one stage object per representation the layer passes through."""
 
     def __init__(self, engine, *, residual_scale: float = 1.0, score_refresh_scale: float = 1.0,
-                 qkv: Geometry = THOR_BERT,
+                 refresh_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
                  refresh_after_dense: bool = False, refresh_after_context: bool = False):
@@ -168,6 +168,8 @@ class EncoderLayer:
         self.norm.residual_scale = residual_scale
         # Same contract: must match what `encode_layer` was given, or the scores come out scaled.
         self.attention.score_refresh_scale = score_refresh_scale
+        # `refresh` is the identity either way, so this one needs no matching change at encode time.
+        self.norm.refresh_scale = refresh_scale
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
                                              complement_masks=ff_high,
                                              binary_rotations=binary_rotations)

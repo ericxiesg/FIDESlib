@@ -259,3 +259,44 @@ def test_residual_scale_does_not_change_what_a_layer_computes():
     assert peaks[1.0] / peaks[128.0] == pytest.approx(128.0, rel=0.05), (
         f"and it has to actually scale what stage 15 bootstraps: {peaks[1.0]:.4g} -> "
         f"{peaks[128.0]:.4g}")
+
+
+@pytest.mark.parametrize("scale", [2.0, 4.0])
+def test_refresh_stays_the_identity_under_a_scaled_bootstrap(masks, scale):
+    """`refresh` is documented as semantically the identity; scaling its bootstrap must keep it so.
+
+    The halving in front of the bootstrap is not enough on the real checkpoint - the attention dense
+    reaches 3.8 to 5.2, so what is bootstrapped is 1.9 to 2.6. Against q0/Delta = 32 that is 6 to 8%
+    and unremarkable, which is why it was the third over-bound site to be found and the last. Against
+    a bound of 2 it is over.
+
+    Dividing further and multiplying back by an integer costs no level and no scale degree, so the
+    identity is exact - and that is what this asserts, rather than a tolerance.
+    """
+    engine, stages = build(masks)
+    rng = np.random.default_rng(31)
+    values = [rng.normal(0, 1.5, D.slot_count) for _ in range(8)]
+    encoded = [engine.encrypt(v) for v in values]
+
+    seen = []
+
+    class Probe(ClearEngine):
+        def bootstrap(self, ct, keep_levels=None):
+            seen.append(float(np.max(np.abs(ct.slots))))
+            return super().bootstrap(ct, keep_levels)
+
+    results, peaks = {}, {}
+    for factor in (1.0, scale):
+        probe = Probe(D, depth=DEPTH, bootstrap_level=DEPTH)
+        scaled_stages = LayerNormStages(probe, D, masks=masks[0], complement_masks=masks[1])
+        scaled_stages.refresh_scale = factor
+        seen.clear()
+        out = scaled_stages.refresh([probe.encrypt(v) for v in values])
+        results[factor] = np.stack([np.real(np.asarray(probe.decrypt(ct))) for ct in out])
+        peaks[factor] = max(seen)
+
+    assert np.allclose(results[1.0], results[scale], rtol=1e-12, atol=1e-14), (
+        f"refresh stopped being the identity: moved by "
+        f"{np.max(np.abs(results[1.0] - results[scale])):.3g}")
+    assert peaks[1.0] / peaks[scale] == pytest.approx(scale, rel=1e-9), (
+        f"and it has to scale what is bootstrapped: {peaks[1.0]:.4g} -> {peaks[scale]:.4g}")

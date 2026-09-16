@@ -56,6 +56,11 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
     #: that fails the way everything in this family fails, by returning a plausible wrong number.
     residual_scale = 1.0
 
+    #: An extra division in front of `refresh`'s bootstrap, undone by an integer multiply after, so
+    #: the stage stays the identity it is documented to be. One means the halving alone, which is
+    #: what every caller that has not asked for more gets. See :meth:`refresh`.
+    refresh_scale = 1.0
+
     def _fold_into_slot_zero(self, ct):
         """Sum the groups and then a token's slots, leaving the total in slot 0 (and its neighbours)."""
         folded = self.interval_sum(ct, self.g.group_size)
@@ -170,15 +175,26 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         stage 10 - 19 levels before, 18 after - so the layer needs a bootstrap level of 20 instead of
         38, and a depth of about 34 instead of 52. That is the difference between fitting on a 32 GiB
         card and not.
+
+        ``refresh_scale`` divides once more before the bootstrap and multiplies back afterwards by an
+        integer, which costs neither a level nor a scale degree, so the identity above still holds
+        exactly. It exists because the halving is not enough on the real checkpoint: the attention
+        dense reaches 3.8 to 5.2, which halves to 1.9 to 2.6 - comfortable against q0/Delta = 32 and
+        over the bound EasyFHE's parameters would give. This was the third such site to be found and
+        the least obvious, at 6 to 8% of the current bound.
         """
         half = len(x) // 2
         out = np.empty((len(x),), dtype=object)
+        restore = int(self.refresh_scale)
         for index in range(half):
             merged = self.add(x[index], self.multiply_1j(x[index + half]))
-            merged = self.bootstrap(self.rescale(self.multiply(merged, 0.5)))
+            merged = self.bootstrap(self.rescale(self.multiply(merged, 0.5 / restore)))
             conjugated = self.conjugate(merged)
             out[index] = self.add(merged, conjugated)
             out[index + half] = self.multiply_1j(self.subtract(conjugated, merged))
+            if restore != 1:
+                out[index] = self.multiply(out[index], restore)
+                out[index + half] = self.multiply(out[index + half], restore)
         return out
 
     def stage_15_prepare_layernorm(self, x, y, *, keep_levels=3):
