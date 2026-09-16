@@ -187,3 +187,61 @@ def test_align_is_a_no_op_when_the_levels_already_agree(stages):
     cts = [engine.encrypt(np.full(G.slot_count, 0.25)) for _ in range(3)]
     aligned = st.align(*cts)
     assert {engine.level(ct) for ct in aligned} == {DEPTH}
+
+
+# ---------------------------------------------------------------- the Newton refinement
+def test_update_inv_D_squares_the_probabilities(stages):
+    """One halving of the temperature: `softmax(2x)` is proportional to `softmax(x)` squared.
+
+    The arithmetic that gets there is not obvious from the code. `inv_D` carries `delta / D` rather
+    than `1 / D` (the `DeltaCiphertext` convention), and `k` is chosen as `1 / (2 * delta)`, so
+
+        scaled = 2 * exp * (delta / D) * k ~ exp / D
+
+    which is the probability itself - and squaring it is the halving. Everything downstream of the
+    first `he_inv` depends on this identity and nothing tested it.
+    """
+    engine, st = stages
+    rng = np.random.default_rng(23)
+    used = used_slots()
+    terms = []
+    total = np.zeros(G.slot_count)
+    for _ in range(2 * G.n_output_ciphertexts):
+        values = rng.uniform(0.2, 1.0, G.slot_count) * used
+        terms.append(values)
+        total += values
+
+    groups = G.slot_count // G.group_size
+    denominator = np.tile(total.reshape(groups, G.group_size).sum(axis=0), groups)
+    delta = 1.0 / 512
+    inv_D = engine.encrypt(np.where(used, delta / np.where(denominator > 0, denominator, 1.0), 0.0))
+
+    squared, _, _, _ = st.update_inv_D(
+        [engine.encrypt(v) for v in terms], [used] * len(terms), inv_D,
+        delta=delta, precision=0.5, alpha=0.1)
+
+    carried = used > 0
+    for index, values in enumerate(terms):
+        probability = np.zeros(G.slot_count)
+        probability[carried] = values[carried] / denominator[carried]
+        got = np.real(engine.decrypt(squared[index]))
+        assert np.allclose(got[carried], probability[carried] ** 2, rtol=2e-2), (
+            f"ciphertext {index}: the squared probabilities are off by "
+            f"{np.max(np.abs(got[carried] - probability[carried] ** 2)):.3g}")
+
+
+def test_update_inv_D_confines_the_final_inverse_to_the_first_group(stages):
+    """`final=True` keeps only the first group, which is where `_broadcast_softmax` starts reading."""
+    engine, st = stages
+    used = used_slots()
+    terms = [np.where(used > 0, 0.5, 0.0) for _ in range(2 * G.n_output_ciphertexts)]
+    inv_D = engine.encrypt(np.where(used > 0, 1.0 / 512 / 64, 0.0))
+
+    for final, expect_beyond in ((False, True), (True, False)):
+        _, inverse, _, _ = st.update_inv_D(
+            [engine.encrypt(v) for v in terms], [used] * len(terms), inv_D,
+            delta=1.0 / 512, precision=0.5, alpha=0.1, final=final)
+        beyond = np.real(engine.decrypt(inverse))[G.group_size:]
+        assert np.any(np.abs(beyond) > 0) == expect_beyond, (
+            f"final={final}: slots past the first group should "
+            f"{'carry' if expect_beyond else 'be empty'}")
