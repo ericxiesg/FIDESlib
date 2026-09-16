@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from thorfhe import THOR_ATTENTION_DENSE, ClearEngine, block_diagonal_masks
+from thorfhe.encoding import encode_bias
 from thorfhe.layernorm import LayerNormStages, statistic_mask, value_mask
 
 D = THOR_ATTENTION_DENSE
@@ -150,3 +151,42 @@ def test_the_stated_and_inferred_halving_agree_on_the_unscaled_variants():
     for variant, (min_var, max_var) in ((1, (0.15, 10.0)), (2, (0.2, 150.0)), (3, (0.75, 2500.0))):
         assert (stages.variance_window(min_var, max_var)
                 == stages.variance_window(min_var, max_var, halves=stages.HALVES[variant]))
+
+
+@pytest.mark.parametrize("scale", [2.0, 128.0])
+def test_stage_16_is_invariant_to_a_scaled_residual(masks, scale):
+    """Scaling stage 15's output and the bounds together must leave stage 16's answer alone.
+
+    This is the whole basis of the magnitude fix: stage 15 hands its bootstrap a residual reaching
+    132 on the real checkpoint, against a usable window of about 10, so the residual is divided by
+    `s` in the plaintexts upstream. What makes that free is that stage 16 normalises - dividing its
+    input by `s` divides the variance by `s^2`, and once the bounds follow, the output is the same
+    number. Exact arithmetic here, so `the same` is to floating point.
+
+    The level cost is unchanged for a reason visible in the code rather than measured: `he_invsqrt`
+    takes `epsilon = min_var / max_var` (layernorm.py:133), a ratio, and `var_e / max_denominator`
+    is a ratio too - so dividing both bounds by `s^2` changes neither.
+    """
+    rng = np.random.default_rng(29)
+    values = rng.normal(0, 1.2, (D.dim, D.features))
+    gamma = rng.normal(1.0, 0.1, D.features)
+    beta = rng.normal(0.0, 0.1, D.features)
+
+    got = {}
+    levels = {}
+    for factor in (1.0, scale):
+        engine, stages = build(masks)
+        stages.residual_scale = factor
+        x = [engine.encrypt(m) for m in encode(values / factor)]
+        out = stages.stage_16_output_layernorm(
+            x, encode_bias(D, gamma), encode_bias(D, beta),
+            engine.encrypt(np.ones(D.slot_count)), layer_index=0)
+        got[factor] = [np.real(np.asarray(engine.decrypt(ct))) for ct in out]
+        levels[factor] = engine.level(out[0])
+
+    difference = max(float(np.max(np.abs(a - b))) for a, b in zip(got[1.0], got[scale]))
+    magnitude = max(float(np.max(np.abs(a))) for a in got[1.0])
+    assert difference / magnitude < 1e-9, (
+        f"scaling the residual by {scale:g} moved stage 16's output by {difference:.3g} "
+        f"against a magnitude of {magnitude:.3g}")
+    assert levels[1.0] == levels[scale], "and it must not change what the stage costs"

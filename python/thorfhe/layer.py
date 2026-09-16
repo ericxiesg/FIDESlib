@@ -55,7 +55,8 @@ class LayerWeights:
     output_norm: tuple
 
 
-def encode_layer(parameters: dict, layer_index: int, *, qkv: Geometry = THOR_BERT,
+def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 1.0,
+                 qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD) -> LayerWeights:
     """Encode one layer's BERT arrays. ``parameters`` uses HuggingFace's names, without the prefix.
@@ -68,6 +69,19 @@ def encode_layer(parameters: dict, layer_index: int, *, qkv: Geometry = THOR_BER
         return np.asarray(parameters[name])
 
     softmax_scale = SOFTMAX_SCALES.get(layer_index, DEFAULT_SOFTMAX_SCALE)
+
+    # `residual_scale` shrinks what stage 15 hands its bootstrap, and it is folded into plaintexts
+    # rather than applied to a ciphertext, so it costs no levels and no operations.
+    #
+    # Three places, because `norm_1` is read twice. Stage 11's gamma and beta scale its output by
+    # 1/s; stage 12's weight is scaled by s to undo that before GELU, which is non-linear and must
+    # see exactly what it saw before; stage 14's weight and bias scale its output by 1/s so that
+    # stage 15's `norm_1 + output_dense` comes out scaled as a whole. Stage 12's *bias* is not
+    # touched: it is added after the product, which the two cancelling factors leave unchanged.
+    #
+    # Stage 16 absorbs the rest - it normalises, so its output is unaffected once its variance bounds
+    # are divided by s^2 (see `LayerNormStages.residual_scale`).
+    residual = 1.0 / residual_scale
 
     ff_kwargs = dict(dim=feedforward.dim, pack=feedforward.pack, n_slot=feedforward.n_slot,
                      group_size=feedforward.group_size, slot_count=feedforward.slot_count,
@@ -92,12 +106,14 @@ def encode_layer(parameters: dict, layer_index: int, *, qkv: Geometry = THOR_BER
                               slot_count=dense.slot_count, n_in=dense.n_in, n_out=dense.n_out,
                               slot_indices=np.arange(dense.n_blocks)),
             encode_bias(dense, get("attention.output.dense.bias"))),
-        attention_norm=(encode_bias(dense, get("attention.output.LayerNorm.weight")),
-                        encode_bias(dense, get("attention.output.LayerNorm.bias"))),
+        attention_norm=(encode_bias(dense, get("attention.output.LayerNorm.weight"), scale=residual),
+                        encode_bias(dense, get("attention.output.LayerNorm.bias"), scale=residual)),
         intermediate=(encode_weight_ff(get("intermediate.dense.weight"), axis=0,
-                                       scale=1.0 / GELU_SCALE, **ff_kwargs), intermediate_bias),
-        output_dense=(encode_weight_ff(get("output.dense.weight"), axis=1, **ff_kwargs),
-                      encode_bias(feedforward, get("output.dense.bias"))),
+                                       scale=residual_scale / GELU_SCALE, **ff_kwargs),
+                      intermediate_bias),
+        output_dense=(encode_weight_ff(get("output.dense.weight"), axis=1, scale=residual,
+                                       **ff_kwargs),
+                      encode_bias(feedforward, get("output.dense.bias"), scale=residual)),
         output_norm=(encode_bias(feedforward, get("output.LayerNorm.weight")),
                      encode_bias(feedforward, get("output.LayerNorm.bias"))),
     )
@@ -106,7 +122,7 @@ def encode_layer(parameters: dict, layer_index: int, *, qkv: Geometry = THOR_BER
 class EncoderLayer:
     """Stages 01-16 over one engine, with one stage object per representation the layer passes through."""
 
-    def __init__(self, engine, *, qkv: Geometry = THOR_BERT,
+    def __init__(self, engine, *, residual_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
                  refresh_after_dense: bool = False, refresh_after_context: bool = False):
@@ -142,6 +158,9 @@ class EncoderLayer:
         self.norm = LayerNormStages(engine, dense, masks=dense_low,
                                     complement_masks=dense_high,
                                     binary_rotations=binary_rotations)
+        # Must match the `residual_scale` the weights were encoded with, or stage 16 is told to
+        # expect a variance the input does not have - see `LayerNormStages.residual_scale`.
+        self.norm.residual_scale = residual_scale
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
                                              complement_masks=ff_high,
                                              binary_rotations=binary_rotations)

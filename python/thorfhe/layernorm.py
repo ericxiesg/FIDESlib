@@ -48,6 +48,14 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
     #: THOR's `w_buffer`: how much headroom the variance bound is given.
     variance_headroom = 1.05
 
+    #: The factor stage 15's input has been divided by, folded into plaintexts upstream (see
+    #: `thorfhe.layer.encode_layer`). Stage 16 normalises, so its output does not move - but the
+    #: variance it is told to expect does, by the square. One here means no scaling, which is what
+    #: every caller that has not been through `encode_layer(residual_scale=...)` must use: telling
+    #: this stage a scale the weights were not encoded with puts `he_invsqrt` outside its range, and
+    #: that fails the way everything in this family fails, by returning a plausible wrong number.
+    residual_scale = 1.0
+
     def _fold_into_slot_zero(self, ct):
         """Sum the groups and then a token's slots, leaving the total in slot 0 (and its neighbours)."""
         folded = self.interval_sum(ct, self.g.group_size)
@@ -191,10 +199,22 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
             out[index + half] = self.multiply_1j(self.subtract(conj, merged))
         return out
 
+    #: The bounds each stage-16 variant declares, before `residual_scale`.
+    VARIANT_BOUNDS = {2: (1e-5, 0.2, 150.0), 3: (1e-5, 0.75, 2500.0)}
+
     def stage_16_output_layernorm(self, x, gamma, beta, ones, *, layer_index):
-        """THOR routes layers 9 and 10 to the widest variance window; everything else to variant 2."""
-        variant = self.he_layernorm3 if layer_index in (9, 10) else self.he_layernorm2
-        return variant(x, gamma, beta, ones)
+        """THOR routes layers 9 and 10 to the widest variance window; everything else to variant 2.
+
+        Dividing the input by `residual_scale` divides the variance by its square, so the bounds
+        follow. Their *ratio* is untouched, which is what sets `he_invsqrt`'s iteration count - so
+        this changes no levels.
+        """
+        number = 3 if layer_index in (9, 10) else 2
+        variant = self.he_layernorm3 if number == 3 else self.he_layernorm2
+        var_e, min_var, max_var = self.VARIANT_BOUNDS[number]
+        square = self.residual_scale ** 2
+        return variant(x, gamma, beta, ones, var_e=var_e / square,
+                       min_var=min_var / square, max_var=max_var / square)
 
     #: Whether each variant halves its input. Variant 1 runs after stage 11, whose output is not
     #: doubled; variants 2 and 3 run after stage 15, whose output is. Stated rather than inferred
