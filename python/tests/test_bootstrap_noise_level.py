@@ -102,32 +102,74 @@ def test_eval_bootstrap_itself_returns_a_canonical_ciphertext(device):
 
 @pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
                     reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
-def test_bootstrap_noise_differs_between_two_runs_of_the_same_input(device):
-    """Random noise or a deterministic fault? Every later step depends on which.
+def test_bootstrapping_one_ciphertext_twice_gives_the_same_answer(device):
+    """Evaluation is deterministic, so the only randomness in a bootstrap is its input's.
 
-    The bootstrap comes back with an additive error of about 0.015 per slot, independent of the
-    message (a zero ciphertext shows the same distribution as one full of 1.0). Its distribution is
-    an exact fit to a half-normal - p50, p99 and the maximum over 32768 slots all give the same
-    sigma - and the apparent period-2048 structure in it is what grouping 16 samples per class does
-    to noise with none. But a fit is not proof.
+    This test used to encrypt twice and compare, which cannot distinguish what it was written to
+    distinguish: two encryptions of the same message carry different noise, so a difference between
+    their bootstraps says nothing about whether the bootstrap added anything. And a bootstrap has
+    nothing to add - key switching uses fixed keys, and NTT, rescale and rotation are deterministic.
 
-    This is: bootstrap one input twice. Noise is redrawn, a wrong constant table is not. If this
-    fails, the error is reproducible, and it can be subtracted out and looked at directly - which is
-    a much better position than hunting for it.
+    So the question the measured 0.015 raises is not "where does the randomness come from" but "by
+    how much is the input's own noise being amplified": a fresh encryption carries about 7e-13 in
+    message units, and 0.015 is 2^34 times that. This pins the half of it that is checkable here -
+    the same ciphertext in has to give the same answer out - and
+    `test_bootstrap_noise_scales_with_the_input_noise` measures the gain.
+    """
+    import pyfideslib as pf
+
+    engine = pf.Engine(device, **bench_params())
+    ct = engine.encrypt(np.zeros(engine.slots, dtype=complex))   # once: the SAME ciphertext twice
+    first = np.real(np.asarray(engine.decrypt(engine.bootstrap(ct))))
+    second = np.real(np.asarray(engine.decrypt(engine.bootstrap(ct))))
+
+    spread = float(np.abs(first - second).max())
+    assert spread < 1e-9, (
+        f"bootstrapping one ciphertext twice gave results differing by {spread:.3g}, against "
+        f"{np.abs(first).max():.3g} each. Evaluation has no source of randomness - fixed keys, "
+        f"deterministic NTT, rescale and rotation - so this should be bit-identical. If it is not, "
+        f"something is reading uninitialised memory.")
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_bootstrap_noise_scales_with_the_input_noise(device):
+    """Does the bootstrap amplify what it is given, or add a floor of its own?
+
+    Two inputs holding the same value with different noise: a fresh encryption, and one that has
+    been through a thousand rotations (each measured at about 4e-10, so roughly 1e-8 to 1e-6 by the
+    time they accumulate). If the output noise tracks the input's, the bootstrap is an amplifier and
+    the gain is the thing to explain. If both come back at the same 0.015, it has a floor of its own
+    and the input does not matter.
+
+    Reported rather than asserted at a threshold, because which of the two it is has not been
+    established yet and a guessed bound would only encode the guess.
     """
     import pyfideslib as pf
 
     engine = pf.Engine(device, **bench_params())
     zero = np.zeros(engine.slots, dtype=complex)
-    first = np.real(np.asarray(engine.decrypt(engine.bootstrap(engine.encrypt(zero)))))
-    second = np.real(np.asarray(engine.decrypt(engine.bootstrap(engine.encrypt(zero)))))
 
-    correlation = float(np.corrcoef(first, second)[0, 1])
-    assert abs(correlation) < 0.5, (
-        f"the two runs' errors correlate at {correlation:.3f}, so this is not noise - it is a "
-        f"deterministic error that repeats. Subtract one from the other (they differ by "
-        f"{np.abs(first - second).max():.3g}, against {np.abs(first).max():.3g} each) and look at "
-        f"what is left: a constant offset, a wrong plaintext, or a table read at the wrong index.")
+    fresh = engine.encrypt(zero)
+    noisy = engine.encrypt(zero)
+    for _ in range(1000):
+        noisy = engine.rotate(noisy, 1)
+
+    before = {"fresh": float(np.max(np.abs(np.real(np.asarray(engine.decrypt(fresh)))))),
+              "rotated": float(np.max(np.abs(np.real(np.asarray(engine.decrypt(noisy))))))}
+    after = {}
+    for name, ct in (("fresh", fresh), ("rotated", noisy)):
+        out = np.real(np.asarray(engine.decrypt(engine.bootstrap(ct))))
+        after[name] = float(np.max(np.abs(out)))
+
+    print(f"\n  input noise   fresh {before['fresh']:.3g}   after 1000 rotations "
+          f"{before['rotated']:.3g}  (ratio {before['rotated'] / max(before['fresh'], 1e-300):.3g})")
+    print(f"  after bootstrap  fresh {after['fresh']:.3g}   rotated {after['rotated']:.3g}  "
+          f"(ratio {after['rotated'] / max(after['fresh'], 1e-300):.3g})")
+    print(f"  gain             fresh {after['fresh'] / max(before['fresh'], 1e-300):.3g}   "
+          f"rotated {after['rotated'] / max(before['rotated'], 1e-300):.3g}")
+
+    assert after["fresh"] > 0, "a bootstrap of zero should not be exactly zero"
 
 
 def test_a_single_rotation_is_accurate(engine):
