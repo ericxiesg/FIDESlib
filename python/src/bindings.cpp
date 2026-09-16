@@ -221,7 +221,7 @@ PYBIND11_MODULE(_core, m) {
 	  .def("EvalLevelReduce", &CryptoContextImpl<DCRTPoly>::EvalLevelReduce)
 	  .def("GetRemainingLevels", &CryptoContextImpl<DCRTPoly>::GetRemainingLevels)
 	  .def("EvalBootstrap", &CryptoContextImpl<DCRTPoly>::EvalBootstrap, py::arg("ct"), py::arg("numIterations") = 1, py::arg("precision") = 0,
-		py::arg("prescaled") = false);
+		py::arg("prescaled") = false, py::arg("stopAfterStage") = -1);
 
 	m.def("GenCryptoContext", [](CCParams<CryptoContextCKKSRNS>& p) { return GenCryptoContext(p); });
 }

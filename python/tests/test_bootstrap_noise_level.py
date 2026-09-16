@@ -172,6 +172,37 @@ def test_bootstrap_noise_scales_with_the_input_noise(device):
     assert after["fresh"] > 0, "a bootstrap of zero should not be exactly zero"
 
 
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_which_bootstrap_stage_introduces_the_error(device):
+    """Four steps, one of them loses the accuracy. This says which.
+
+    Refreshing a ciphertext of zeros comes back with an error of about 0.015 per slot that is
+    deterministic, independent of the message, independent of the input's own noise, and independent
+    of q0/Delta - every hypothesis that would explain it has been measured and ruled out, because a
+    bootstrap is four steps and from outside it is one.
+
+    Zeros in means every stage should read roughly zero out. Printed rather than asserted: the point
+    is to find the step where the number stops being small, and a threshold guessed before knowing
+    which step that is would only encode the guess. Once it is known, this becomes an assertion on
+    that stage.
+    """
+    import pyfideslib as pf
+
+    engine = pf.Engine(device, **bench_params())
+    ct = engine.encrypt(np.zeros(engine.slots, dtype=complex))
+
+    print(f"\n  input          {np.max(np.abs(np.real(np.asarray(engine.decrypt(ct))))):.3g}")
+    for stage, name in ((1, "ModRaise + scale"), (2, "CoeffsToSlots"),
+                        (3, "modular reduction"), (4, "SlotsToCoeffs")):
+        out = np.real(np.asarray(engine.decrypt(engine.bootstrap_stage(ct, stage))))
+        print(f"  after stage {stage} ({name:<18}) max {np.max(np.abs(out)):.3g}  "
+              f"p50 {np.quantile(np.abs(out), 0.5):.3g}")
+    whole = np.real(np.asarray(engine.decrypt(engine.bootstrap(ct))))
+    print(f"  whole bootstrap                    max {np.max(np.abs(whole)):.3g}  "
+          f"p50 {np.quantile(np.abs(whole), 0.5):.3g}")
+
+
 def test_a_single_rotation_is_accurate(engine):
     """CtS and StC are rotations and plaintext multiplies, so a rotation's own error bounds theirs.
 

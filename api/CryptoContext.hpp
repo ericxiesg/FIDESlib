@@ -279,7 +279,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 
 	static void SetLevel(Ciphertext<DCRTPoly>& ct, size_t level);
 
-	Ciphertext<DCRTPoly> EvalBootstrap(const Ciphertext<DCRTPoly>& ciphertext, uint32_t numIterations = 1, uint32_t precision = 0, bool prescaled = false);
+	/// @brief Refresh a ciphertext. `stopAfterStage` in 1..4 returns after ModRaise, CoeffsToSlots,
+	/// the modular reduction or SlotsToCoeffs instead of finishing, for measuring where accuracy is
+	/// lost; the result is not a usable refreshed ciphertext. GPU path only.
+	Ciphertext<DCRTPoly> EvalBootstrap(const Ciphertext<DCRTPoly>& ciphertext, uint32_t numIterations = 1, uint32_t precision = 0, bool prescaled = false, int stopAfterStage = -1);
 	void EvalBootstrapInPlace(Ciphertext<DCRTPoly>& ciphertext, uint32_t numIterations = 1, uint32_t precision = 0, bool prescaled = false);
 
 	Ciphertext<DCRTPoly> AccumulateSum(const Ciphertext<DCRTPoly>& ct, int slots, int stride = 1);

@@ -1754,7 +1754,8 @@ void CryptoContextImpl<DCRTPoly>::SetLevel(Ciphertext<DCRTPoly>& ct, size_t leve
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalBootstrap(const Ciphertext<DCRTPoly>& ciphertext,
                                                                 uint32_t numIterations,
                                                                 uint32_t precision,
-                                                                bool prescaled) {
+                                                                bool prescaled,
+                                                                int stopAfterStage) {
 	FIDESlib::CudaNvtxRange r("API");
 
 	auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
@@ -1774,7 +1775,7 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalBootstrap(const Ciphertext
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ciphertext);
 	auto res_gpu                = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
 
-	FIDESlib::CKKS::Bootstrap(*res_gpu, res_gpu->slots, prescaled);
+	FIDESlib::CKKS::Bootstrap(*res_gpu, res_gpu->slots, prescaled, stopAfterStage);
 
 	return result;
 }

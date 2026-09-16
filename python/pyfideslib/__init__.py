@@ -270,6 +270,23 @@ class Engine:
                 out = self.cc.EvalLevelReduce(out, got - keep_levels)
         return out
 
+    def bootstrap_stage(self, x, stage: int):
+        """Run a bootstrap up to ``stage`` (1..4) and stop, for measuring where accuracy is lost.
+
+        1 is ModRaise and the constant scale, 2 CoeffsToSlots, 3 the modular reduction, 4
+        SlotsToCoeffs. The result is **not** a usable refreshed ciphertext - its level, scale and
+        slot layout are mid-flight - so none of `bootstrap`'s scale correction or level checking
+        applies here, and neither is done.
+
+        A bootstrap is four steps and from outside it is one, which is why its accuracy has nowhere
+        to be pinned: refreshing zeros comes back with a deterministic, message-independent error of
+        about 0.015 and no stage owns it. Every stage of a bootstrap of zeros should decrypt to
+        roughly zero; the first that does not is where it is made.
+        """
+        if not 1 <= int(stage) <= 4:
+            raise ValueError(f"stage must be 1..4, got {stage}; use bootstrap() to run all of it")
+        return self.cc.EvalBootstrap(x, stopAfterStage=int(stage))
+
     # ---- light plaintexts (THOR weight storage, docs/light_plaintext.md) ----
     def encode_to_light_plaintext(self, msg, level: int | None = None):
         """Compact, level-agnostic encoding: N int64 coefficients instead of the (L+1) RNS towers.

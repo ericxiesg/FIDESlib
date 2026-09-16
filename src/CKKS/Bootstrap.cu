@@ -166,9 +166,19 @@ void FIDESlib::CKKS::BootstrapCPUraise(Ciphertext& ctxt,
 	}
 }
 
-void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled) {
+void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled,
+							   const int stopAfterStage) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
 
+	// `stopAfterStage` returns early so a caller can decrypt what the bootstrap has built so far.
+	// A bootstrap is four steps and from outside it is one, which is why its measured accuracy - a
+	// deterministic, message-independent, slot-dependent error of about 0.015 at Delta = 2^50 - has
+	// no home yet (bugs/RESPONSE-bootstrap-floor-noise-20260916.md). Bootstrap a ciphertext of zeros
+	// with each stage in turn: every stage should decrypt to roughly zero, and the first one that
+	// does not is where the error is made. -1 runs all of it, and is what every caller passes.
+	//
+	// The intermediate is not a usable refreshed ciphertext - its level and scale are mid-flight and
+	// after CoeffsToSlots the slots hold coefficients - so this is for measurement, not for use.
 	assert(slots >= ctxt.slots);
 	int old_slots = ctxt.slots;
 
@@ -269,6 +279,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 		ctxt.rescale();
 	}
 
+	if (stopAfterStage == 1) {   // ModRaise, the constant scale, Accumulate
+		ctxt.slots = old_slots;
+		return;
+	}
+
 	//   std::cout << "LT" << std::endl;
 
 	if (isLT) {
@@ -276,6 +291,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 	} else {
 		EvalCoeffsToSlots(ctxt, slots, false);
 	}
+	if (stopAfterStage == 2) {   // CoeffsToSlots
+		ctxt.slots = old_slots;
+		return;
+	}
+
 	//  std::cout << "ModRed" << std::endl;
 
 	if (cc.N / 2 == slots) {
@@ -301,6 +321,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 		ctxt.rescale();
 	}
 
+	if (stopAfterStage == 3) {   // the approximate modular reduction, i.e. the sine
+		ctxt.slots = old_slots;
+		return;
+	}
+
 	//  std::cout << "LT" << std::endl;
 
 	if (isLT) {
@@ -312,6 +337,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 	if (cc.N / 2 != slots) {
 		aux.rotate(ctxt, slots);
 		ctxt.add(aux);
+	}
+
+	if (stopAfterStage == 4) {   // SlotsToCoeffs, before the final integer scale
+		ctxt.slots = old_slots;
+		return;
 	}
 
 	uint64_t corFactor = (uint64_t)1 << std::llround(correction);
