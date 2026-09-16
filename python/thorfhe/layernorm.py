@@ -62,13 +62,26 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         return ct
 
     @staticmethod
-    def variance_window(min_var: float, max_var: float, headroom: float = 1.05):
-        """The token variances a variant accepts, given its declared bounds."""
-        factor = headroom * (4.0 if min_var > 0.16 else 1.0)
+    def variance_window(min_var: float, max_var: float, headroom: float = 1.05,
+                        halves: bool | None = None):
+        """The token variances a variant accepts, given its declared bounds.
+
+        A variant that halves its input accepts four times the variance, because the halving is
+        undone by the doubled representation stage 15 hands it (see
+        :meth:`stage_15_prepare_layernorm`).
+
+        ``halves`` used to be inferred as ``min_var > 0.16``, a threshold sitting between variant 1's
+        0.15 and variant 2's 0.2 - that is variant identity encoded as a magnitude comparison, and it
+        is wrong the moment the bounds are scaled rather than chosen. Pass it; the default keeps the
+        old inference so existing callers do not change behaviour.
+        """
+        if halves is None:
+            halves = min_var > 0.16
+        factor = headroom * (4.0 if halves else 1.0)
         return factor * min_var, factor * max_var
 
     def he_layernorm(self, x, gamma, beta, ones, *, var_e: float, min_var: float, max_var: float,
-                     alpha: float = 0.001):
+                     alpha: float = 0.001, halves: bool | None = None):
         """``2 * (gamma * (x - mean) / sqrt(var + eps) + beta)`` - the doubling is THOR's, see above.
 
         ``ones`` is the encrypted slot-0 indicator the inverse square root starts from (THOR's
@@ -80,7 +93,9 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
 
         # normalise so the variance lands in [min_var/max_var, 1] - the range he_invsqrt needs
         max_denominator = (max_var * self.variance_headroom + var_e) * n ** 2
-        halve = min_var > 0.16
+        # Which variant halves its input is a property of the variant, not of how large its bounds
+        # happen to be - see `variance_window`. Inferred only when the caller does not say.
+        halve = (min_var > 0.16) if halves is None else halves
         values = value_mask(g, (0.5 if halve else 1.0) / np.sqrt(max_denominator))
         masked = [self.rescale(self.multiply(ct, values)) for ct in x]
 
@@ -181,11 +196,19 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         variant = self.he_layernorm3 if layer_index in (9, 10) else self.he_layernorm2
         return variant(x, gamma, beta, ones)
 
+    #: Whether each variant halves its input. Variant 1 runs after stage 11, whose output is not
+    #: doubled; variants 2 and 3 run after stage 15, whose output is. Stated rather than inferred
+    #: from the bounds, so the bounds can be scaled without changing which variant this is.
+    HALVES = {1: False, 2: True, 3: True}
+
     def he_layernorm1(self, x, gamma, beta, ones, var_e=1e-5, min_var=0.15, max_var=10.0):
-        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var, max_var=max_var)
+        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var,
+                                 max_var=max_var, halves=self.HALVES[1])
 
     def he_layernorm2(self, x, gamma, beta, ones, var_e=1e-5, min_var=0.2, max_var=150.0):
-        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var, max_var=max_var)
+        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var,
+                                 max_var=max_var, halves=self.HALVES[2])
 
     def he_layernorm3(self, x, gamma, beta, ones, var_e=1e-5, min_var=0.75, max_var=2500.0):
-        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var, max_var=max_var)
+        return self.he_layernorm(x, gamma, beta, ones, var_e=var_e, min_var=min_var,
+                                 max_var=max_var, halves=self.HALVES[3])

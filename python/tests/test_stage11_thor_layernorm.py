@@ -120,3 +120,33 @@ def test_level_cost_is_fixed(masks):
     levels = {engine.level(o) for o in out}
     assert len(levels) == 1
     assert levels.pop() == DEPTH - 14
+
+
+def test_which_variant_halves_survives_scaling_its_bounds():
+    """Variant identity must not be inferred from how large the bounds happen to be.
+
+    `variance_window` and `he_layernorm` both used to decide whether a variant halves its input by
+    testing `min_var > 0.16`, a threshold that sits between variant 1's 0.15 and variant 2's 0.2. It
+    gives the right answer for the three variants as written and the wrong one the moment the bounds
+    are scaled - which is exactly what compensating for a scaled stage-15 residual requires, since
+    dividing the input by `s` divides the variance by `s^2`.
+    """
+    stages = LayerNormStages
+    # variant 2's bounds, scaled down the way a 1/128 input scaling would scale them
+    scaled_min, scaled_max = 0.2 / 128 ** 2, 150.0 / 128 ** 2
+
+    inferred = stages.variance_window(scaled_min, scaled_max)
+    stated = stages.variance_window(scaled_min, scaled_max, halves=stages.HALVES[2])
+
+    assert inferred[1] / inferred[0] == pytest.approx(stated[1] / stated[0]), "the ratio is a variant property"
+    assert stated[0] == pytest.approx(4 * 1.05 * scaled_min), "variant 2 halves, so it accepts 4x"
+    assert inferred[0] == pytest.approx(1.05 * scaled_min), "and the threshold would have said 1x"
+    assert stated[0] != inferred[0], "which is the silent flip this test exists to catch"
+
+
+def test_the_stated_and_inferred_halving_agree_on_the_unscaled_variants():
+    """The inference is right for the bounds as written - that is why it survived this long."""
+    stages = LayerNormStages
+    for variant, (min_var, max_var) in ((1, (0.15, 10.0)), (2, (0.2, 150.0)), (3, (0.75, 2500.0))):
+        assert (stages.variance_window(min_var, max_var)
+                == stages.variance_window(min_var, max_var, halves=stages.HALVES[variant]))
