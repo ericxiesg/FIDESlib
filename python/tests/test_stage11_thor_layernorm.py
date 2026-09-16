@@ -9,6 +9,8 @@ final doubling is never cancelled), and the token variance has to sit inside the
 the inverse square root has nothing to converge to. The `/2` in variants 2 and 3 moves that window up
 by four rather than cancelling the doubling, which is the easy thing to get backwards.
 """
+import os
+
 import numpy as np
 import pytest
 
@@ -190,3 +192,70 @@ def test_stage_16_is_invariant_to_a_scaled_residual(masks, scale):
         f"scaling the residual by {scale:g} moved stage 16's output by {difference:.3g} "
         f"against a magnitude of {magnitude:.3g}")
     assert levels[1.0] == levels[scale], "and it must not change what the stage costs"
+
+
+@pytest.mark.skipif(not os.environ.get("THORFHE_FULL_LAYER"),
+                    reason="set THORFHE_FULL_LAYER=1 to run a whole encoder layer twice "
+                           "(needs a few GB; it does not fit an 8 GB machine)")
+def test_residual_scale_does_not_change_what_a_layer_computes():
+    """The same check as the stage-16 one above, end to end.
+
+    The algebra is exact and the stage-16 test covers the only step where it is not obvious - stages
+    11, 12 and 14 are linear, and gamma * (1/s), W * s and W2 * (1/s) cancel by construction. What
+    this adds is coverage of the wiring: that no stage reads `norm_1` besides 12 and 15, and that
+    `encode_layer` and `EncoderLayer` were given the same scale. Off by default because two layer
+    forwards on the clear engine do not fit the machine this was written on.
+    """
+    from thorfhe.encoding import encode_activations
+    from thorfhe.geometry import THOR_BERT
+    from thorfhe.layer import EncoderLayer, encode_layer
+
+    g = THOR_BERT
+    rng = np.random.default_rng(17)
+    f = g.features
+    weights = {
+        "query.weight": rng.normal(0, .04, (f, f)), "query.bias": rng.normal(0, .01, f),
+        "key.weight": rng.normal(0, .04, (f, f)), "key.bias": rng.normal(0, .01, f),
+        "value.weight": rng.normal(0, .04, (f, f)), "value.bias": rng.normal(0, .01, f),
+        "attention.output.dense.weight": rng.normal(0, .04, (f, f)),
+        "attention.output.dense.bias": rng.normal(0, .01, f),
+        "attention.output.LayerNorm.weight": rng.normal(1, .1, f),
+        "attention.output.LayerNorm.bias": rng.normal(0, .1, f),
+        "intermediate.dense.weight": rng.normal(0, .04, (4 * f, f)),
+        "intermediate.dense.bias": rng.normal(0, .01, 4 * f),
+        "output.dense.weight": rng.normal(0, .04, (f, 4 * f)),
+        "output.dense.bias": rng.normal(0, .01, f),
+        "output.LayerNorm.weight": rng.normal(1, .1, f),
+        "output.LayerNorm.bias": rng.normal(0, .1, f)}
+    activations = rng.normal(0, 1.0, (g.dim, g.features))
+
+    outputs, peaks = {}, {}
+    for scale in (1.0, 128.0):
+        seen = []
+
+        class Probe(ClearEngine):
+            def bootstrap(self, ct, keep_levels=None):
+                seen.append(float(np.max(np.abs(ct.slots))))
+                return super().bootstrap(ct, keep_levels)
+
+        engine = Probe(g, depth=37, bootstrap_level=20)
+        engine.bootstrap_message_margin = 1e9     # measure the magnitude rather than refuse it
+        layer = EncoderLayer(engine, residual_scale=scale, binary_rotations=True,
+                             refresh_after_dense=True)
+        for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
+            owner.check_ranges = False
+        packed = np.array([engine.encrypt(m) for m in encode_activations(g, activations)],
+                          dtype=object)
+        result = layer.forward(packed, encode_layer(weights, 0, residual_scale=scale),
+                               layer.padding_mask(g.dim), 0)
+        outputs[scale] = np.stack([np.asarray(engine.decrypt(ct)) for ct in result])
+        peaks[scale] = max(seen)
+        del layer, engine, packed, result
+
+    difference = float(np.max(np.abs(outputs[1.0] - outputs[128.0])))
+    magnitude = float(np.max(np.abs(outputs[1.0])))
+    assert difference / magnitude < 1e-9, (
+        f"scaling the residual moved the layer's output by {difference:.3g} against {magnitude:.3g}")
+    assert peaks[1.0] / peaks[128.0] == pytest.approx(128.0, rel=0.05), (
+        f"and it has to actually scale what stage 15 bootstraps: {peaks[1.0]:.4g} -> "
+        f"{peaks[128.0]:.4g}")
