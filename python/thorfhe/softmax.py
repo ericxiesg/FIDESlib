@@ -156,6 +156,20 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     NARROW = dict(min_x=-27.2493, max_x=21.72692, n=2, l=2, inv_epsilon=2 ** -11, output_alpha=0.01)
     WIDE = dict(min_x=-70.0, max_x=70.0, n=2, l=4, inv_epsilon=2 ** -18, output_alpha=0.01)
 
+    #: How much the key projection's `softmax_scale` was divided by, so that stage 07 hands its
+    #: bootstrap a smaller number. Restored by an integer multiply straight after, which costs no
+    #: level and no scale degree, so `he_softmax` sees exactly the scores it would have seen: the
+    #: calibration, `inv_epsilon` and the Goldschmidt iteration count are all untouched.
+    #:
+    #: This exists because stage 07 is one of the two sites that do not halve before bootstrapping,
+    #: and on the real checkpoint it hands over 1.99 - fine against q0/Delta = 32, and 99.5% of the
+    #: bound EasyFHE's parameters would give. Must match what `encode_layer` was given.
+    #:
+    #: The alternative - halving the scores for real and taking the temperature back with another
+    #: squaring in `he_exp` - was measured and is not affordable: squaring the numerators collapses
+    #: the denominator from 1.2e-4 to 5.8e-11, which takes Goldschmidt from 9 iterations to 19.
+    score_refresh_scale = 1.0
+
     def __init__(self, engine, geometry, ones=None, **kwargs):
         super().__init__(engine, geometry, **kwargs)
         self.ones = ones
@@ -179,8 +193,13 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
             if layer_index != 2:
                 merged = self.level_down(merged, 3)
             conjugated = self.conjugate(merged)
+            restore = int(self.score_refresh_scale)
             refreshed[index] = self.add(merged, conjugated)
             refreshed[index + half] = self.multiply_1j(self.subtract(conjugated, merged))
+            if restore != 1:
+                # an integer multiply: no level, no scale degree - see `score_refresh_scale`
+                refreshed[index] = self.multiply(refreshed[index], restore)
+                refreshed[index + half] = self.multiply(refreshed[index + half], restore)
 
         # The bootstrap is the first thing in the layer that stages 01-06 do not do, so when the
         # softmax is the first wrong stage this is the line that splits the question in two: the

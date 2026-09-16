@@ -56,7 +56,7 @@ class LayerWeights:
 
 
 def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 1.0,
-                 qkv: Geometry = THOR_BERT,
+                 score_refresh_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD) -> LayerWeights:
     """Encode one layer's BERT arrays. ``parameters`` uses HuggingFace's names, without the prefix.
@@ -68,7 +68,11 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
     def get(name):
         return np.asarray(parameters[name])
 
-    softmax_scale = SOFTMAX_SCALES.get(layer_index, DEFAULT_SOFTMAX_SCALE)
+    # `score_refresh_scale` divides the scores so that stage 07 bootstraps a smaller number, and
+    # stage 07 multiplies them back by an integer immediately afterwards - so `he_softmax` sees the
+    # scores it always saw and no calibration moves. The key projection is where it goes because the
+    # key feeds the scores and nothing else. See `Softmax.score_refresh_scale`.
+    softmax_scale = SOFTMAX_SCALES.get(layer_index, DEFAULT_SOFTMAX_SCALE) / score_refresh_scale
 
     # `residual_scale` shrinks what stage 15 hands its bootstrap, and it is folded into plaintexts
     # rather than applied to a ciphertext, so it costs no levels and no operations.
@@ -122,7 +126,8 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
 class EncoderLayer:
     """Stages 01-16 over one engine, with one stage object per representation the layer passes through."""
 
-    def __init__(self, engine, *, residual_scale: float = 1.0, qkv: Geometry = THOR_BERT,
+    def __init__(self, engine, *, residual_scale: float = 1.0, score_refresh_scale: float = 1.0,
+                 qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
                  refresh_after_dense: bool = False, refresh_after_context: bool = False):
@@ -161,6 +166,8 @@ class EncoderLayer:
         # Must match the `residual_scale` the weights were encoded with, or stage 16 is told to
         # expect a variance the input does not have - see `LayerNormStages.residual_scale`.
         self.norm.residual_scale = residual_scale
+        # Same contract: must match what `encode_layer` was given, or the scores come out scaled.
+        self.attention.score_refresh_scale = score_refresh_scale
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
                                              complement_masks=ff_high,
                                              binary_rotations=binary_rotations)

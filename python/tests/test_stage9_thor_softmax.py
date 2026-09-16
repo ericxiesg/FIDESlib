@@ -174,3 +174,50 @@ def test_attention_end_to_end(mask_families):
 
     error = np.abs(got - want).max() / np.abs(want).max()
     assert error < 0.02, f"attention output is off by {error:.4f} relative"
+
+
+@pytest.mark.parametrize("scale", [2.0, 4.0])
+def test_score_refresh_scale_changes_only_what_stage_07_bootstraps(mask_families, scale):
+    """Divide the scores before the refresh, multiply them back after: nothing downstream moves.
+
+    Stage 07 is one of two sites that hand their bootstrap an unhalved value, and on the real
+    checkpoint it hands over 1.99 - unremarkable against q0/Delta = 32 and 99.5% of the bound
+    EasyFHE's parameters would give. The division goes into the key projection, where it reaches the
+    scores and nothing else, and the multiplication back is by an integer, which costs neither a
+    level nor a scale degree. So `he_softmax` sees the scores it always saw.
+
+    The route not taken is recorded in `Softmax.score_refresh_scale`: really halving the scores and
+    taking the temperature back with another squaring works arithmetically - measured at 2.1e-3
+    against the true softmax, against 6.5e-4 unscaled - but squaring the numerators collapses the
+    denominator from 1.2e-4 to 5.8e-11, and Goldschmidt goes from 9 iterations to 19. Ten levels
+    against a budget with one to spare.
+    """
+    rng = np.random.default_rng(67)
+    scores = rng.uniform(-8, 8, (G.n_blocks, G.dim, G.dim))
+
+    results, peaks = {}, {}
+    for factor in (1.0, scale):
+        seen = []
+
+        class Probe(ClearEngine):
+            def bootstrap(self, ct, keep_levels=None):
+                seen.append(float(np.max(np.abs(ct.slots))))
+                return super().bootstrap(ct, keep_levels)
+
+        (low, high), transpose, copies, attention, ccmm = mask_families
+        engine = Probe(G, depth=DEPTH, bootstrap_level=DEPTH)
+        stages = Softmax(engine, G, masks=low, complement_masks=high, transpose=transpose,
+                         copies=copies, attention=attention, ccmm=ccmm,
+                         ones=engine.encrypt(used_slots()))
+        stages.score_refresh_scale = factor
+        encoded = encode_score_diagonals(engine, scores / factor)
+        out = stages.stage_07_softmax(list(encoded), [used_slots()] * 8, layer_index=0,
+                                      parameters=Softmax.NARROW)
+        results[factor] = decode_broadcast_diagonals(engine, out)
+        peaks[factor] = max(seen)
+
+    difference = float(np.max(np.abs(results[1.0] - results[scale])))
+    assert difference < 1e-9, (
+        f"scaling the refresh moved the softmax by {difference:.3g}; it must not move at all")
+    assert peaks[1.0] / peaks[scale] == pytest.approx(scale, rel=1e-6), (
+        f"and it has to scale what is bootstrapped: {peaks[1.0]:.4g} -> {peaks[scale]:.4g}")
