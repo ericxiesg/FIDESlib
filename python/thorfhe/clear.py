@@ -353,10 +353,28 @@ class ClearEngine:
                 f"handing back fewer levels than asked for, so a schedule that does this does not "
                 f"run - it only looks like it does here.")
         level = self.bootstrap_level if keep_levels is None else keep_levels
+        # Above the recoverable bound the sine does not refresh the message, it replaces it by its
+        # residue - the modular reduction it approximates is periodic in `message_bound`. Modelling
+        # that is what lets this engine produce the *catastrophic* failure rather than only the
+        # gradual one: a Gaussian perturbation can never turn a denominator negative, so a model
+        # without this cannot be used to rule a wrap out, which is exactly how sb=59 was called
+        # sufficient here and then exploded on the device.
+        #
+        # Per slot rather than per coefficient, which is where the real reduction happens: a slot is
+        # a linear combination of coefficients, so this is a model of the effect and not of the
+        # mechanism. It is right about when a value stops being recoverable, not about the precise
+        # garbage that replaces it.
+        slots = ct.slots
+        if self.noise_model:
+            period = self.message_bound
+            fold = lambda part: part - period * np.round(part / period)      # noqa: E731
+            slots = fold(np.real(slots)) + 1j * fold(np.imag(slots))
+
         # The error a bootstrap leaves is set by `message_bound`, not by the value: refreshing a
         # number much smaller than the bound costs most of its significant digits. That is invisible
         # in exact arithmetic and it is what `numeric._restore_magnitude` exists to avoid.
-        return ClearCiphertext(self._perturb(ct.slots.copy(), self._bootstrap_sigma), level, 1)
+        return ClearCiphertext(self._perturb(np.asarray(slots).copy(), self._bootstrap_sigma),
+                               level, 1)
 
     def relinearize(self, ct: ClearCiphertext) -> ClearCiphertext:
         """Fold the third component away. Exact in value; what it changes here is the degree."""
