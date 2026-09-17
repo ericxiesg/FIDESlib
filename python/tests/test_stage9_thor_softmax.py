@@ -224,24 +224,71 @@ def test_score_refresh_scale_changes_only_what_stage_07_bootstraps(mask_families
         f"and it has to scale what is bootstrapped: {peaks[1.0]:.4g} -> {peaks[scale]:.4g}")
 
 
-def test_the_softmax_scale_is_the_one_that_gives_bert_its_own_temperature():
-    """`he_softmax` has to see BERT's score, and the constant is what makes it so.
+def test_stage_06_hands_the_softmax_berts_own_score(mask_families):
+    """`he_softmax` has to see BERT's attention score, and `SOFTMAX_SCALES` is the constant for it.
 
-    Two measured facts fix it. Stage 06 carries the product exactly - not twice it, not four times -
-    which `test_attention_score_is_exactly_q_k_transpose` pins to 1e-12 and
-    `bench magnitudes --through 06` reports as a ratio of 1.0000 against the plaintext score. And
-    `stage_07_softmax` doubles on its way through the bootstrap, which its own docstring states. So
-    `he_softmax` sees `2 * (q.k) * scale`, and BERT's score is `(q.k) / sqrt(head_dim)`.
+    A softmax is not scale-invariant, so this is not a calibration that can absorb a uniform factor -
+    and nothing else in the suite can catch one either: the per-stage fidelity check rescales by the
+    best fit, `calibrate` fits its window to whatever scores it is given, and every stage test builds
+    its own synthetic input. So the factor is *run* here rather than asserted, end to end from the
+    amplitude a layer is actually entered at down to the number the exponential receives.
 
-    This was 1/64 until it was measured against BERT's own softmax on the real checkpoint, where it
-    is off by 0.908 at worst - a probability that should be near 1 coming back near 0.09 - while 1/16
-    is off by 0.00225. The softmax had been running at four times BERT's temperature, which is also
-    why its denominator sat seven times under `inv_epsilon`.
+    Three factors have to cancel, and the third is the one that was missed:
 
-    Nothing caught it because the stage tests calibrate to their synthetic scores, and a uniform
-    factor is exactly what a calibration absorbs. This one cannot: it is arithmetic on the constant.
+    * the projections give `s * (x @ W.T) + 2b` (`test_qkv_computes_xw_plus_bias`), i.e. `s` times
+      BERT's own `q` and `k` - so `s` enters the score **twice**;
+    * stage 06 carries the product exactly (`test_attention_score_is_exactly_q_k_transpose`);
+    * `stage_07_softmax`'s bootstrap fold doubles it once more.
+
+    Counting only the last two gives `scale = 1/16`, which is what this was for a day. It puts four
+    times BERT's score into the exponential, and since that is an exponential the denominator - which
+    `he_inv` needs inside `[epsilon, 1]` - goes from 9e-4 to 534 on MRPC's first validation row.
     """
-    assert 2 * DEFAULT_SOFTMAX_SCALE == pytest.approx(1 / np.sqrt(G.n_out)), (
-        f"he_softmax would see 2 * {DEFAULT_SOFTMAX_SCALE} = {2 * DEFAULT_SOFTMAX_SCALE} of q.k, "
-        f"against BERT's 1/sqrt({G.n_out}) = {1 / np.sqrt(G.n_out)}")
+    from thorfhe import encode_bias, encode_weight
+    from thorfhe.attention import AttentionScore
+    from thorfhe.encoding import encode_activations
+    from thorfhe.layer import ACTIVATION_SCALE
+
+    rng = np.random.default_rng(31)
+    query_weight = rng.normal(size=(G.features, G.features)) * 0.04
+    query_bias = rng.normal(size=G.features) * 0.1
+    key_weight = rng.normal(size=(G.features, G.features)) * 0.04
+    key_bias = rng.normal(size=G.features) * 0.1
+    x = rng.normal(size=(G.dim, G.features)) * 0.5
+
+    (low, high), transpose, copies, attention, ccmm = mask_families
+    engine = ClearEngine(G, depth=DEPTH, bootstrap_level=DEPTH)
+    stages = AttentionScore(engine, G, masks=low, complement_masks=high, transpose=transpose,
+                            copies=copies, attention=attention, ccmm=ccmm)
+
+    # the two lines `encode_layer` uses for the query and the key, and nothing else: encoding a whole
+    # layer here would build the 3072x768 feed-forward plaintexts, which is gigabytes for no gain
+    packed = np.array([engine.encrypt(message)
+                       for message in encode_activations(G, ACTIVATION_SCALE * x)], dtype=object)
+    _, complexified = stages.stage_01_complexify_x(packed, layer_index=0)
+    rotated = stages.stage_02_make_rotated_copies(complexified)
+    scores = stages.stage_06_attention_score(
+        stages.stage_03_query(rotated, encode_weight(G, query_weight), encode_bias(G, query_bias)),
+        stages.stage_04_key(rotated, encode_weight(G, key_weight, scale=DEFAULT_SOFTMAX_SCALE),
+                            encode_bias(G, key_bias, scale=DEFAULT_SOFTMAX_SCALE)))
+
+    # BERT's own score from the same weights: q k^T / sqrt(head_dim), per head
+    query = x @ query_weight.T + query_bias
+    key = x @ key_weight.T + key_bias
+    bert = np.stack([query[:, h * G.n_out:(h + 1) * G.n_out]
+                     @ key[:, h * G.n_out:(h + 1) * G.n_out].T for h in range(G.n_blocks)])
+    bert = bert / np.sqrt(G.n_out)
+
+    # Checked where the score is largest: that is the slot the polynomial's range has to accommodate,
+    # and the one an overstated score overflows first.
+    head, token, other = np.unravel_index(np.abs(bert).argmax(), bert.shape)
+    diagonal = (int(other) - int(token)) % G.dim
+    held = np.real(np.asarray(engine.decrypt(scores[diagonal // G.pack])))[
+        G.slot(diagonal % G.pack, int(token), int(head))]
+
+    # what stage 07 hands he_softmax is twice what stage 06 holds
+    ratio = 2 * held / float(bert[head, token, other])
+    assert ratio == pytest.approx(1.0, rel=1e-9), (
+        f"he_softmax would see {ratio:.4f} times BERT's score at head {head}, "
+        f"({token}, {other}); softmax_scale {DEFAULT_SOFTMAX_SCALE} is off by that factor")
     assert SOFTMAX_SCALES[2] == DEFAULT_SOFTMAX_SCALE / 2, "layer 2 keeps THOR's factor of two"

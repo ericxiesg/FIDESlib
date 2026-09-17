@@ -26,28 +26,40 @@ from .layernorm import LayerNormStages, statistic_mask
 from .numeric import GELU_SCALE
 from .softmax import Softmax
 
-#: The key scaling folded into the key projection. It is fixed by one requirement: what reaches
+#: THOR's invariant: every activation ciphertext carries *twice* the value it represents. The weight
+#: encoders halve, the bias is added before the ``y + conj(y)`` that doubles, and LayerNorm's
+#: uncancelled doubling hands the next layer the same footing - so layer 0 has to be *entered* on it,
+#: which is what ``bench --output-scale`` defaults to. It is a constant rather than a literal 2.0
+#: because two separate quantities are derived from it, and they have to move together.
+ACTIVATION_SCALE = 2.0
+
+#: The key scaling folded into the key projection. One requirement fixes it: what reaches
 #: ``he_softmax`` must be the BERT attention score itself, because a softmax is not scale-invariant
-#: and ``he_softmax(x)`` approximates ``softmax(x)`` (which is the contract ``test_stage9`` pins, and
-#: the units THOR's window is in - its [-27.2, 21.7] is the range of a BERT-base score).
+#: and ``he_softmax(x)`` approximates ``softmax(x)`` - which is the contract ``test_stage9`` pins, and
+#: the units THOR's window is in (its [-27.2, 21.7] is the range of a BERT-base score).
 #:
-#: Counting the factors: stage 06 carries the product exactly - `bench magnitudes --through 06`
-#: reports a ratio of 1.0000 against the plaintext score, and
-#: ``test_attention_score_is_exactly_q_k_transpose`` pins it to 1e-12 - and ``stage_07_softmax``'s
-#: bootstrap fold doubles it. So ``he_softmax`` sees ``2 * (q.k) * scale``, and matching BERT's
-#: ``(q.k) / sqrt(64)`` needs ``scale = 1/16``.
+#: Counting the factors, with ``s = ACTIVATION_SCALE`` the amplitude the layer is entered at:
 #:
-#: It was 1/64 until this was measured, on an accounting that had q and k each carried at 2x and
-#: stage 06's masks contributing a half. Only the *bias* is doubled (`x @ W.T + 2b`, not
-#: `2(x @ W.T + b)` - see ``test_qkv_computes_xw_plus_bias``), so that came out 2x too large, and the
-#: softmax ran at four times BERT's temperature. End to end against BERT's own softmax on the real
-#: checkpoint: 1/64 is off by 0.908 at worst, 1/16 by 0.00225.
+#: * a projection gives ``s * (x @ W.T) + 2b`` - ``encode_weight`` halves the weight, the bias is
+#:   added at single, and ``y + conj(y)`` doubles both - which at ``s = 2`` is ``2 *`` BERT's ``q``;
+#: * stage 06 carries the product exactly, so it holds ``s**2 * (q.k) * scale``
+#:   (``test_attention_score_is_exactly_q_k_transpose`` pins the stage itself to 1e-12);
+#: * ``stage_07_softmax``'s bootstrap fold doubles it once more.
 #:
-#: Layer 2 keeps THOR's factor of two. THOR writes 1/512 and 1/1024 here, which its own softmax must
-#: compensate elsewhere; this port's value is the one its own stages measure, and
-#: ``bench magnitudes --through 06`` is how to re-check it.
-SOFTMAX_SCALES = {2: 1 / 32}
-DEFAULT_SOFTMAX_SCALE = 1 / 16
+#: So ``he_softmax`` sees ``2 * s**2 * (q.k) * scale = 8 * (q.k) * scale``, and BERT's
+#: ``(q.k) / sqrt(64)`` needs ``scale = 1/64``.
+#:
+#: It was briefly 1/16, on an accounting that dropped the ``s**2``. What hid the factor is that
+#: ``bench magnitudes --through 06`` entered the layer at amplitude 1: at ``s = 1`` the same
+#: projection gives ``x @ W.T + 2b``, and against that reference the ratio reads 1.0000, so stage 06
+#: looked like it carried ``(q.k) * scale`` when the real pipeline has it carry four times that.
+#: At 1/16 the exponential is handed four times BERT's score and the denominator ``he_inv`` needs in
+#: ``[epsilon, 1]`` reaches 534 on MRPC's first validation row - reproducible in plaintext to four
+#: digits, which is what identified the factor.
+#:
+#: Layer 2 keeps THOR's factor of two, as it did before.
+SOFTMAX_SCALES = {2: 1 / 128}
+DEFAULT_SOFTMAX_SCALE = 1 / 64
 
 
 @dataclass

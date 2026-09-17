@@ -189,6 +189,14 @@ Three things about it are easy to get wrong and are now written down where they 
   exponent; and `stage_07_softmax`'s bootstrap fold hands `he_softmax` **twice** the score. Which
   polynomial is used is decided by `max_x >= 30`, so a re-calibration silently changes the temperature
   unless `l` moves with it.
+* **`ACTIVATION_SCALE` enters the score twice.** A layer is entered at twice the value it represents,
+  and both `q` and `k` carry that factor, so stage 06 holds `4 * (q.k) * softmax_scale` and
+  `he_softmax` sees eight times `(q.k) * softmax_scale`. This is the one factor that no test could
+  catch indirectly: a per-stage fidelity check rescales it away, `calibrate` fits its window around
+  it, and every stage test supplies its own synthetic scores. Counting only the fold gave
+  `softmax_scale = 1/16` for a day, which is four times BERT's temperature and takes the softmax
+  denominator - which `he_inv` needs inside `[epsilon, 1]` - from 9e-4 to 534.
+  `test_stage_06_hands_the_softmax_berts_own_score` runs the factors rather than asserting them.
 * **The input window is narrow in both directions.** Above `max_x` the degree-15 fit stops being an
   exponential and diverges fast - 10% past the range overflows the denominator. Below `inv_epsilon`
   the Goldschmidt iteration is inverting something outside the range it was set up for. The usable

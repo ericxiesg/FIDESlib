@@ -18,6 +18,7 @@ import thorfhe
 from thorfhe import (SMALL, THOR_BERT, ClearEngine, LightWeights, ScaleMismatch, Stages,
                      block_diagonal_masks, decode_linear_output, encode_activations, encode_bias,
                      encode_weight, encrypt_activations, plan_rotation_keys)
+from thorfhe.layer import ACTIVATION_SCALE
 
 DEPTH = 12
 LOG_N = 13
@@ -44,14 +45,26 @@ def run_clear(geometry, x, w, b, depth=DEPTH, layer_index=0):
 
 # ---------------------------------------------------------------- 1. the packing
 @pytest.mark.parametrize("geometry", [SMALL, THOR_BERT], ids=["small", "bert"])
-def test_qkv_computes_xw_plus_bias(geometry):
-    """A QKV stage is a linear layer; decode its output and it must be exactly that layer."""
+@pytest.mark.parametrize("entry", [1.0, ACTIVATION_SCALE], ids=["at-1", "at-activation-scale"])
+def test_qkv_computes_xw_plus_bias(geometry, entry):
+    """A QKV stage is a linear layer; decode its output and it must be exactly that layer.
+
+    The two terms scale differently with the amplitude the layer is entered at, and that is the whole
+    point of running this at two of them. `encode_weight` halves the weights to pay for the
+    `y + conj(y)` that makes the result real, and THOR's `encode_b` does not halve the bias - so the
+    bias is added *between* the halving and the doubling and comes out at `2b` whatever `entry` is,
+    while `x @ w.T` comes out at `entry` times itself.
+
+    Pinned at one amplitude this reads `x @ w.T + 2b`, which is a true statement about a pipeline
+    entered at 1 and a misleading one about the pipeline that runs: layers are entered at
+    `ACTIVATION_SCALE`, where the same stage gives `2 * (x @ w.T + b)`, i.e. twice BERT's own `q`.
+    Reading it as the first cost `SOFTMAX_SCALES` a factor of four - see
+    `test_stage_06_hands_the_softmax_berts_own_score`.
+    """
     x, w, b = sample(geometry, seed=3)
-    engine, out = run_clear(geometry, x, w, b)
+    engine, out = run_clear(geometry, entry * x, w, b)
     got = decode_linear_output(geometry, [engine.decrypt(o) for o in out])
-    # 2 * b, not b: encode_weight halves the weights to pay for the `y + conj(y)` that makes the result
-    # real, and THOR's encode_b does not halve the bias. See docs/thor_port.md.
-    assert np.abs(got - (x @ w.T + 2 * b)).max() < 1e-12
+    assert np.abs(got - (entry * (x @ w.T) + 2 * b)).max() < 1e-12
 
 
 @pytest.mark.parametrize("kwargs,message", [

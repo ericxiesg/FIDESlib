@@ -31,6 +31,7 @@ import numpy as np
 from .bert import BertConfig, BertForSequenceClassification, layer_parameters, layer_norm
 from .checkpoint import load_state_dict
 from .encoding import FF_SLOT_INDICES, decode_linear_output, encode_activations
+from .layer import ACTIVATION_SCALE
 from .geometry import (FEEDFORWARD_WINDOW, THOR_ATTENTION_DENSE, THOR_BERT,
                        THOR_FEEDFORWARD)
 from .hub import HubClient
@@ -689,7 +690,11 @@ def command_magnitudes(args):
     weights = encode_layer(layer_parameters(state, args.layer), args.layer,
                            residual_scale=args.residual_scale,
                            score_refresh_scale=args.score_refresh_scale)
-    packed = np.array([engine.encrypt(m) for m in encode_activations(g, x)], dtype=object)
+    # The layer is entered at `ACTIVATION_SCALE`, and that amplitude squares into the attention
+    # score. Measuring at 1 instead is what made stage 06 look like it carried `(q.k) * scale`
+    # when it carries four times that - see `SOFTMAX_SCALES`.
+    packed = np.array([engine.encrypt(m) for m in encode_activations(g, args.output_scale * x)],
+                      dtype=object)
 
     if args.through == "06":
         _, complexified = layer.attention.stage_01_complexify_x(packed, layer_index=args.layer)
@@ -711,12 +716,14 @@ def command_magnitudes(args):
         # largest, since that is the one a bound has to accommodate.
         scale = SOFTMAX_SCALES.get(args.layer, DEFAULT_SOFTMAX_SCALE)
         weight = layer_parameters(state, args.layer)
-        # `x @ W.T + 2b`, not `+ b`: `encode_weight` halves the weights to pay for the `y + conj(y)`
-        # that makes the result real, and the bias is not halved to match - see
-        # `test_qkv_computes_xw_plus_bias`. Referencing the single bias makes this ratio read 0.90
-        # when the stage is exact, which is how four hours went into a disagreement about a factor.
-        query = x @ weight["query.weight"].T + 2 * weight["query.bias"]
-        key = (x @ weight["key.weight"].T + 2 * weight["key.bias"]) * scale
+        # `s * (x @ W.T) + 2b`, not `x @ W.T + b`: `encode_weight` halves the weights to pay for the
+        # `y + conj(y)` that makes the result real, and the bias is added between the two, so it is
+        # not scaled by `s` - see `test_qkv_computes_xw_plus_bias`. Both terms have to be right: a
+        # reference with the single bias reads 0.90 where the stage is exact, and one that drops `s`
+        # reads 1.0000 where the stage carries four times the score.
+        entry = args.output_scale
+        query = entry * (x @ weight["query.weight"].T) + 2 * weight["query.bias"]
+        key = (entry * (x @ weight["key.weight"].T) + 2 * weight["key.bias"]) * scale
         heads = np.stack([query[:, h * g.n_out:(h + 1) * g.n_out]
                           @ key[:, h * g.n_out:(h + 1) * g.n_out].T for h in range(g.n_blocks)])
         head, token, other = np.unravel_index(np.abs(heads).argmax(), heads.shape)
@@ -944,9 +951,11 @@ def build_parser():
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "
                              "which stage a divergence comes from")
-    engine.add_argument("--output-scale", type=float, default=2.0,
-                        help="what a THOR LayerNorm returns relative to the real one; THOR's final "
-                             "doubling is never cancelled, so this is 2")
+    engine.add_argument("--output-scale", type=float, default=ACTIVATION_SCALE,
+                        help="the amplitude every activation ciphertext carries relative to the real "
+                             "value; THOR's final doubling is never cancelled, so this is 2. It is "
+                             "not only a decode scale: the layer is entered on it, so it squares "
+                             "into the attention score and `SOFTMAX_SCALES` is derived from it")
     device = fhe.add_argument_group("fideslib engine")
     device.add_argument("--device", default="cuda:0")
     device.add_argument("--log-n", type=int, default=16)
@@ -1016,6 +1025,9 @@ def build_parser():
     magnitudes.add_argument("--residual-scale", type=float, default=1.0)
     magnitudes.add_argument("--refresh-scale", type=float, default=1.0)
     magnitudes.add_argument("--score-refresh-scale", type=float, default=1.0)
+    magnitudes.add_argument("--output-scale", type=float, default=ACTIVATION_SCALE,
+                            help="the amplitude the layer is entered at; it squares into the "
+                                 "attention score, so measuring at 1 measures a different pipeline")
     magnitudes.add_argument("--through", choices=("06", "layer"), default="layer",
                             help="stop after the attention score, which needs far less memory")
     magnitudes.set_defaults(handler=command_magnitudes)
