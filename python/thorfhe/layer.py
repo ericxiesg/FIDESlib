@@ -78,15 +78,52 @@ class LayerWeights:
     output_norm: tuple
 
 
+class LazyLayerWeights:
+    """:class:`LayerWeights` that encodes each field when it is read, and does not keep it.
+
+    One encoded layer is **9.7 GB** at THOR's geometry on an engine whose plaintexts are plain arrays
+    - 3.2 GB for the intermediate weight alone, and the same again for the output dense - because a
+    plaintext is one value per slot and there are 32768 of them. `bench` encodes every layer up front,
+    so twelve layers is 116 GB and even one is more than a laptop has: `bench fhe --engine clear` dies
+    before it prints anything, and so does `test_stage13_thor_gelu_dense.py`.
+
+    :meth:`EncoderLayer.forward` reads each field exactly once, so encoding on access and dropping
+    afterwards makes the peak one field rather than all of them - 3.2 GB rather than 9.7. The cost is
+    re-encoding per layer, which is the trade this exists to offer: it is the difference between
+    measuring the model's accuracy on this machine and not measuring it at all.
+
+    Nothing is cached deliberately. A caller that reads a field twice pays twice, which is the right
+    default for the thing this is for; `encode_layer` without `lazy` is unchanged for callers that
+    want the weights resident.
+    """
+
+    __slots__ = ("_fields",)
+
+    def __init__(self, fields: dict):
+        self._fields = fields
+
+    def __getattr__(self, name: str):
+        try:
+            build = self._fields[name]
+        except KeyError:
+            raise AttributeError(
+                f"{name!r} is not one of a layer's weights: {sorted(self._fields)}") from None
+        return build()
+
+
 def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 1.0,
                  score_refresh_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
-                 feedforward: Geometry = THOR_FEEDFORWARD) -> LayerWeights:
+                 feedforward: Geometry = THOR_FEEDFORWARD,
+                 lazy: bool = False) -> LayerWeights | "LazyLayerWeights":
     """Encode one layer's BERT arrays. ``parameters`` uses HuggingFace's names, without the prefix.
 
     Expected keys: ``{query,key,value}.{weight,bias}``, ``attention.output.dense.{weight,bias}``,
     ``attention.output.LayerNorm.{weight,bias}``, ``intermediate.dense.{weight,bias}``,
     ``output.dense.{weight,bias}``, ``output.LayerNorm.{weight,bias}``.
+
+    ``lazy`` returns a :class:`LazyLayerWeights` instead, which encodes each field as it is read and
+    holds none of them. At THOR's geometry that is the difference between 9.7 GB and 3.2 GB.
     """
     def get(name):
         return np.asarray(parameters[name])
@@ -114,36 +151,43 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
                      group_size=feedforward.group_size, slot_count=feedforward.slot_count,
                      n_in=feedforward.n_in, n_out=feedforward.n_out, split=4)
 
-    intermediate_bias = np.empty((2, feedforward.n_output_ciphertexts), dtype=object)
-    for rep, chunk in enumerate(np.split(get("intermediate.dense.bias"), 2)):
-        intermediate_bias[rep] = encode_bias_raw(
-            chunk, dim=feedforward.dim, pack=feedforward.pack, n_slot=feedforward.n_slot,
-            group_size=feedforward.group_size, slot_count=feedforward.slot_count,
-            n_out=feedforward.n_out, n_blocks=2 * feedforward.out_blocks,
-            slot_indices=FF_SLOT_INDICES, scale=1.0 / GELU_SCALE)
+    def intermediate_bias():
+        out = np.empty((2, feedforward.n_output_ciphertexts), dtype=object)
+        for rep, chunk in enumerate(np.split(get("intermediate.dense.bias"), 2)):
+            out[rep] = encode_bias_raw(
+                chunk, dim=feedforward.dim, pack=feedforward.pack, n_slot=feedforward.n_slot,
+                group_size=feedforward.group_size, slot_count=feedforward.slot_count,
+                n_out=feedforward.n_out, n_blocks=2 * feedforward.out_blocks,
+                slot_indices=FF_SLOT_INDICES, scale=1.0 / GELU_SCALE)
+        return out
 
-    return LayerWeights(
-        query=(encode_weight(qkv, get("query.weight")), encode_bias(qkv, get("query.bias"))),
-        key=(encode_weight(qkv, get("key.weight"), scale=softmax_scale),
-             encode_bias(qkv, get("key.bias"), scale=softmax_scale)),
-        value=(encode_weight(qkv, get("value.weight")), encode_bias(qkv, get("value.bias"))),
-        attention_dense=(
+    fields = dict(
+        query=lambda: (encode_weight(qkv, get("query.weight")), encode_bias(qkv, get("query.bias"))),
+        key=lambda: (encode_weight(qkv, get("key.weight"), scale=softmax_scale),
+                     encode_bias(qkv, get("key.bias"), scale=softmax_scale)),
+        value=lambda: (encode_weight(qkv, get("value.weight")),
+                       encode_bias(qkv, get("value.bias"))),
+        attention_dense=lambda: (
             encode_weight_raw(get("attention.output.dense.weight"), dim=dense.dim, pack=dense.pack,
                               n_slot=dense.n_slot, group_size=dense.group_size,
                               slot_count=dense.slot_count, n_in=dense.n_in, n_out=dense.n_out,
                               slot_indices=np.arange(dense.n_blocks)),
             encode_bias(dense, get("attention.output.dense.bias"))),
-        attention_norm=(encode_bias(dense, get("attention.output.LayerNorm.weight"), scale=residual),
-                        encode_bias(dense, get("attention.output.LayerNorm.bias"), scale=residual)),
-        intermediate=(encode_weight_ff(get("intermediate.dense.weight"), axis=0,
-                                       scale=residual_scale / GELU_SCALE, **ff_kwargs),
-                      intermediate_bias),
-        output_dense=(encode_weight_ff(get("output.dense.weight"), axis=1, scale=residual,
-                                       **ff_kwargs),
-                      encode_bias(feedforward, get("output.dense.bias"), scale=residual)),
-        output_norm=(encode_bias(feedforward, get("output.LayerNorm.weight")),
-                     encode_bias(feedforward, get("output.LayerNorm.bias"))),
+        attention_norm=lambda: (
+            encode_bias(dense, get("attention.output.LayerNorm.weight"), scale=residual),
+            encode_bias(dense, get("attention.output.LayerNorm.bias"), scale=residual)),
+        intermediate=lambda: (encode_weight_ff(get("intermediate.dense.weight"), axis=0,
+                                               scale=residual_scale / GELU_SCALE, **ff_kwargs),
+                              intermediate_bias()),
+        output_dense=lambda: (encode_weight_ff(get("output.dense.weight"), axis=1, scale=residual,
+                                               **ff_kwargs),
+                              encode_bias(feedforward, get("output.dense.bias"), scale=residual)),
+        output_norm=lambda: (encode_bias(feedforward, get("output.LayerNorm.weight")),
+                             encode_bias(feedforward, get("output.LayerNorm.bias"))),
     )
+    if lazy:
+        return LazyLayerWeights(fields)
+    return LayerWeights(**{name: build() for name, build in fields.items()})
 
 
 class EncoderLayer:

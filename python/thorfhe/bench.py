@@ -352,11 +352,21 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
     hidden_all, logits = [], []
 
     with timed(timings, "encode weights"):
-        weights = [encode_layer(layer_parameters(model.state, index), index)
+        # Every layer up front is 9.7 GB each at THOR's geometry - the plaintexts are one value per
+        # slot and there are 32768 of them - so twelve layers is 116 GB and one is more than a laptop
+        # has. `--lazy-weights` encodes each field as the layer reads it and holds none, which is
+        # 3.2 GB peak and the difference between measuring accuracy here and not measuring it.
+        weights = [encode_layer(layer_parameters(model.state, index), index,
+                                residual_scale=args.residual_scale,
+                                score_refresh_scale=args.score_refresh_scale,
+                                lazy=args.lazy_weights)
                    for index in range(args.layers)]
 
     engine = make_engine(args, THOR_BERT)
-    layer = EncoderLayer(engine, binary_rotations=rotation_mode(args),
+    layer = EncoderLayer(engine, residual_scale=args.residual_scale,
+                         refresh_scale=args.refresh_scale,
+                         score_refresh_scale=args.score_refresh_scale,
+                         binary_rotations=rotation_mode(args),
                          refresh_after_dense=args.refresh_after_dense)
     def magnitude_probe(name, value):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
@@ -557,18 +567,34 @@ def command_fhe(args):
 
     reference_hidden = np.array([traces[i][f"layer_{args.layers - 1}"]["norm_2"]
                                  for i in range(len(encoded))])
-    hidden_fidelity = Fidelity.between(fhe_hidden, reference_hidden)
+
+    # Over the tokens that carry a word, which is the only place the two models compute the same
+    # thing. `padding_mask` masks the query side, so a padding row's attention comes out empty and
+    # its hidden state is whatever an empty context normalises to; the plaintext model has no such
+    # notion and carries [PAD] through like any other token. Comparing all 128 rows on MRPC's first
+    # sample reports relRMSE 0.22 for a layer whose every *stage* is accurate to 5e-3 or better - the
+    # padding is two thirds of the rows. `per_stage_fidelity` has always taken the token count; this
+    # is the same restriction, and it is what makes the number comparable to thor-openfhe's, which
+    # skips padding explicitly (44 x 768 = 33792 values, not 128 x 768). Both are reported, because
+    # a large gap between them is itself worth seeing.
+    counts = [int(np.asarray(entry[2]).sum()) for entry in encoded]
+    carried = np.concatenate([h[:n] for h, n in zip(fhe_hidden, counts)])
+    reference_carried = np.concatenate([r[:n] for r, n in zip(reference_hidden, counts)])
+
+    hidden_fidelity = Fidelity.between(carried, reference_carried)
+    padded_fidelity = Fidelity.between(fhe_hidden, reference_hidden)
     # The best-fit scale between the two. A THOR LayerNorm returns a constant multiple of the real
     # one, and getting that constant wrong looks exactly like a broken layer, so report it rather
     # than let --output-scale hide it.
-    fitted = float((fhe_hidden * reference_hidden).sum() / (reference_hidden ** 2).sum())
-    scaled_fidelity = Fidelity.between(fhe_hidden / fitted, reference_hidden)
+    fitted = float((carried * reference_carried).sum() / (reference_carried ** 2).sum())
+    scaled_fidelity = Fidelity.between(carried / fitted, reference_carried)
 
     print(f"\naccuracy (against the dataset labels)")
     print("  " + reference_score.format("plaintext"))
     print("  " + fhe_score.format("encrypted"))
     print(f"\nfidelity (against the plaintext model)")
     print("  " + hidden_fidelity.format(f"hidden after layer {args.layers - 1}"))
+    print("  " + padded_fidelity.format("  ... with padding"))
     print(f"  {'best-fit scale':<24}{fitted * args.output_scale:.4f} of the plaintext hidden state "
           f"(--output-scale is {args.output_scale})")
     print("  " + scaled_fidelity.format("  ... rescaled by it"))
@@ -957,6 +983,22 @@ def build_parser():
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "
                              "which stage a divergence comes from")
+    # The three level-free scalings that keep a bootstrap's input inside `q0/Delta`. They are folded
+    # into plaintexts, so they cost nothing at all, and they are what the 22-site magnitude
+    # measurement settled at: residual 256, refresh 4, score_refresh 16. Defaults are 1.0 because
+    # they are only needed once the magnitudes are measured against the bound the run actually has.
+    engine.add_argument("--residual-scale", type=float, default=1.0,
+                        help="divide what stage 15 hands its bootstrap; 256 on the real checkpoint, "
+                             "where the residual reaches 132")
+    engine.add_argument("--refresh-scale", type=float, default=1.0,
+                        help="the same for `LayerNormStages.refresh`; 4 on the real checkpoint")
+    engine.add_argument("--score-refresh-scale", type=float, default=1.0,
+                        help="the same for stage 07's score bootstrap; 16 on the real checkpoint")
+    engine.add_argument("--lazy-weights", action="store_true",
+                        help="encode each of a layer's weight fields as it is read rather than "
+                             "holding the layer. One encoded layer is 9.7 GB at THOR's geometry and "
+                             "`forward` reads each field once, so this is a 3x smaller peak for the "
+                             "cost of re-encoding per layer")
     engine.add_argument("--noise-model", action="store_true",
                         help="give the clear engine the device's bootstrap error instead of exact "
                              "arithmetic. The error a bootstrap leaves is set by q0/Delta and not by "

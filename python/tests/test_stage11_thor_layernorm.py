@@ -10,6 +10,7 @@ the inverse square root has nothing to converge to. The `/2` in variants 2 and 3
 by four rather than cancelling the doubling, which is the easy thing to get backwards.
 """
 import os
+import traceback
 
 import numpy as np
 import pytest
@@ -194,9 +195,6 @@ def test_stage_16_is_invariant_to_a_scaled_residual(masks, scale):
     assert levels[1.0] == levels[scale], "and it must not change what the stage costs"
 
 
-@pytest.mark.skipif(not os.environ.get("THORFHE_FULL_LAYER"),
-                    reason="set THORFHE_FULL_LAYER=1 to run a whole encoder layer twice "
-                           "(needs a few GB; it does not fit an 8 GB machine)")
 def test_residual_scale_does_not_change_what_a_layer_computes():
     """The same check as the stage-16 one above, end to end.
 
@@ -235,7 +233,12 @@ def test_residual_scale_does_not_change_what_a_layer_computes():
 
         class Probe(ClearEngine):
             def bootstrap(self, ct, keep_levels=None):
-                seen.append(float(np.max(np.abs(ct.slots))))
+                # by site, not just the largest: `residual_scale` only touches stage 15, and once it
+                # has been divided by 128 that site is no longer the largest in the layer - so a
+                # check on the global peak stops measuring the thing it was written for
+                stage = next((f.name for f in traceback.extract_stack() if f.name.startswith("stage_")),
+                             "?")
+                seen.append((stage, float(np.max(np.abs(ct.slots)))))
                 return super().bootstrap(ct, keep_levels)
 
         engine = Probe(g, depth=37, bootstrap_level=20)
@@ -246,10 +249,13 @@ def test_residual_scale_does_not_change_what_a_layer_computes():
             owner.check_ranges = False
         packed = np.array([engine.encrypt(m) for m in encode_activations(g, activations)],
                           dtype=object)
-        result = layer.forward(packed, encode_layer(weights, 0, residual_scale=scale),
+        # `lazy=True` holds one weight field at a time instead of the whole encoded layer, which is
+        # 9.7 GB at this geometry - the reason this test was gated off in the first place
+        result = layer.forward(packed, encode_layer(weights, 0, residual_scale=scale, lazy=True),
                                layer.padding_mask(g.dim), 0)
         outputs[scale] = np.stack([np.asarray(engine.decrypt(ct)) for ct in result])
-        peaks[scale] = max(seen)
+        peaks[scale] = max(magnitude for stage, magnitude in seen
+                           if stage == "stage_15_prepare_layernorm")
         del layer, engine, packed, result
 
     difference = float(np.max(np.abs(outputs[1.0] - outputs[128.0])))
@@ -258,7 +264,8 @@ def test_residual_scale_does_not_change_what_a_layer_computes():
         f"scaling the residual moved the layer's output by {difference:.3g} against {magnitude:.3g}")
     assert peaks[1.0] / peaks[128.0] == pytest.approx(128.0, rel=0.05), (
         f"and it has to actually scale what stage 15 bootstraps: {peaks[1.0]:.4g} -> "
-        f"{peaks[128.0]:.4g}")
+        f"{peaks[128.0]:.4g}. Scaling the residual is only worth doing if it moves that site, and "
+        f"only stage 15's own input should move - the rest of the layer's bootstraps are untouched")
 
 
 @pytest.mark.parametrize("scale", [2.0, 4.0])
