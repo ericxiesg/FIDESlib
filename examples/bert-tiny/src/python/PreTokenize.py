@@ -87,7 +87,7 @@ def main():
     
     # Load SST-2 validation set
     print("Loading SST-2 validation dataset...")
-    dataset = load_dataset("glue", "sst2", split="validation")
+    dataset = load_dataset("nyu-mll/glue", "sst2", split="validation")
     
     manifest_entries = []
     processed = 0

@@ -38,6 +38,7 @@ int main(const int argc, char** argv) {
 	FIDESlib::CKKS::ContextData& GPUcc	= *cc_;
 	prepare_cpu_context(cc_, keys, conf.numSlots, conf.blockSize, conf);
 	prepare_gpu_context_bert(cc_, keys, conf);
+	GPUcc.batch = 100;
 
 	// Loading weights and biases
 	struct PtMasks_GPU masks = GetPtMasks_GPU(cc_, cc, conf.numSlots, conf.blockSize, conf.level_matmul + 1);

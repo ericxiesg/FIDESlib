@@ -69,7 +69,7 @@ std::vector<FIDESlib::PrimeRecord> sp64{ { .p = 2305843009218936833 },
 	{ .p = 2305843009245413377 },
 	{ .p = 2305843009247641601 } };
 
-FIDESlib::CKKS::Parameters params{ .logN = 15, .L = 23, .dnum = 1, .primes = p64, .Sprimes = sp64, .batch = 100 };
+FIDESlib::CKKS::Parameters params{ .logN = 15, .L = 25, .dnum = 1, .primes = p64, .Sprimes = sp64, .batch = 100 };
 
 void prepare_gpu_context_bert(FIDESlib::CKKS::Context& cc_gpu, const lbcrypto::KeyPair<lbcrypto::DCRTPoly>& keys, FIDESlib::CKKS::EncoderConfiguration& conf) {
 	if (conf.blockSize * conf.blockSize != conf.numSlots) {
@@ -91,7 +91,7 @@ void create_cpu_context() {
 	constexpr uint32_t scale_mod_size	= 52;
 	constexpr uint32_t first_mod		= 56;
 	constexpr uint32_t num_large_digits = 3;
-	constexpr uint32_t depth			= 23;
+	constexpr uint32_t depth			= 25;
 
 	const uint32_t ring_dim	 = 1 << ringDim;
 	const uint32_t num_slots = 1 << 14;

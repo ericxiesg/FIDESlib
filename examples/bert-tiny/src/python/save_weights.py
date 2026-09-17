@@ -17,7 +17,7 @@ output_dir = "../../weights/weights-bert-tiny-sst2"
 os.makedirs(output_dir, exist_ok=True)
 
 # Load SST-2 dataset
-dataset = load_dataset("glue", "sst2", split="validation")
+dataset = load_dataset("nyu-mll/glue", "sst2", split="validation")
 df = dataset.to_pandas()
 df.to_csv(output_dir + "/sst2_validation.csv", index=False)
 

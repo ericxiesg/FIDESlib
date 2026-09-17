@@ -1,3 +1,4 @@
+#include "trace_probe.h"
 #include "Transformer.cuh"
 
 namespace FIDESlib::CKKS {
@@ -15,6 +16,7 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
   int layerNo) {
 	constexpr bool PRINT  = false;
 	constexpr bool TIMING = false;
+	T_LAYER(layerNo);
 	std::chrono::time_point<std::chrono::system_clock> start_gpu, end_gpu;
 
 	if (TIMING) {
@@ -25,13 +27,21 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> K, Q, V;
 	std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> GPUResult_QKT, GPUResult_Sm_V, GPUResult_Output, GPUResult_Up, GPUResult_Down;
 
+	T_BEGIN();
 	dropMatrixLevel(tokens, conf.level_matmul);
+	T_OP("dropLevel_tokens", tokens, tokens, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(tokens, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "tokens", false);
 
+	T_BEGIN();
 	PCMM_GPU(tokens, weights_layer.Wk, conf.blockSize, K, precomp_gpu, weights_layer.bk, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_K", tokens, K, T_END_MS());
+	T_BEGIN();
 	PCMM_GPU(tokens, weights_layer.Wq, conf.blockSize, Q, precomp_gpu, weights_layer.bq, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_Q", tokens, Q, T_END_MS());
+	T_BEGIN();
 	PCMM_GPU(tokens, weights_layer.Wv, conf.blockSize, V, precomp_gpu, weights_layer.bv, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_V", tokens, V, T_END_MS());
 
 	if (TIMING) {
 		cudaDeviceSynchronize();
@@ -50,9 +60,15 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	////////////////////////////// Multi Head Attention /////////////////////////////////
 	std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> Sm_V, Sm_V2;
 
+	T_BEGIN();
 	MatrixBootstrap(Q, conf.numSlots, conf.prescale);
+	T_OP("Boot_Q", Q, Q, T_END_MS());
+	T_BEGIN();
 	MatrixBootstrap(K, conf.numSlots, conf.prescale);
+	T_OP("Boot_K", K, K, T_END_MS());
+	T_BEGIN();
 	MatrixBootstrap(V, conf.numSlots, conf.prescale);
+	T_OP("Boot_V", V, V, T_END_MS());
 
 	std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> QKT1, QKT2;
 
@@ -70,8 +86,12 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	auto K1_T = MatrixTranspose_GPU(std::move(K1), conf.blockSize, Tprecomp_gpu);
 	auto K2_T = MatrixTranspose_GPU(std::move(K2), conf.blockSize, Tprecomp_gpu);
 
+	T_BEGIN();
 	CCMM_GPU(Q1, K1_T, conf.blockSize, QKT1, precomp_gpu);
+	T_OP("CCMM_QKT1", Q1, QKT1, T_END_MS());
+	T_BEGIN();
 	CCMM_GPU(Q2, K2_T, conf.blockSize, QKT2, precomp_gpu);
+	T_OP("CCMM_QKT2", Q2, QKT2, T_END_MS());
 
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(QKT1, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "QKT1: ", false);
@@ -109,8 +129,11 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(QKT2, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "QKT2: ", false);
 
+	T_BEGIN();
 	MatrixBootstrap(QKT1, conf.numSlots, true);
+	T_OP("Boot_QKT1_pre_softmax", QKT1, QKT1, T_END_MS());
 
+	T_BEGIN();
 	EvalSoftmax_Matrix(QKT1,
 	  ct_tokens[0][0],
 	  keys_.secretKey,
@@ -123,13 +146,17 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	  conf.bStepAcc,
 	  conf.token_length,
 	  true);
+	T_OP("Softmax_QKT1", QKT1, QKT1, T_END_MS());
 
 	// MatrixBootstrap(QKT1, conf.numSlots, conf.prescale);
 
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(QKT1, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "QKT1: ", false);
 
+	T_BEGIN();
 	MatrixBootstrap(QKT2, conf.numSlots, true);
+	T_OP("Boot_QKT2_pre_softmax", QKT2, QKT2, T_END_MS());
+	T_BEGIN();
 	EvalSoftmax_Matrix(QKT2,
 	  ct_tokens[0][0],
 	  keys_.secretKey,
@@ -142,6 +169,7 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	  conf.bStepAcc,
 	  conf.token_length,
 	  true);
+	T_OP("Softmax_QKT2", QKT2, QKT2, T_END_MS());
 	// MatrixBootstrap(QKT2, conf.numSlots, conf.prescale);
 
 	if constexpr (PRINT)
@@ -172,8 +200,12 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	auto V2 = MatrixMask(V, masks.head_masks[1]);
 	MatrixRotate(V2, conf.blockSize / conf.num_heads);
 
+	T_BEGIN();
 	CCMM_GPU(QKT1, V1, conf.blockSize, Sm_V, precomp_gpu);
+	T_OP("CCMM_Sm_V1", QKT1, Sm_V, T_END_MS());
+	T_BEGIN();
 	CCMM_GPU(QKT2, V2, conf.blockSize, Sm_V2, precomp_gpu);
+	T_OP("CCMM_Sm_V2", QKT2, Sm_V2, T_END_MS());
 
 	Plaintext mask(cc);
 	mask.copy(masks.head_masks[0]);
@@ -208,7 +240,9 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	V.clear();
 	QKT1.clear();
 	QKT2.clear();
+	T_BEGIN();
 	MatrixBootstrap(Sm_V, conf.numSlots, true);
+	T_OP("Boot_Sm_V", Sm_V, Sm_V, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(Sm_V, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "Sm_V: ", false);
 
@@ -220,7 +254,9 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	}
 	// Output CCMM
 	dropMatrixLevel(Sm_V, conf.level_matmul);
+	T_BEGIN();
 	PCMM_GPU(Sm_V, weights_layer.Wo, conf.blockSize, GPUResult_Output, precomp_gpu, weights_layer.bo, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_Output", Sm_V, GPUResult_Output, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Output, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "Result_output: ", false);
 
@@ -231,14 +267,19 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 		start_gpu = std::chrono::high_resolution_clock::now();
 	}
 	// Layer Norm
+	T_BEGIN();
 	GPUResult_Output = MatrixAdd(GPUResult_Output, tokens);
+	T_OP("Residual_Add1", GPUResult_Output, GPUResult_Output, T_END_MS());
 	tokens.clear();
 
+	T_BEGIN();
 	MatrixBootstrap(GPUResult_Output, conf.numSlots, false);
+	T_OP("Boot_Residual1", GPUResult_Output, GPUResult_Output, T_END_MS());
 
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Output, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "Result_output: ", false);
 
+	T_BEGIN();
 	EvalLayerNorm_Matrix(GPUResult_Output,
 	  ct_tokens[0][0],
 	  keys_.secretKey,
@@ -250,7 +291,10 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	  conf.blockSize,
 	  conf.bStepAcc,
 	  true);
+	T_OP("LayerNorm1", GPUResult_Output, GPUResult_Output, T_END_MS());
+	T_BEGIN();
 	MatrixBootstrap(GPUResult_Output, conf.numSlots, false);
+	T_OP("Boot_LN1", GPUResult_Output, GPUResult_Output, T_END_MS());
 	if constexpr (PRINT)
 		std::cout << "# ------- bts ------- " << std::endl;
 
@@ -265,7 +309,9 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	}
 	// Up PCMM
 	dropMatrixLevel(GPUResult_Output, conf.level_matmul);
+	T_BEGIN();
 	PCMM_GPU(GPUResult_Output, weights_layer.Wu, conf.blockSize, GPUResult_Up, precomp_gpu, weights_layer.bu, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_Up", GPUResult_Output, GPUResult_Up, T_END_MS());
 
 	if (TIMING) {
 		cudaDeviceSynchronize();
@@ -280,8 +326,12 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	// dropMatrixLevel(GPUResult_Up, conf.level_matmul);
 
 	// ReLU
+	T_BEGIN();
 	MatrixBootstrap(GPUResult_Up, conf.numSlots);
+	T_OP("Boot_pre_GELU", GPUResult_Up, GPUResult_Up, T_END_MS());
+	T_BEGIN();
 	EvalGelu_Matrix(GPUResult_Up, conf.numSlots);
+	T_OP("GELU", GPUResult_Up, GPUResult_Up, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Up, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "RELU: ", false);
 
@@ -294,7 +344,9 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	// Down PCMM
 	// MatrixBootstrap(GPUResult_Up, conf.numSlots);
 	dropMatrixLevel(GPUResult_Up, conf.level_matmul);
+	T_BEGIN();
 	PCMM_GPU(GPUResult_Up, weights_layer.Wd, conf.blockSize, GPUResult_Down, precomp_gpu, weights_layer.bd, masks.row_masks[conf.token_length]);
+	T_OP("PCMM_Down", GPUResult_Up, GPUResult_Down, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Down, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "Result_Down: ", false);
 	if constexpr (PRINT)
@@ -307,12 +359,17 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 		start_gpu = std::chrono::high_resolution_clock::now();
 	}
 	// Layer Norm
+	T_BEGIN();
 	GPUResult_Down = MatrixAdd(GPUResult_Down, GPUResult_Output);
+	T_OP("Residual_Add2", GPUResult_Down, GPUResult_Down, T_END_MS());
 
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Down, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "LN input: ", false);
 
+	T_BEGIN();
 	MatrixBootstrap(GPUResult_Down, conf.numSlots, false);
+	T_OP("Boot_pre_LN2", GPUResult_Down, GPUResult_Down, T_END_MS());
+	T_BEGIN();
 	EvalLayerNorm_Matrix(GPUResult_Down,
 	  ct_tokens[0][0],
 	  keys_.secretKey,
@@ -324,10 +381,13 @@ std::vector<std::vector<FIDESlib::CKKS::Ciphertext>> encoder(PtWeights_GPU& weig
 	  conf.blockSize,
 	  conf.bStepAcc,
 	  true);
+	T_OP("LayerNorm2", GPUResult_Down, GPUResult_Down, T_END_MS());
 
 	if constexpr (PRINT)
 		std::cout << "# ------- bts ------- " << std::endl;
+	T_BEGIN();
 	MatrixBootstrap(GPUResult_Down, conf.numSlots);
+	T_OP("Boot_LN2_final", GPUResult_Down, GPUResult_Down, T_END_MS());
 	if constexpr (PRINT)
 		printMatrix(decryptGPUMatrix(GPUResult_Down, keys_.secretKey, ct_tokens, conf.numSlots, conf.blockSize), 2, 2, "LN: ", false);
 
@@ -430,9 +490,11 @@ void process_pretokenized_samples(const std::string& pretokenized_dir,
 	const size_t warmup_samples = (samples.size() < 3) ? samples.size() : 3;
 	const size_t max_samples	  = (samples.size() < 6) ? samples.size() : 6;
 	std::cout << "Warmup samples: " << warmup_samples << " (not measured)" << std::endl;
+	T_OPEN("bert_tiny_trace.csv");
 	for (size_t si = 0; si < max_samples; ++si) {
 		const auto& sample = samples[si];
 		const bool is_warmup = si < warmup_samples;
+		T_SAMPLE(si);
 		try {
 			// Validate token length
 			if (sample.token_length <= 0 || sample.token_length > 128) {
@@ -517,6 +579,7 @@ void process_pretokenized_samples(const std::string& pretokenized_dir,
 		}
 	}
 
+	T_CLOSE();
 	std::cout << "\n========================================\n";
 	std::cout << "Final Accuracy: " << correct_counter << "/" << total_counter << std::endl;
 	{

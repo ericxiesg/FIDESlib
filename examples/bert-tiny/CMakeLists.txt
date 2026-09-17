@@ -15,7 +15,7 @@ if (NOT EXISTS "${CUDA_PATH}")
     message(FATAL_ERROR "CUDA not found at ${CUDA_PATH}. Please install CUDA.")
 endif ()
 
-set(CMAKE_CUDA_ARCHITECTURES "80-real;86-real;89-real;90-real;90-virtual;100-real;120-real")
+set(CMAKE_CUDA_ARCHITECTURES "70-real")
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS ON)
@@ -25,7 +25,7 @@ project(llm)
 
 ############### 2. PATH DEFINITIONS ###############
 
-set(MY_OPENFHE_ROOT "../../deps/openfhe-install")
+set(MY_OPENFHE_ROOT "/home/zhiyuan/workspace/THOR-FIDE/openfhe-install")
 set(MY_OPENFHE_INC "${MY_OPENFHE_ROOT}/include/openfhe")
 set(MY_OPENFHE_LIB "${MY_OPENFHE_ROOT}/lib")
 
