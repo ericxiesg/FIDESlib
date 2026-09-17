@@ -140,8 +140,14 @@ def make_engine(args, geometry):
                 geometry, depth=args.depth, bootstrap_level=level,
                 extra_rotation_keys=args.extra_rotation_keys,
                 refresh_after_dense=args.refresh_after_dense).basis
+        # The noise model off by default - the clear engine's job is to prove the schedule and the
+        # algebra, and exact arithmetic is what makes a failure there unambiguous. Switched on, it
+        # carries the *device's* bootstrap error, which is what turns a 19-minute GPU run that comes
+        # back at 7.5e17 into a five-minute laptop run that comes back at 7.5e17.
         return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
-                           strict=not args.lenient)
+                           strict=not args.lenient, noise_model=args.noise_model,
+                           scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
+                           bootstrap_precision_bits=args.bootstrap_precision_bits)
 
     import pyfideslib
 
@@ -951,6 +957,16 @@ def build_parser():
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "
                              "which stage a divergence comes from")
+    engine.add_argument("--noise-model", action="store_true",
+                        help="give the clear engine the device's bootstrap error instead of exact "
+                             "arithmetic. The error a bootstrap leaves is set by q0/Delta and not by "
+                             "the value it is handed, so it is the same absolute size whatever it "
+                             "refreshes - which is why it destroys the softmax denominator and "
+                             "nothing else. Ignored by --engine fideslib, which has the real thing")
+    engine.add_argument("--bootstrap-precision-bits", type=int, default=11,
+                        help="bits of q0/Delta the bootstrap reproduces, for --noise-model. The "
+                             "default is the device's measured floor (0.015 at Delta=2^50, i.e. "
+                             "0.015/32 = 2^-11), not the 22 the clear engine assumes on its own")
     engine.add_argument("--output-scale", type=float, default=ACTIVATION_SCALE,
                         help="the amplitude every activation ciphertext carries relative to the real "
                              "value; THOR's final doubling is never cancelled, so this is 2. It is "

@@ -224,7 +224,7 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     #:   5    -12.01     3.37e-3     0.490      7      10
     #:   6    -12.01     2.59e-3     0.488      7      10
     #:   7    -11.26     2.93e-3     0.492      7      10
-    #:   8     -4.51     5.43e-5     0.442     10      10
+    #:   8    -23.25     6.02e-3     0.495      6      10   (wide; see the note in the table)
     #:   9     -8.51     2.06e-4     0.447      9      11
     #:  10    -15.26     5.11e-3     0.466      6      11
     #:  11    -14.01     3.09e-3     0.491      7      11
@@ -247,9 +247,10 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     #: measured to be most accurate (20.3 bits at a quarter, 16.3 at a half), so `he_inv`'s own
     #: refresh lands on that peak rather than below it.
     #:
-    #: Layer 8 is the one that cannot move: its smallest and largest denominators differ by 1.2e-4
-    #: whatever the centre, so it needs ten iterations wherever it sits. That is one more than the
-    #: nine the schedule has today, and two fewer than leaving the centre alone would cost.
+    #: Layer 8 cannot be fixed by its centre - its smallest and largest denominators differ by 1.2e-4
+    #: whatever the centre - so it moves to the wide polynomial instead, which compresses the spread
+    #: to its square root. That takes it from ten iterations to six and from the tightest bootstrap
+    #: margin in the network to the loosest.
     #:
     #: **Provenance.** 64 of MRPC's 408 validation rows - what this machine has cached. `target=0.5`
     #: leaves the upper bound a factor of two, and flooring `inv_epsilon` to a power of two leaves
@@ -264,7 +265,19 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
         5: dict(NARROW, shift=-12.0112, inv_epsilon=2 ** -9),
         6: dict(NARROW, shift=-12.0112, inv_epsilon=2 ** -9),
         7: dict(NARROW, shift=-11.2612, inv_epsilon=2 ** -9),
-        8: dict(NARROW, shift=-4.5112, inv_epsilon=2 ** -15),
+        # wide, like layer 2, and for a reason worth stating: layer 8's smallest and largest
+        # denominators differ by 1.2e-4 on the narrow fit whatever the centre, which is the
+        # widest spread in the network. `he_exp2` has half the slope, so over the same scores
+        # it produces the *square root* of that spread - 1.2e-2 - and both the iteration count
+        # and the bootstrap's margin are priced on the spread. Measured under the device's own
+        # bootstrap error at sb=59, layer 8, against the plaintext softmax:
+        #
+        #     narrow:  0.0022 exact -> 0.0342 with noise   (the noise dominates)
+        #     wide:    0.0070 exact -> 0.0070 with noise   (the noise is invisible)
+        #
+        # so it is three times *worse* in exact arithmetic and five times *better* on the
+        # device, which is the arithmetic that matters. Ten Goldschmidt iterations become six.
+        8: dict(WIDE, shift=-23.25, inv_epsilon=2 ** -8),
         9: dict(NARROW, shift=-8.5112, inv_epsilon=2 ** -13),
         10: dict(NARROW, shift=-15.2612, inv_epsilon=2 ** -8),
         11: dict(NARROW, shift=-14.0112, inv_epsilon=2 ** -9),

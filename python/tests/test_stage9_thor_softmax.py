@@ -226,22 +226,27 @@ def test_the_layer_table_is_the_one_calibrate_produces():
     internally consistent and that nobody has half-edited the table.
     """
     assert sorted(Softmax.LAYERS) == list(range(12))
+    # Layer 2 is wide because its scores are twice as wide and the narrow fit overflows on them.
+    # Layer 8 is wide by choice: the narrow fit handles its range, but `he_exp2`'s half slope
+    # compresses its denominator spread to the square root, and that spread is what both the
+    # iteration count and the bootstrap's margin are priced on.
+    wide_layers = {2, 8}
     for index, row in Softmax.LAYERS.items():
-        base = Softmax.WIDE if index == 2 else Softmax.NARROW
-        assert (row["max_x"] >= 30) == (index == 2), f"layer {index}: wrong polynomial"
+        base = Softmax.WIDE if index in wide_layers else Softmax.NARROW
+        assert (row["max_x"] >= 30) == (index in wide_layers), f"layer {index}: wrong polynomial"
         assert row["l"] == base["l"] and row["n"] == base["n"], f"layer {index}: temperature moved"
         assert row["shift"] < (row["min_x"] + row["max_x"]) / 2, (
             f"layer {index}: centre {row['shift']} is not below the midpoint, so it lifts nothing")
-    # The level cost is the reason the table exists, so it is the thing to pin. Ten is layer 8,
-    # whose smallest and largest denominators differ by 1.2e-4 whatever the centre; the rest sit at
-    # five to nine. Leaving the centres at THOR's midpoint costs 123 for the same twelve layers -
+    # The level cost is the reason the table exists, so it is the thing to pin. Nine is layer 9; the
+    # rest sit at five to seven, layer 8 included now that it takes the wide fit. Leaving the centres
+    # at THOR's midpoint costs 123 for the same twelve layers -
     # and that is with `inv_epsilon` set honestly, which is where this started: layer 8's measured
     # minimum floors to 2^-15, *below* NARROW's 2^-14, so the untuned table was not merely expensive
     # but wrong, and `he_inv` saturates rather than failing when it is.
     cost = [DivisionMixin.goldschmidt_iterations(row["inv_epsilon"], Softmax.internal_alpha / 10)
             for row in Softmax.LAYERS.values()]
-    assert max(cost) <= 10, f"a layer wants {max(cost)} Goldschmidt iterations, i.e. that many levels"
-    assert sum(cost) == 86, f"the table costs {sum(cost)} levels across the twelve layers, not 86"
+    assert max(cost) <= 9, f"a layer wants {max(cost)} Goldschmidt iterations, i.e. that many levels"
+    assert sum(cost) == 82, f"the table costs {sum(cost)} levels across the twelve layers, not 82"
 
 
 def test_softmax_is_a_distribution_on_a_peaked_input(mask_families):
