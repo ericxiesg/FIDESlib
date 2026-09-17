@@ -11,6 +11,8 @@ Three layers of checking, cheapest first:
 Layer 3 is the slow one, so it uses ``thorfhe.SMALL``: 4096 slots, still 128 tokens, and the same
 ``pack != n_slot`` structure THOR has.
 """
+import inspect
+
 import numpy as np
 import pytest
 
@@ -44,28 +46,33 @@ def run_clear(geometry, x, w, b, depth=DEPTH, layer_index=0):
 
 
 # ---------------------------------------------------------------- 1. the packing
-def test_the_feed_forward_carrier_is_the_amplitude_the_layer_is_entered_at():
-    """`FeedForwardStages.carrier` and `ACTIVATION_SCALE` are two spellings of one number.
+def test_every_non_linearity_is_told_the_same_amplitude():
+    """The three non-linearities each divide the carrier out of their argument, and it is one number.
 
-    They are declared apart, and a non-linearity is where that costs. Every linear stage carries the
-    amplitude through untouched, so it can be wrong everywhere and cancel; GELU cannot, which is why
-    `stage_13` divides the tanh's argument by `carrier` and why `test_stage_13_is_gelu_in_place`
-    enters at `CARRIER * x` and expects `CARRIER * gelu(x @ w1.T)`. That test uses the same constant
-    on both sides, so it passes at any value of it - what it cannot see is the layer being *entered*
-    at a different amplitude than the one GELU divides out, which is `--output-scale`, which is
-    `ACTIVATION_SCALE`. Then GELU computes a different function and nothing says so.
+    Everything else in the layer is linear and carries the amplitude through untouched, so getting it
+    wrong cancels - except here, where it silently computes a different function of a different input.
+    The network has exactly three such places and this enumerates them:
 
-    The softmax is the same hazard and it did bite: its carrier is folded into a plaintext constant
-    rather than passed as a parameter, so nothing had to agree with anything, and `SOFTMAX_SCALES`
-    was wrong by four for a day and by two for layer 2 - see
-    `test_stage_06_hands_the_softmax_berts_own_score`.
+    * GELU, which takes `carrier` as a parameter (`thorfhe.feedforward`);
+    * `tanh` in the pooler, where it is folded into the weight, because the halved bias means there is
+      no single factor left to undo afterwards (`encode_weight_pooler`);
+    * the softmax, where it rides in the plaintext `SOFTMAX_SCALES` - and where, precisely because
+      nothing had to agree with anything, the constant was wrong by four for every layer and then by
+      two again for layer 2.
+
+    They were three separate declarations of 2.0 until `ACTIVATION_SCALE` became one.
     """
+    from thorfhe.encoding import encode_weight_pooler
     from thorfhe.feedforward import FeedForwardStages
+    from thorfhe.layer import DEFAULT_SOFTMAX_SCALE, SOFTMAX_SCALES
 
-    assert FeedForwardStages.carrier == ACTIVATION_SCALE, (
-        f"the feed-forward divides GELU's argument by {FeedForwardStages.carrier} while the layer is "
-        f"entered at {ACTIVATION_SCALE}; GELU is not linear, so it would compute a different "
-        f"function and every linear stage around it would carry the result along quite happily")
+    assert FeedForwardStages.carrier == ACTIVATION_SCALE, "GELU divides out a different amplitude"
+    assert (inspect.signature(encode_weight_pooler).parameters["carrier"].default
+            == ACTIVATION_SCALE), "the pooler is encoded for a different amplitude"
+    assert SOFTMAX_SCALES == {}, "a layer's softmax carries its own scale"
+    assert 2 * ACTIVATION_SCALE ** 2 * DEFAULT_SOFTMAX_SCALE == 1 / np.sqrt(THOR_BERT.n_out), (
+        "the softmax scale no longer matches the amplitude it is derived from - `he_softmax` sees "
+        "`2 * s**2 * (q.k) * scale` and BERT's score is `(q.k) / sqrt(head_dim)`")
 
 
 @pytest.mark.parametrize("geometry", [SMALL, THOR_BERT], ids=["small", "bert"])

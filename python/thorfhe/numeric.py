@@ -371,6 +371,17 @@ GELU_OUTER = np.array([
 ])[::-1].copy() * 0.5
 
 #: GELU's argument is carried divided by this, so the composite's own range is about [-1, 1].
+#: THOR's invariant: every activation ciphertext carries *twice* the value it represents. The weight
+#: encoders halve, the bias is added before the ``y + conj(y)`` that doubles, and LayerNorm's
+#: uncancelled doubling hands the next layer the same footing - so a layer is entered on it too.
+#:
+#: It lives here, with :data:`GELU_SCALE`, because three places need it and they must not drift: the
+#: amplitude a layer is entered at (``bench --output-scale``), the one the feed-forward divides out of
+#: GELU's argument, and the one the pooler divides out of ``tanh``'s. Every *linear* stage carries the
+#: factor through untouched, so a disagreement cancels everywhere except at a non-linearity - where it
+#: silently computes a different function. That has already cost this port two bugs in ``SOFTMAX_SCALES``.
+ACTIVATION_SCALE = 2.0
+
 GELU_SCALE = 64
 
 

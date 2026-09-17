@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from .geometry import Geometry
+from .numeric import ACTIVATION_SCALE
 
 
 def lower_diagonal_entry(matrix: np.ndarray, diagonal: int, index: int):
@@ -239,16 +240,27 @@ def encode_bias(g: Geometry, b: np.ndarray, scale: float = 1.0) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- pooler and classifier
-def encode_weight_pooler(g: Geometry, w: np.ndarray) -> np.ndarray:
+def encode_weight_pooler(g: Geometry, w: np.ndarray,
+                         carrier: float = ACTIVATION_SCALE) -> np.ndarray:
     """THOR ``model_encoder.encode_w_pooler``: a (features, features) weight for the CLS token only.
 
     The pooler multiplies a single token, broadcast over all of them, so there is no rotated-copy
     dimension over ``pack`` - the pack offset is folded into the *input* index instead. Returns a
     ``(diag_count, n_in // (2 * pack))`` object array, i.e. ``(6, 4)``.
+
+    ``carrier`` is the amplitude the input arrives at, and it is divided out here rather than after the
+    product because it cannot be divided out afterwards: ``encode_bias_pooler`` halves the bias so the
+    closing fold gives ``+b``, which leaves ``stage_17_pooler`` holding ``carrier * (y @ w) + b`` - the
+    linear term scaled and the bias not, which is no uniform factor at all. And ``tanh`` is the next
+    thing that happens to it.
+
+    The default is the amplitude a layer leaves its output at, which is what the pooler is fed in the
+    network. Measured on the clear engine, a pooler encoded for amplitude 1 and handed the 2 a
+    LayerNorm actually produces is off by 0.154 on a function whose range is [-1, 1].
     """
     if w.shape != (g.features, g.features):
         raise ValueError(f"pooler weight must be ({g.features}, {g.features}), got {w.shape}")
-    diag_blocks = to_diagonal_blocks(w, (g.n_out, g.n_in))
+    diag_blocks = to_diagonal_blocks(w / carrier, (g.n_out, g.n_in))
     diag_count = diag_blocks.shape[0]
     columns = g.n_in_complex // g.pack
 

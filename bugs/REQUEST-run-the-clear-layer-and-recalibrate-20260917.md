@@ -174,3 +174,41 @@ stage 07 会是 2.2，早就顶在最前面了。
 所以 layer 2 的 stage 07 bootstrap 站点幅度也翻倍。22 站那张表是 layer 0 量的，
 layer 2 没单独量过——重跑站点幅度的时候把 layer 2 也带上。
 
+
+---
+
+## 8. 第五个：pooler 的 tanh 也没算 carrier（已改，但它还没接上）
+
+softmax 那个错犯了两次之后，我把三个非线性都查了一遍。BERT 里只有三个：
+
+| 非线性 | carrier 怎么给的 | 结论 |
+|---|---|---|
+| GELU | 作为参数传给 `gelu(x, carrier=...)` | **对**。非线性被明确告知了振幅 |
+| softmax | 埋在明文常量 `SOFTMAX_SCALES` 里 | 错了两次（4 倍、layer 2 再 2 倍） |
+| pooler 的 tanh | **没给** | **错**，但目前没咬到 |
+
+`stage_17_pooler` 在**进层振幅 1** 下才对。实测（`ClearEngine`，同一组权重）：
+
+```
+进层振幅 1.0:  max |pooled - tanh(w@y + b)| = 0.0020
+进层振幅 2.0:  max |pooled - tanh(w@y + b)| = 0.1543
+```
+
+而 LayerNorm 的输出就是 2 倍——**pooler 在网络里拿到的就是 2.0**。
+0.154 是一个值域在 [-1,1] 的函数上的误差，不是舍入。
+
+**现在没咬到**，是因为 `run_encrypted` 跑完 encoder layers 就解密，pooler 和 classifier
+在明文里做（它的 docstring 写着 "decrypt, finish in plaintext"）。一旦把 pooler 接进密文链，
+logits 就是错的。
+
+修法和别处一样：**把 carrier 折进权重**，不能在乘完之后再除——`encode_bias_pooler`
+把 bias 减半以便闭合的 fold 给出 `+b`，所以 stage 17 手里是 `carrier * (y@w) + b`，
+线性项被缩放而 bias 没有，**根本没有一个统一的因子可以除掉**。
+`encode_weight_pooler(g, w, carrier=ACTIVATION_SCALE)`，默认值就是网络实际交给它的振幅。
+
+顺带把 `ACTIVATION_SCALE` 收成**一个定义**（在 `numeric.py`，和 `GELU_SCALE` 放一起）。
+在这之前它是三处独立的 `2.0`：`layer.ACTIVATION_SCALE`、`FeedForwardStages.carrier`、
+以及 pooler 里隐含的那个。线性 stage 会把振幅原样带过去，所以三者不一致只在非线性处显形。
+
+新测试 `test_every_non_linearity_is_told_the_same_amplitude` 把这三处列出来逐个断言。
+

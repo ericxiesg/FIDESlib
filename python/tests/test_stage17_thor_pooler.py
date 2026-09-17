@@ -15,7 +15,7 @@ import pytest
 
 from thorfhe import (THOR_FEEDFORWARD, ClearEngine, block_diagonal_masks, encode_bias_classifier,
                      encode_bias_pooler, encode_weight_classifier, encode_weight_pooler, pooler_mask)
-from thorfhe.numeric import POOLER_INNER, POOLER_OUTER
+from thorfhe.numeric import ACTIVATION_SCALE, POOLER_INNER, POOLER_OUTER
 from thorfhe.pooler import PoolerStages
 
 F = THOR_FEEDFORWARD
@@ -52,7 +52,10 @@ def head():
         for group in range(F.pack):
             for token in range(F.dim):
                 for block in range(F.out_blocks):
-                    msg[F.slot(group, token, block)] = y[token, feature_of(ct, group, token, block)]
+                    # entered at the amplitude a LayerNorm leaves its output at, which is what the
+                    # pooler is handed in the network and what `encode_weight_pooler` divides out
+                    msg[F.slot(group, token, block)] = ACTIVATION_SCALE * y[
+                        token, feature_of(ct, group, token, block)]
         x.append(engine.encrypt(msg))
 
     merged = [stages.add(x[i], stages.multiply_1j(x[i + 4])) for i in range(4)]
@@ -115,6 +118,54 @@ def test_stage_17_is_tanh_of_the_pooler_dense(head):
             error = max(error, abs(slots.real[F.n_slot * token + block] - want[F.dim * block + token]))
     assert error < 5e-3                       # the degree-15 composite's own accuracy
     assert head["pooled"][0].level == BOOTSTRAP_LEVEL   # it closes with a bootstrap
+
+
+@pytest.mark.parametrize("carrier", [1.0, ACTIVATION_SCALE], ids=["mismatched", "matched"])
+def test_the_pooler_has_to_be_encoded_for_the_amplitude_it_is_handed(carrier):
+    """`tanh` is a non-linearity, so the carrier has to be divided out *before* it, in the weight.
+
+    It cannot be divided out afterwards. `encode_bias_pooler` halves the bias so the closing fold
+    gives `+b`, which leaves the stage holding `carrier * (y @ w) + b` - the linear term scaled and
+    the bias not, so there is no single factor to undo. The only place the amplitude can go is the
+    weight, which is where `encode_layer` puts every other scale in this port.
+
+    Encoded for the wrong amplitude the chain still runs and still returns something in [-1, 1]; it is
+    simply the tanh of a different number. That is the failure mode `SOFTMAX_SCALES` had twice, and
+    the pooler is the third non-linearity in the network, so it gets the same test rather than the
+    same surprise.
+    """
+    rng = np.random.default_rng(21)
+    y = rng.normal(size=(F.dim, F.features)) * 0.1
+    w = rng.normal(size=(F.features, F.features)) * 0.02
+    b = rng.normal(size=(F.features,)) * 0.05
+
+    engine = ClearEngine(F, depth=DEPTH, bootstrap_level=BOOTSTRAP_LEVEL)
+    low, high = block_diagonal_masks(F)
+    stages = PoolerStages(engine, F, masks=low, complement_masks=high)
+    x = []
+    for ct in range(2 * F.n_output_ciphertexts // 2):
+        msg = np.zeros(F.slot_count)
+        for group in range(F.pack):
+            for token in range(F.dim):
+                for block in range(F.out_blocks):
+                    msg[F.slot(group, token, block)] = ACTIVATION_SCALE * y[
+                        token, feature_of(ct, group, token, block)]
+        x.append(engine.encrypt(msg))
+
+    pooled = stages.stage_17_pooler(x, encode_weight_pooler(F, w, carrier=carrier),
+                                    encode_bias_pooler(F, b))
+    slots = np.asarray(engine.decrypt(pooled[0]), dtype=complex).real
+    want = np.tanh(w @ y[0] + b)
+    error = max(abs(slots[F.n_slot * token + block] - want[F.dim * block + token])
+                for block in range(F.out_blocks) for token in range(F.dim))
+
+    if carrier == ACTIVATION_SCALE:
+        assert error < 5e-3, f"encoded for the amplitude it was handed and still off by {error:.3g}"
+    else:
+        # 0.154 measured: the tanh of twice the right argument, which is not a scaling of the answer
+        assert error > 0.05, (
+            f"encoded for amplitude {carrier} but handed {ACTIVATION_SCALE}, and only off by "
+            f"{error:.3g} - then this test is not measuring what it claims to")
 
 
 def test_stage_18_logits(head):

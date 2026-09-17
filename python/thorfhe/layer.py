@@ -23,15 +23,10 @@ from .encoding import (FF_SLOT_INDICES, block_diagonal_masks, encode_bias, encod
 from .feedforward import FeedForwardStages
 from .geometry import THOR_ATTENTION_DENSE, THOR_BERT, THOR_FEEDFORWARD, Geometry
 from .layernorm import LayerNormStages, statistic_mask
-from .numeric import GELU_SCALE
+from .numeric import ACTIVATION_SCALE, GELU_SCALE
 from .softmax import Softmax
 
-#: THOR's invariant: every activation ciphertext carries *twice* the value it represents. The weight
-#: encoders halve, the bias is added before the ``y + conj(y)`` that doubles, and LayerNorm's
-#: uncancelled doubling hands the next layer the same footing - so layer 0 has to be *entered* on it,
-#: which is what ``bench --output-scale`` defaults to. It is a constant rather than a literal 2.0
-#: because two separate quantities are derived from it, and they have to move together.
-ACTIVATION_SCALE = 2.0
+# `ACTIVATION_SCALE` is defined in `numeric`, beside the other two scales it has to agree with.
 
 #: The key scaling folded into the key projection. One requirement fixes it: what reaches
 #: ``he_softmax`` must be the BERT attention score itself, because a softmax is not scale-invariant

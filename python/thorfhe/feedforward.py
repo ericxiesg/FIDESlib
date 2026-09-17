@@ -15,7 +15,7 @@ import numpy as np
 
 from .encoding import block_diagonal_masks
 from .geometry import FEEDFORWARD_STRIDE, FEEDFORWARD_WINDOW, Geometry
-from .numeric import GeluMixin, NumericMixin
+from .numeric import ACTIVATION_SCALE, GeluMixin, NumericMixin
 from .stages import Stages
 
 
@@ -34,7 +34,7 @@ class FeedForwardStages(GeluMixin, NumericMixin, Stages):
 
     #: How much a ciphertext here overstates the value it represents. THOR runs the whole network on
     #: a doubled footing (see ``docs/thor_port.md``); set it to 1 to run these stages standalone.
-    carrier = 2.0
+    carrier = ACTIVATION_SCALE
 
     def prepare_feedforward_input(self, x):
         """Pack the LayerNorm output into ``pack * n`` rotated copies with both windows filled.
