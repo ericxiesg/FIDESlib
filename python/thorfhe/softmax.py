@@ -153,7 +153,21 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     """
 
     #: softmax parameters per layer: THOR's he_softmax1, and he_softmax2 for layer 2.
-    NARROW = dict(min_x=-27.2493, max_x=21.72692, n=2, l=2, inv_epsilon=2 ** -11, output_alpha=0.01)
+    #:
+    #: `inv_epsilon` is ours rather than THOR's 2^-11, because it states where *this* pipeline's
+    #: denominator lands and that is not where THOR's does. Measured on the real checkpoint, layer 0,
+    #: over the rows the attention mask keeps: [1.0e-4, 1.9e-3] with a median of 3.3e-4, on a
+    #: 23-token input - shorter than anything in MRPC's validation set, whose minimum is 30 and
+    #: median 52, and the denominator grows with the token count. 2^-14 leaves a factor of two under
+    #: the shortest real sample.
+    #:
+    #: It costs one Goldschmidt iteration, which is one level, and the layer has exactly one to
+    #: spare at depth 37. 2^-15 would give three times the margin and cost two, which it does not
+    #: have. Below the bound Goldschmidt does not fail - it saturates and returns a plausible wrong
+    #: number - so this is checked rather than assumed: see `DivisionMixin._check_inversion_range`.
+    NARROW = dict(min_x=-27.2493, max_x=21.72692, n=2, l=2, inv_epsilon=2 ** -14, output_alpha=0.01)
+    #: Layer 2's own denominator has not been measured; 2^-18 is THOR's and is far below 2^-14, so it
+    #: is unlikely to bind, but it is untested here.
     WIDE = dict(min_x=-70.0, max_x=70.0, n=2, l=4, inv_epsilon=2 ** -18, output_alpha=0.01)
 
     #: How much the key projection's `softmax_scale` was divided by, so that stage 07 hands its

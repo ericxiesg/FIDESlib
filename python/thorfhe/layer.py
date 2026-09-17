@@ -202,6 +202,14 @@ class EncoderLayer:
         query token is padding"; the softmax denominator needs "this *key* position is padding", and
         that depends on the ciphertext index. Getting this wrong is quiet - the chain still runs, and
         the denominator simply sums the exponential over all 128 key positions.
+
+        The *query* side is masked as well, and that is not cosmetic. A padding query's row sums the
+        exponential over the real keys, which is a perfectly finite number with no meaning - and
+        `he_inv` then inverts it. On the real checkpoint those rows carry denominators up to 534
+        where a real row carries 2e-3, and the device reported an inverse denominator whose *median*
+        was 1.9e159: with 23 real tokens, 105 of the 128 rows are padding. Nothing downstream reads
+        them, but they pass through the bootstraps, where a magnitude like that is not a rounding
+        problem. Both conditions ride the same plaintext multiply, so the query side is free.
         """
         g = self.g_qkv
         count = 2 * g.n_output_ciphertexts
@@ -210,7 +218,8 @@ class EncoderLayer:
 
         group = np.arange(g.slot_count) // g.group_size
         tau = (np.arange(g.slot_count) % g.group_size) // g.n_slot
-        return [self.used_slots * (((ct * g.pack + group + tau) % g.dim) < tokens)
+        query_is_real = tau < tokens
+        return [self.used_slots * query_is_real * (((ct * g.pack + group + tau) % g.dim) < tokens)
                 for ct in range(count)]
 
     def forward(self, x, weights: LayerWeights, attention_mask, layer_index: int, *,
