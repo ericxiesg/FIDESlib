@@ -142,3 +142,35 @@ stage 07 会是 2.2，早就顶在最前面了。
 正好落在你测出来的精度峰值（25% 处 20.3 bit）上，所以这是往好处走的；
 但它是个新的站点位置，**重跑 22 站的时候留意一下**。
 
+
+---
+
+## 7. 第四个：layer 2 的 `softmax_scale` 也是错的（已改）
+
+`SOFTMAX_SCALES = {2: scale/2}`——"layer 2 keeps THOR's factor of two"。这条在我们的单位里是错的。
+
+两条多项式路径落在**同一个指数**上：`he_exp1` 配 `l=2` 和 `he_exp2` 配 `l=4`
+都给出 `exp(u)`（`thorfhe.softmax` 的模块 docstring 就是这么推的）。既然都要 `u`，
+把其中一条的 score 减半就是**把那一层的温度加倍**。
+
+真实 checkpoint，layer 2 的 wide 路径对 BERT 自己的 softmax，最大绝对误差：
+
+```
+喂 BERT 的 score        (scale 1/64)   中心 0.00     0.0029
+喂 BERT 的 score        (scale 1/64)   中心 -19.75   0.000524
+喂一半                  (scale 1/128)  中心 0.00     0.612     <- 温度错
+喂一半                  (scale 1/128)  中心 -19.75   0.613     <- 温度错
+喂两倍                  (scale 1/32)   中心 0.00     0.600     <- 温度错
+```
+
+**0.61**——和 4 倍 score 那个错（0.908）是同一个量级。已改成
+`SOFTMAX_SCALES = {}`，所有层都用 1/64。
+
+新测试 `test_the_wide_path_wants_the_same_score_the_narrow_one_does`：在合成的
+±32 score 上跑 wide + l=4，对真 softmax 比，实测 6.8e-3（均匀分布比真实分布难，
+真实 layer 2 是 2.9e-3 / 5.2e-4）。界设在 1e-2，是为了把它和"温度错"那两个数量级分开。
+
+**对你那边的影响**：layer 2 的 stage 06 输出**翻倍**（scale 从 1/128 变 1/64），
+所以 layer 2 的 stage 07 bootstrap 站点幅度也翻倍。22 站那张表是 layer 0 量的，
+layer 2 没单独量过——重跑站点幅度的时候把 layer 2 也带上。
+

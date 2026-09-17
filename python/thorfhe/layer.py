@@ -57,8 +57,15 @@ ACTIVATION_SCALE = 2.0
 #: ``[epsilon, 1]`` reaches 534 on MRPC's first validation row - reproducible in plaintext to four
 #: digits, which is what identified the factor.
 #:
-#: Layer 2 keeps THOR's factor of two, as it did before.
-SOFTMAX_SCALES = {2: 1 / 128}
+#: **Every layer gets the same scale, including layer 2.** THOR writes 1/512 for most layers and
+#: 1/1024 for layer 2, and this port carried that factor of two across as `{2: scale / 2}`. It does
+#: not belong here. The two polynomial paths land on the same exponent - `he_exp1` with `l = 2` and
+#: `he_exp2` with `l = 4` both give `exp(u)` for the `u` handed to `he_softmax`, which is what the
+#: module docstring of `thorfhe.softmax` derives - so both want BERT's score, and halving one of them
+#: is a doubling of that layer's temperature. Measured on the real checkpoint, layer 2's wide path
+#: against BERT's own softmax: 5.2e-4 handed the score, **0.61** handed half of it. THOR's constant
+#: must be paying for something else in THOR; in these units it is simply wrong.
+SOFTMAX_SCALES: dict[int, float] = {}
 DEFAULT_SOFTMAX_SCALE = 1 / 64
 
 

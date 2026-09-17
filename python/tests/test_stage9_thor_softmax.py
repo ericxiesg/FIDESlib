@@ -180,6 +180,42 @@ def test_a_padded_input_leaves_the_padding_rows_at_zero(mask_families):
     assert np.abs(real[:, :, :tokens] - want).max() < 5e-3
 
 
+def test_the_wide_path_wants_the_same_score_the_narrow_one_does(mask_families):
+    """`he_exp2` with `l = 4` has to reproduce softmax of the score it is handed, exactly as `he_exp1`
+    with `l = 2` does. That is what makes `SOFTMAX_SCALES` one constant rather than one per layer.
+
+    The two paths differ in every intermediate quantity - a looser fit over twice the range, half the
+    slope, an extra factor of 128, and one more squaring - and they are supposed to cancel to the same
+    exponent. `thorfhe.softmax`'s module docstring derives that they do; nothing checked it, and layer
+    2 carried THOR's `softmax_scale / 2` on the strength of the derivation not being trusted. In these
+    units that halves layer 2's score, which is a doubling of its temperature: measured against BERT's
+    own softmax on the real checkpoint, 5.2e-4 handed the score and 0.61 handed half of it.
+
+    A softmax that is wrong by 0.61 is wrong the way the four-times-too-large `softmax_scale` was, and
+    for the same reason - a constant nobody ran.
+    """
+    rng = np.random.default_rng(65)
+    scores = rng.uniform(-32, 32, (G.n_blocks, G.dim, G.dim))   # layer 2's own range, so `wide` holds
+    parameters = calibrate(scores, l=4, target=0.5)
+    assert parameters["max_x"] >= 30, "this input should have selected the wide polynomial"
+    assert parameters["l"] == 4, "the wide path takes one more squaring than the narrow one"
+
+    engine, stages = build(mask_families)
+    out = stages.he_softmax(encode_score_diagonals(engine, scores),
+                            [used_slots()] * 2 * G.n_output_ciphertexts, **parameters)
+    got = decode_broadcast_diagonals(engine, out)
+
+    assert np.abs(got.sum(axis=2) - 1.0).max() < parameters["output_alpha"]
+    error = float(np.abs(got - true_softmax(scores)).max())
+    # 6.8e-3 measured here. A uniform [-32, 32] is harsher than the real distribution - BERT's own
+    # layer 2 gives 2.9e-3 at THOR's centre and 5.2e-4 at the one `LAYERS` uses - and the wide fit is
+    # the loose one. The bound is set to separate *that* from a temperature error, which is two
+    # orders away: the same path handed half the score is off by 0.61.
+    assert error < 1e-2, (
+        f"the wide path is off by {error:.3g} on the score it was handed; if it wanted half or twice "
+        f"that score this is where it would say so, at around 0.6")
+
+
 def test_the_layer_table_is_the_one_calibrate_produces():
     """`Softmax.LAYERS` is measured output, so what it has to satisfy is its own contract.
 
@@ -409,4 +445,7 @@ def test_stage_06_hands_the_softmax_berts_own_score(mask_families):
     assert ratio == pytest.approx(1.0, rel=1e-9), (
         f"he_softmax would see {ratio:.4f} times BERT's score at head {head}, "
         f"({token}, {other}); softmax_scale {DEFAULT_SOFTMAX_SCALE} is off by that factor")
-    assert SOFTMAX_SCALES[2] == DEFAULT_SOFTMAX_SCALE / 2, "layer 2 keeps THOR's factor of two"
+    assert SOFTMAX_SCALES == {}, (
+        f"a layer has its own softmax scale ({SOFTMAX_SCALES}); both polynomial paths land on the "
+        f"same exponent, so every layer wants BERT's score and a per-layer factor is a temperature "
+        f"error - see test_the_wide_path_wants_the_same_score_the_narrow_one_does")
