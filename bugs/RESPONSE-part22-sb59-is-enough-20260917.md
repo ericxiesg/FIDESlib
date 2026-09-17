@@ -146,4 +146,38 @@ layer 8，sb=59，对真 softmax：
   你说得对，两边 MAE 不是同一个量。但它不是这次的病因，我先不动，
   免得和精度的改动混在一起。
 
+---
+
+## 7. LayerNorm 也一样，而且它现在是最紧的那个站点
+
+softmax 不是唯一求逆一个小量的地方。`he_layernorm` 把方差归一到 `[min_var/max_var, 1]`
+再对它开平方求逆，所以**同一个绝对误差地板同样适用**：
+
+```
+  variant            窗口下端    vs sb=50   vs sb=59
+  he_layernorm1     1.50e-02      1170%      0.01%
+  he_layernorm2     1.33e-03     11700%      0.12%
+  he_layernorm3     3.00e-04     52000%      0.52%
+```
+
+实测（误差打在**输入**上，因为 LayerNorm 自己不自举——stage 15 自举残差，stage 16 归一化）：
+
+```
+  variant            exact       sb=50       sb=59
+  he_layernorm1    3.96e-05      0.2177    4.54e-05
+  he_layernorm2    3.50e-04      0.1938    4.03e-04
+  he_layernorm3    9.69e-05      0.1095    8.12e-04
+```
+
+**sb=50 下 LayerNorm 也是坏的**（0.11–0.22 的绝对误差，输出是归一化的量）；
+sb=59 下三个 variant 都活，variant 3 比精确差 8 倍但绝对值只有 8e-4。
+
+**值得记一笔的是：layer 8 改 wide 之后，softmax 最紧的窗口是 6.0e-3，
+而 LayerNorm variant 3 是 3.0e-4——现在最紧的站点是 LayerNorm，不是 softmax。**
+下一轮如果还要挤精度，该看那里。
+
+新增 `tests/test_bootstrap_precision_floor.py`：两个测试，一个钉住"sb=59 下噪声看不见"
+（本机 5 秒），一个钉住"sb=50 下会发散"。后者断言的是 `not (device < 1.0)`——
+**只断言"精度变差"的测试在一条已经坏掉的流水线上会通过**，而这里的失败模式是发散不是失准。
+
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
