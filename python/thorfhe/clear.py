@@ -55,7 +55,8 @@ class ClearEngine:
 
     def __init__(self, geometry: Geometry, depth: int, strict: bool = True, bootstrap_level: int = 14,
                  noise_model: bool = False, scaling_bits: int = 50, first_mod_bits: int = 55,
-                 bootstrap_precision_bits: int = 22, seed: int = 0):
+                 bootstrap_precision_bits: int = 22, seed: int = 0,
+                 bootstrap_noise_only: bool = False):
         self.geometry = geometry
         self.slots = geometry.slot_count
         self.depth = depth
@@ -105,6 +106,7 @@ class ClearEngine:
         #: a measurement, not a constant: stage 07 bootstraps the doubled scores, and on the
         #: `peaked_input` test those reach 20.4 of 32 - 64% of the bound, with nothing saying so.
         self.bootstrap_message_margin = 1.0
+        self.bootstrap_noise_only = bootstrap_noise_only
         self._rng = np.random.default_rng(seed)
 
     # ---- noise ----
@@ -120,9 +122,22 @@ class ClearEngine:
     RESCALE_BITS_BELOW_SCALE = 42      # the rounding a rescale leaves behind
     KEYSWITCH_BITS_BELOW_SCALE = 40    # one rotation, conjugation or relinearisation
 
-    def _perturb(self, slots: np.ndarray, sigma: float) -> np.ndarray:
+    #: Model only the bootstrap's error and skip the rest. The others are real but negligible against
+    #: it, and they are the expensive ones: a key-switch is 2^-40 of the scale and a layer's 8138
+    #: rotations accumulate 8.2e-11, against a bootstrap error of 4.9e-04 at `q0/Delta = 32` - one
+    #: part in 5.9 million. Modelling them costs an allocation of two `slot_count` arrays per
+    #: operation, which is what puts a noise-modelled layer out of reach of a small machine while the
+    #: same layer runs in 36 seconds without it.
+    #:
+    #: Off by default, because the full model is the honest one where it fits. Turn it on to get a
+    #: whole layer under the device's bootstrap error on a machine that cannot hold the other.
+    bootstrap_noise_only = False
+
+    def _perturb(self, slots: np.ndarray, sigma: float, bootstrap: bool = False) -> np.ndarray:
         """Add complex Gaussian noise of scale ``sigma`` to every slot."""
         if not self.noise_model or sigma <= 0:
+            return slots
+        if self.bootstrap_noise_only and not bootstrap:
             return slots
         shape = slots.shape
         return slots + sigma * (self._rng.normal(0, 1, shape) + 1j * self._rng.normal(0, 1, shape))
@@ -373,8 +388,8 @@ class ClearEngine:
         # The error a bootstrap leaves is set by `message_bound`, not by the value: refreshing a
         # number much smaller than the bound costs most of its significant digits. That is invisible
         # in exact arithmetic and it is what `numeric._restore_magnitude` exists to avoid.
-        return ClearCiphertext(self._perturb(np.asarray(slots).copy(), self._bootstrap_sigma),
-                               level, 1)
+        return ClearCiphertext(self._perturb(np.asarray(slots).copy(), self._bootstrap_sigma,
+                                             bootstrap=True), level, 1)
 
     def relinearize(self, ct: ClearCiphertext) -> ClearCiphertext:
         """Fold the third component away. Exact in value; what it changes here is the degree."""

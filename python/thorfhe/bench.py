@@ -147,7 +147,8 @@ def make_engine(args, geometry):
         return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
                            strict=not args.lenient, noise_model=args.noise_model,
                            scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
-                           bootstrap_precision_bits=args.bootstrap_precision_bits)
+                           bootstrap_precision_bits=args.bootstrap_precision_bits,
+                           bootstrap_noise_only=args.bootstrap_noise_only)
 
     import pyfideslib
 
@@ -1005,6 +1006,11 @@ def build_parser():
                              "the value it is handed, so it is the same absolute size whatever it "
                              "refreshes - which is why it destroys the softmax denominator and "
                              "nothing else. Ignored by --engine fideslib, which has the real thing")
+    engine.add_argument("--bootstrap-noise-only", action="store_true",
+                        help="with --noise-model, model the bootstrap's error and skip the rest. A "
+                             "key-switch is 2^-40 of the scale and a layer's rotations accumulate "
+                             "8.2e-11 against the bootstrap's 4.9e-04, so this drops one part in 5.9 "
+                             "million and the allocation that makes a noise-modelled layer not fit")
     engine.add_argument("--bootstrap-precision-bits", type=int, default=11,
                         help="bits of q0/Delta the bootstrap reproduces, for --noise-model. The "
                              "default is the device's measured floor (0.015 at Delta=2^50, i.e. "

@@ -162,4 +162,31 @@ scores, and on the `peaked_input` test those reach 20.4 of 32 - **64% of the bou
 **所以第 3 节那两个数还是要的**，而且现在更要：`07a`–`07d` 一次就能说清楚
 分母到底是不是负的/是不是 0。
 
+---
+
+## 8. 请你那边跑一件不需要 GPU 的事：带 noise model 的整层
+
+现在 `ClearEngine` 能带着**设备自己的 bootstrap 误差**跑（`--noise-model`），也能 wrap 了。
+把它跑在整层上，就能在**不用 GPU 的情况下**复现（或排除）你那个 2.4e19：
+
+```
+python -m thorfhe.bench fhe --engine clear --layers 1 --limit 1   --lazy-weights --refresh-after-dense   --residual-scale 256 --refresh-scale 4 --score-refresh-scale 16   --noise-model --bootstrap-noise-only   --scaling-bits 59 --first-mod-bits 60 --bootstrap-precision-bits 20 --lenient
+```
+
+**这台机器跑不了**（8 GB；不带 noise model 的同一条命令 36 秒跑完，带上就 OOM），
+但在你那台上是分钟级的事，而且**一张 GPU 都不用**。
+
+`--bootstrap-noise-only` 是新加的：只模 bootstrap 的误差，跳过 key-switch / rescale 那些。
+理由是量出来的——一层 8138 次旋转累积 8.2e-11，而 bootstrap 在 `q0/Delta=32` 下是 4.9e-04，
+**丢掉的是五百九十万分之一**，换来的是每次操作两个 32768 数组的分配。
+
+**这一跑能直接回答**：如果它也炸到 1e19，那病因在 22 个 bootstrap 站点的误差里，
+而且可以在那台机器上几十秒一轮地调缩放系数调到不炸；如果它干净，
+那设备上就还有一个 noise model 里没有的东西，范围一下子就窄了。
+
+顺带，`--lazy-weights` 也是新加的：`encode_layer` 一层是 **9.7 GiB**（明文是每 slot 一个值，
+32768 个），而 `bench` 原来把所有层一次编完——**12 层就是 116 GiB**。
+`forward` 每个权重字段只读一次，所以改成读的时候才编、编完就丢，峰值 3.2 GiB。
+**你那台 32 GB 也只装得下三层**，所以要跑满 12 层这个开关是必须的。
+
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
