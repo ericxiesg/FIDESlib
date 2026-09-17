@@ -82,8 +82,18 @@ class ClearEngine:
         self.noise_model = noise_model
         self.scaling_bits = scaling_bits
         self.first_mod_bits = first_mod_bits
-        #: The bound a message has to stay inside for a bootstrap to be meaningful: `q0 / Delta`.
+        #: `q0 / Delta`, the ratio the bootstrap's modular reduction is periodic in.
         self.message_bound = 2.0 ** (first_mod_bits - scaling_bits)
+        #: What a message actually has to stay inside, which is **half** of that. ModRaise leaves
+        #: `m + q0 * I`; the sine recovers `m` from it only while `|m| < q0/2`, so in message units
+        #: the limit is `q0 / (2 * Delta)`. Past it the value is not refreshed inaccurately, it is
+        #: replaced by its residue - a different number entirely.
+        #:
+        #: This was `message_bound` until the GPU's sb=59 run: at `q0/Delta = 32` every site sits at
+        #: a few percent of the limit and the distinction never showed, but at `q0/Delta = 2` the
+        #: limit is 1.0 and the 22-site table's worst entry is 0.971 - which reads as "under the
+        #: bound" and is really 97% of what the sine can recover.
+        self.recoverable_bound = self.message_bound / 2
         #: Bits of the *bound* a bootstrap reproduces. A bootstrap's error is set by `message_bound`,
         #: not by the value it is given, so bootstrapping a small number is much less accurate in
         #: relative terms than bootstrapping a large one - which is the whole reason THOR keeps
@@ -328,10 +338,11 @@ class ClearEngine:
             raise ScaleMismatch("bootstrap: ciphertext must be canonical (scale D^1)")
         self._require_degree_one(ct, "bootstrap")
         peak = float(np.max(np.abs(ct.slots)))
-        if self.strict and peak > self.message_bound * self.bootstrap_message_margin:
+        if self.strict and peak > self.recoverable_bound * self.bootstrap_message_margin:
             raise ScaleMismatch(
                 f"bootstrap: the message reaches {peak:.4g}, which is "
-                f"{peak / self.message_bound:.0%} of q0/Delta = {self.message_bound:.0f}. The "
+                f"{peak / self.recoverable_bound:.0%} of q0/(2*Delta) = {self.recoverable_bound:.4g} "
+                f"(q0/Delta is {self.message_bound:.0f}). The "
                 f"bootstrap raises the modulus to q0 and recovers the message with a sine that only "
                 f"approximates the modular reduction near zero, so a message at the bound is not "
                 f"refreshed, it is replaced. Halve it first.")
