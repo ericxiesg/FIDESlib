@@ -230,11 +230,22 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     #:  11    -14.01     3.09e-3     0.491      7      11
     #: ===== ======== =========== ========= ======== ==================
     #:
-    #: 86 levels across the twelve layers instead of 123, and the softmax is *more* accurate at every
-    #: one of them, not less - layer 2, always the worst because `he_exp2`'s fit is looser, goes from
-    #: 3.2e-3 to 5.4e-4. The largest denominator at 0.44-0.49 is also a quarter of the bootstrap's
-    #: message bound, which is where the bootstrap was measured to be most accurate (20.3 bits at a
-    #: quarter, 16.3 at a half), so `he_inv`'s own refresh lands on that peak rather than below it.
+    #: The `levels` column counts Goldschmidt iterations in each layer's *first* `he_inv`: 86 across
+    #: the twelve against 123 at THOR's centre. Those are levels inside that call, and they are not
+    #: charged one for one to the layer's depth, because every `he_inv` opens with a bootstrap. What
+    #: stage 07 costs end to end, measured on the clear engine by the level its output comes back at:
+    #:
+    #:     139 levels over the twelve layers, against 160 - ten layers 2 cheaper, layer 2 four
+    #:     cheaper, layer 9 unchanged, and layer 8 one *dearer*.
+    #:
+    #: 21 levels, then, not 37; the iteration count is the wrong number to size a depth from. Layer 8
+    #: is the one to watch, since it is the only layer this makes more expensive.
+    #:
+    #: The softmax is also *more* accurate at every layer, not less - layer 2, always the worst
+    #: because `he_exp2`'s fit is looser, goes from 3.2e-3 to 5.4e-4. And the largest denominator at
+    #: 0.44-0.49 is a quarter of the bootstrap's message bound, which is where the bootstrap was
+    #: measured to be most accurate (20.3 bits at a quarter, 16.3 at a half), so `he_inv`'s own
+    #: refresh lands on that peak rather than below it.
     #:
     #: Layer 8 is the one that cannot move: its smallest and largest denominators differ by 1.2e-4
     #: whatever the centre, so it needs ten iterations wherever it sits. That is one more than the

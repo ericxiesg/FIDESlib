@@ -80,3 +80,34 @@ for index in range(12):
 麻烦确认一下比值还是 1.0000——如果不是，说明还有第三处不一致。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+---
+
+## 5. 更正：level 的节省是 21，不是 37
+
+`b2813d1` 的 commit message 里我写的"86 levels 对 123"是**每层第一次 `he_inv` 的迭代次数**。
+那些确实是那一次调用内部花掉的 level，但**不是按 1:1 记到层的深度上的**——
+每次 `he_inv` 开头都有一个 bootstrap。
+
+在 `ClearEngine` 上按 stage 07 输出密文回来的 level 实测：
+
+```
+  layer    now  before  delta
+  0         11      13     -2
+  1         11      13     -2
+  2         13      17     -4
+  3         11      13     -2
+  4         11      13     -2
+  5         11      13     -2
+  6         11      13     -2
+  7         11      13     -2
+  8         14      13     +1     <- 唯一变贵的
+  9         13      13     +0
+  10        11      13     -2
+  11        11      13     -2
+          139     160     -21
+```
+
+**所以是 21 个 level，不是 37。** 定 depth 的时候按这张表，别按迭代次数。
+layer 8 那 +1 是实的——如果 12 层跑在它身上挂掉，就是这一个 level。
+
