@@ -48,6 +48,32 @@ class SoftmaxMixin:
     #: the internal precision target of every division but the last.
     internal_alpha = 0.1
 
+    def _carrying(self, attention_mask):
+        """``ones``, restricted to the query rows that hold a real token.
+
+        ``ones`` is what the Goldschmidt iteration starts from and what confines its result, and it is
+        built once per layer out of the slot geometry - which cannot know how many of the 128 query
+        positions a given input fills. Since ``padding_mask`` began masking the query side, a padding
+        row has every key masked off, so its denominator is exactly **zero**, and ``he_inv`` is then
+        asked for ``1/0``: the value grows without bound through the iteration and crosses a bootstrap,
+        where a magnitude like that is not a rounding error. Restricting ``ones`` leaves those rows at
+        zero instead, which is also what makes them invisible to
+        :meth:`~thorfhe.numeric.DivisionMixin._check_inversion_range`, whose lower bound they would
+        otherwise violate by construction.
+
+        The indicator is already in ``attention_mask``: a query row is real exactly when some score
+        ciphertext's mask keeps a key on it. So this costs one plaintext multiply on a fresh
+        encryption, at a level :meth:`align` drops to the denominator's anyway.
+        """
+        if attention_mask is None:
+            return self.ones
+        g = self.g
+        used = ((np.arange(g.slot_count) % g.n_slot) < g.n_blocks).astype(float)
+        query = np.maximum.reduce([np.real(np.asarray(mask)) for mask in attention_mask])
+        if np.array_equal(query, used):
+            return self.ones                      # nothing is padding; do not spend the multiply
+        return self.rescale(self.multiply(self.ones, query))
+
     def _sum_over_groups(self, terms):
         """Sum the score ciphertexts and then fold the groups together: the softmax denominator."""
         total = terms[0]
@@ -75,7 +101,8 @@ class SoftmaxMixin:
 
         total = self._sum_over_groups(list(squared))
         epsilon = precision / 128 / 2
-        inv_D, delta, precision = self.he_inv(total, self.ones, epsilon=epsilon, alpha=alpha / 10)
+        inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
+                                              epsilon=epsilon, alpha=alpha / 10)
 
         # the final inverse is only needed in the first group, which is where the broadcast starts
         window = g.group_size if final else g.slot_count
@@ -104,8 +131,8 @@ class SoftmaxMixin:
 
         total = self._sum_over_groups(exp_u)
         self.probed("07c.denominator", [total])
-        inv_D, delta, precision = self.he_inv(total, self.ones, epsilon=inv_epsilon,
-                                              alpha=self.internal_alpha / 10)
+        inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
+                                              epsilon=inv_epsilon, alpha=self.internal_alpha / 10)
         self.probed("07d.inverse_denominator", [inv_D])
         for _ in range(int(np.log2(l)) - 1):
             exp_u, inv_D, delta, precision = self.update_inv_D(

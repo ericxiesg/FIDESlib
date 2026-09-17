@@ -141,6 +141,45 @@ def test_recentring_the_fit_buys_iterations_without_moving_the_softmax(mask_fami
         f"recentring cost accuracy: {errors['midpoint']:.3g} -> {errors['lifted']:.3g}")
 
 
+def test_a_padded_input_leaves_the_padding_rows_at_zero(mask_families):
+    """Padding query rows must come out empty, not merely unread.
+
+    `padding_mask` masks both sides, so a padding query's denominator is the sum of an exponential
+    over no keys at all: exactly zero. Nothing downstream reads those rows - but `he_inv` is handed
+    them along with the real ones, and `1/0` does not stay small. It grows through every Goldschmidt
+    iteration and then goes through a bootstrap, which recovers a message only well inside `q0/Delta`.
+    The device reported an inverse denominator whose *median* was 1.9e159, which is what that looks
+    like: with 30 real tokens, 98 of the 128 rows are padding.
+
+    So `ones` - the indicator the iteration starts from - is restricted to the real rows, and those
+    rows stay at zero all the way through. That is also what keeps `_check_inversion_range` honest:
+    a zero denominator is below any `epsilon`, so without this the check fires on every padded input.
+    """
+    from thorfhe.layer import EncoderLayer
+
+    tokens = 30
+    rng = np.random.default_rng(64)
+    scores = rng.uniform(-8, 8, (G.n_blocks, G.dim, G.dim))
+
+    engine, stages = build(mask_families)
+    masks = EncoderLayer(engine).padding_mask(tokens)
+    parameters = calibrate(scores[:, :tokens, :tokens], target=0.5)
+
+    out = stages.he_softmax(encode_score_diagonals(engine, scores), masks, **parameters)
+    got = decode_broadcast_diagonals(engine, out)
+
+    padding_rows = got[:, tokens:, :]
+    assert np.abs(padding_rows).max() == 0.0, (
+        f"padding rows carry up to {np.abs(padding_rows).max():.3g}; they have to be empty, because "
+        f"whatever is in them is bootstrapped")
+
+    real = got[:, :tokens, :]
+    assert np.abs(real[:, :, tokens:]).max() == 0.0, "padding keys leaked into a real row"
+    assert np.abs(real[:, :, :tokens].sum(axis=2) - 1.0).max() < parameters["output_alpha"]
+    want = true_softmax(scores[:, :tokens, :tokens])
+    assert np.abs(real[:, :, :tokens] - want).max() < 5e-3
+
+
 def test_the_layer_table_is_the_one_calibrate_produces():
     """`Softmax.LAYERS` is measured output, so what it has to satisfy is its own contract.
 
