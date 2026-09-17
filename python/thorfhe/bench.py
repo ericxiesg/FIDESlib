@@ -617,6 +617,112 @@ def level_budget(text: str) -> tuple[int, int]:
     return (int(parts[0]), int(parts[1]))
 
 
+#: The input `magnitudes` measures on, fixed so two machines report comparable numbers. The
+#: sentence pair is MRPC-shaped; what matters is that it is the same one on both sides.
+MAGNITUDE_SENTENCES = ("The company said it will cut 500 jobs .",
+                       "About 500 positions will be eliminated , the company said .")
+
+
+def command_magnitudes(args):
+    """What each bootstrap in a layer is handed, by site, on the real checkpoint.
+
+    A CKKS bootstrap only recovers a message well inside `q0 / Delta`; past it the sine has wrapped
+    and what comes back is an unrelated number. Which sites crowd that bound is a property of the
+    real activations - random weights understate it sevenfold - so it has to be measured, and it has
+    to be measured the same way on both sides. Two independent measurements of stage 07 disagreed by
+    a factor of four because they were not: this exists so the next disagreement is about numbers
+    rather than about what was run.
+
+    `--through 06` stops after the attention score, which is the cheap part and needs no memory to
+    speak of; the default runs the whole layer.
+    """
+    import collections
+    import traceback
+
+    import numpy as np
+
+    from .bert import layer_parameters
+    from .clear import ClearEngine
+    from .encoding import encode_activations
+    from .layer import DEFAULT_SOFTMAX_SCALE, SOFTMAX_SCALES, EncoderLayer, encode_layer
+
+    g = THOR_BERT
+    model, tokenizer, _, _ = load_model(build_hub(args), args)
+
+    ids, types, mask = tokenizer.encode_pair(*MAGNITUDE_SENTENCES, max_length=g.dim)
+    ids, types, mask = np.asarray(ids), np.asarray(types), np.asarray(mask)
+    tokens = int(mask.sum())
+    state = model.state
+    embedded = (state["bert.embeddings.word_embeddings.weight"][ids]
+                + state["bert.embeddings.position_embeddings.weight"][: g.dim]
+                + state["bert.embeddings.token_type_embeddings.weight"][types])
+    centred = embedded - embedded.mean(-1, keepdims=True)
+    x = (centred / np.sqrt(embedded.var(-1, keepdims=True) + 1e-12)
+         * state["bert.embeddings.LayerNorm.weight"] + state["bert.embeddings.LayerNorm.bias"])
+
+    print(f"checkpoint  {args.model}", file=sys.stderr)
+    print(f"input       {tokens}/{g.dim} tokens, LayerNorm'd embedding |x| max {np.abs(x).max():.4g}"
+          f"  p50 {np.median(np.abs(x)):.4g}", file=sys.stderr)
+    print(f"scales      softmax {SOFTMAX_SCALES.get(args.layer, DEFAULT_SOFTMAX_SCALE)}  "
+          f"residual {args.residual_scale}  refresh {args.refresh_scale}  "
+          f"score_refresh {args.score_refresh_scale}", file=sys.stderr, flush=True)
+
+    seen = []
+
+    class Probe(ClearEngine):
+        def bootstrap(self, ct, keep_levels=None):
+            frames = traceback.extract_stack()[-4:-1]
+            site = "|".join(f"{f.filename.rsplit(os.sep, 1)[-1]}:{f.lineno}" for f in frames)
+            seen.append((site, float(np.max(np.abs(ct.slots))), ct.level))
+            return super().bootstrap(ct, keep_levels)
+
+    level = args.depth - resolve_bootstrap_depth(args)
+    engine = Probe(g, depth=args.depth, bootstrap_level=level)
+    engine.bootstrap_message_margin = 1e9    # measure the magnitude rather than refuse it
+    layer = EncoderLayer(engine, residual_scale=args.residual_scale,
+                         refresh_scale=args.refresh_scale,
+                         score_refresh_scale=args.score_refresh_scale,
+                         binary_rotations=True, refresh_after_dense=args.refresh_after_dense)
+    for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
+        owner.check_ranges = False
+
+    weights = encode_layer(layer_parameters(state, args.layer), args.layer,
+                           residual_scale=args.residual_scale,
+                           score_refresh_scale=args.score_refresh_scale)
+    packed = np.array([engine.encrypt(m) for m in encode_activations(g, x)], dtype=object)
+
+    if args.through == "06":
+        _, complexified = layer.attention.stage_01_complexify_x(packed, layer_index=args.layer)
+        rotated = layer.attention.stage_02_make_rotated_copies(complexified)
+        scores = layer.attention.stage_06_attention_score(
+            layer.attention.stage_03_query(rotated, *weights.query),
+            layer.attention.stage_04_key(rotated, *weights.key))
+        magnitudes = [float(np.max(np.abs(np.asarray(engine.decrypt(ct))))) for ct in scores]
+        half = len(scores) // 2
+        packed_pairs = [float(np.max(np.abs(np.asarray(engine.decrypt(scores[i]))
+                                            + 1j * np.asarray(engine.decrypt(scores[i + half])))))
+                        for i in range(half)]
+        print(f"\nstage 06 outputs      {'  '.join(f'{m:.4g}' for m in magnitudes)}")
+        print(f"stage 07 would refresh {'  '.join(f'{m:.4g}' for m in packed_pairs)}")
+        return 0
+
+    layer.forward(packed, weights, layer.padding_mask(tokens), args.layer)
+
+    grouped = collections.defaultdict(list)
+    for site, magnitude, in_level in seen:
+        grouped[site].append((magnitude, in_level))
+    print(f"\n{len(seen)} bootstraps, by site:")
+    print(f"  {'site':<52} {'n':>3} {'min':>10} {'max':>10} {'% of bound 2':>13}")
+    for site, values in sorted(grouped.items(), key=lambda kv: -max(v[0] for v in kv[1])):
+        low = min(v[0] for v in values)
+        high = max(v[0] for v in values)
+        print(f"  {site:<52} {len(values):3d} {low:10.4g} {high:10.4g} {100 * high / 2:12.1f}%")
+    worst = max(m for _, m, _ in seen)
+    print(f"\nlargest {worst:.4g}; a bound of 2 leaves it at {100 * worst / 2:.1f}%, "
+          f"a bound of 32 at {100 * worst / 32:.1f}%")
+    return 0
+
+
 def command_workingset(args):
     """Measure how many ciphertexts each stage keeps alive, and what that costs on the device.
 
@@ -870,6 +976,25 @@ def build_parser():
     budget.add_argument("--json", default=None)
     budget.add_argument("--quiet", action="store_true")
     budget.set_defaults(handler=command_budget)
+
+    magnitudes = sub.add_parser(
+        "magnitudes",
+        help="what each bootstrap in a layer is handed, by site, on the real checkpoint")
+    common(magnitudes)
+    magnitudes.add_argument("--layer", type=int, default=0)
+    magnitudes.add_argument("--depth", type=int, default=37)
+    magnitudes.add_argument("--log-n", type=int, default=16)
+    magnitudes.add_argument("--bootstrap-level-budget", type=level_budget, default=(3, 3),
+                            metavar="E,D")
+    magnitudes.add_argument("--bootstrap-depth", type=int, default=None)
+    magnitudes.add_argument("--no-bootstrap", action="store_true")
+    magnitudes.add_argument("--refresh-after-dense", action="store_true", default=True)
+    magnitudes.add_argument("--residual-scale", type=float, default=1.0)
+    magnitudes.add_argument("--refresh-scale", type=float, default=1.0)
+    magnitudes.add_argument("--score-refresh-scale", type=float, default=1.0)
+    magnitudes.add_argument("--through", choices=("06", "layer"), default="layer",
+                            help="stop after the attention score, which needs far less memory")
+    magnitudes.set_defaults(handler=command_magnitudes)
 
     working = sub.add_parser("workingset",
                              help="measure the ciphertext working set of one layer, per stage")
