@@ -84,7 +84,8 @@ class SoftmaxMixin:
         keep[:window] = used[:window]
         return squared, self.rescale(self.multiply(inv_D, keep)), delta, precision
 
-    def he_softmax(self, scores, attention_mask, min_x, max_x, n, l, inv_epsilon, output_alpha):
+    def he_softmax(self, scores, attention_mask, min_x, max_x, n, l, inv_epsilon, output_alpha,
+                   shift=None):
         """Softmax over the score diagonals, returned as ``dim`` broadcast diagonals.
 
         ``scores`` is the ``2 * n_output_ciphertexts`` real ciphertexts stage 06 produced.
@@ -96,7 +97,7 @@ class SoftmaxMixin:
         # he.py feeds he_exp a ciphertext already divided by the range scale; the division is a scalar
         # multiply, so under FIXEDMANUAL it needs its own rescale before anything is added to it.
         normalised = [self.rescale(self.multiply(ct, 1.0 / scale)) for ct in scores]
-        exp_u = [self.he_exp(ct, min_x, max_x, n, wide=wide) for ct in normalised]
+        exp_u = [self.he_exp(ct, min_x, max_x, n, wide=wide, shift=shift) for ct in normalised]
         exp_u = [self.rescale(self.multiply(ct, mask)) for ct, mask in zip(exp_u, attention_mask)]
 
         self.probed("07b.exp", exp_u)
@@ -170,6 +171,67 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
     #: is unlikely to bind, but it is untested here.
     WIDE = dict(min_x=-70.0, max_x=70.0, n=2, l=4, inv_epsilon=2 ** -18, output_alpha=0.01)
 
+    #: Per layer: where to centre the fit, and where the denominator then lands. THOR has two rows
+    #: here and we have twelve, because the two constants are properties of a layer's own score
+    #: distribution and BERT's twelve differ by three orders of magnitude in denominator.
+    #:
+    #: **Why the centre is a free parameter.** `he_exp` evaluates the fit at `(score - centre) / 32`,
+    #: so every term of the denominator carries a common factor of `exp(-centre / 2)`: lowering the
+    #: centre lifts the whole denominator and leaves the ratio between its ends alone. The
+    #: Goldschmidt iteration is priced on the *smallest* denominator (one level per iteration, from
+    #: `inv_epsilon`) and bounded by the largest (it must stay under 1, or `2 - k*D` changes sign and
+    #: the iteration diverges). So the cheap place to sit is with the largest denominator just under
+    #: the bound, and getting there costs nothing at all - it is a constant folded into a plaintext.
+    #:
+    #: Measured with `calibrate(scores, target=0.5)` on the real checkpoint over 64 MRPC validation
+    #: rows, against the plaintext softmax:
+    #:
+    #: ===== ======== =========== ========= ======== ==================
+    #: layer  centre     min D      max D    levels   vs THOR's centre
+    #: ===== ======== =========== ========= ======== ==================
+    #:   0    -15.26     1.74e-2     0.466      5      10, error 4x worse
+    #:   1    -10.26     1.06e-3     0.488      7      10
+    #:   2    -19.75     2.54e-3     0.480      7      10, error 6x worse
+    #:   3     -9.26     1.07e-3     0.462      7      10
+    #:   4    -11.51     2.51e-3     0.457      7      10
+    #:   5    -12.01     3.37e-3     0.490      7      10
+    #:   6    -12.01     2.59e-3     0.488      7      10
+    #:   7    -11.26     2.93e-3     0.492      7      10
+    #:   8     -4.51     5.43e-5     0.442     10      10
+    #:   9     -8.51     2.06e-4     0.447      9      11
+    #:  10    -15.26     5.11e-3     0.466      6      11
+    #:  11    -14.01     3.09e-3     0.491      7      11
+    #: ===== ======== =========== ========= ======== ==================
+    #:
+    #: 86 levels across the twelve layers instead of 123, and the softmax is *more* accurate at every
+    #: one of them, not less - layer 2, always the worst because `he_exp2`'s fit is looser, goes from
+    #: 3.2e-3 to 5.4e-4. The largest denominator at 0.44-0.49 is also a quarter of the bootstrap's
+    #: message bound, which is where the bootstrap was measured to be most accurate (20.3 bits at a
+    #: quarter, 16.3 at a half), so `he_inv`'s own refresh lands on that peak rather than below it.
+    #:
+    #: Layer 8 is the one that cannot move: its smallest and largest denominators differ by 1.2e-4
+    #: whatever the centre, so it needs ten iterations wherever it sits. That is one more than the
+    #: nine the schedule has today, and two fewer than leaving the centre alone would cost.
+    #:
+    #: **Provenance.** 64 of MRPC's 408 validation rows - what this machine has cached. `target=0.5`
+    #: leaves the upper bound a factor of two, and flooring `inv_epsilon` to a power of two leaves
+    #: the lower one between 1.8x (layer 8) and 3.5x. Re-measuring on the full split is the open
+    #: item; `calibrate` is what produces this table, so it is one call per layer to redo.
+    LAYERS = {
+        0: dict(NARROW, shift=-15.2612, inv_epsilon=2 ** -6),
+        1: dict(NARROW, shift=-10.2612, inv_epsilon=2 ** -10),
+        2: dict(WIDE, shift=-19.75, inv_epsilon=2 ** -9),
+        3: dict(NARROW, shift=-9.2612, inv_epsilon=2 ** -10),
+        4: dict(NARROW, shift=-11.5112, inv_epsilon=2 ** -9),
+        5: dict(NARROW, shift=-12.0112, inv_epsilon=2 ** -9),
+        6: dict(NARROW, shift=-12.0112, inv_epsilon=2 ** -9),
+        7: dict(NARROW, shift=-11.2612, inv_epsilon=2 ** -9),
+        8: dict(NARROW, shift=-4.5112, inv_epsilon=2 ** -15),
+        9: dict(NARROW, shift=-8.5112, inv_epsilon=2 ** -13),
+        10: dict(NARROW, shift=-15.2612, inv_epsilon=2 ** -8),
+        11: dict(NARROW, shift=-14.0112, inv_epsilon=2 ** -9),
+    }
+
     #: How much the key projection's `softmax_scale` was divided by, so that stage 07 hands its
     #: bootstrap a smaller number. Restored by an integer multiply straight after, which costs no
     #: level and no scale degree, so `he_softmax` sees exactly the scores it would have seen: the
@@ -221,12 +283,14 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
         self.probed("07a.refreshed_scores", refreshed)
 
         if parameters is None:
-            parameters = self.WIDE if layer_index == 2 else self.NARROW
+            parameters = self.LAYERS.get(layer_index,
+                                         self.WIDE if layer_index == 2 else self.NARROW)
         return self.he_softmax(list(refreshed), attention_mask, **parameters)
 
 
 def calibrate(scores, *, n: int = 2, l: int = 2, output_alpha: float = 0.01,
-              margin: float = 1.05) -> dict:
+              margin: float = 1.05, shift: float | None = None,
+              target: float | None = None) -> dict:
     """Softmax parameters for a known score distribution.
 
     THOR hard-codes ``min_x``/``max_x``/``inv_epsilon`` per layer because it calibrated them on real
@@ -242,7 +306,17 @@ def calibrate(scores, *, n: int = 2, l: int = 2, output_alpha: float = 0.01,
     This computes the same choice from a sample of scores, which is what a re-calibration on real
     activations would do. Pass what actually reaches ``he_softmax``: :meth:`Softmax.stage_07_softmax`
     doubles the scores on its way through the bootstrap.
+
+    ``shift`` overrides the centre the fit is taken around, and ``target`` searches for the centre
+    that brings the largest denominator to that value - which is the cheap end of the window, because
+    the iteration count comes from the *smallest* denominator and every term carries a common factor
+    of ``exp(-centre / 2)``. Lowering the centre lifts the whole denominator without changing the
+    ratio between its ends, so it buys Goldschmidt iterations for nothing; ``target = 0.5`` is the
+    useful setting, since it also leaves the bootstrap a message at a quarter of its bound, which is
+    where that measures most accurately. The two are exclusive.
     """
+    if shift is not None and target is not None:
+        raise ValueError("pass a shift or a target, not both: the target is how a shift is found")
     low, high = float(np.min(scores)), float(np.max(scores))
     pad = (high - low) * (margin - 1) / 2
     low, high = low - pad, high + pad
@@ -250,16 +324,29 @@ def calibrate(scores, *, n: int = 2, l: int = 2, output_alpha: float = 0.01,
     wide = high >= 30
     coefficients = EXP2_COEFFICIENTS if wide else EXP1_COEFFICIENTS
     scale = 64 if wide else 32
-    numerators = np.polyval(coefficients[::-1], np.asarray(scores) / scale - (low + high) / 2 / scale)
-    for _ in range(int(np.log2(n))):
-        numerators = numerators ** 2
-    if wide:
-        numerators = numerators * 128
+    scores = np.asarray(scores)
 
-    smallest = float(np.min(numerators.sum(axis=-1)))
-    largest = float(np.max(numerators.sum(axis=-1)))
+    def denominators(centre):
+        numerators = np.polyval(coefficients[::-1], (scores - centre) / scale)
+        for _ in range(int(np.log2(n))):
+            numerators = numerators ** 2
+        if wide:
+            numerators = numerators * 128
+        totals = numerators.sum(axis=-1)
+        return float(np.min(totals)), float(np.max(totals))
+
+    centre = (low + high) / 2 if shift is None else shift
+    if target is not None:
+        # walk the centre down while the largest denominator still fits under the target; a quarter
+        # of a score unit is far finer than the power-of-two floor `inv_epsilon` is rounded to
+        centre = (low + high) / 2
+        while denominators(centre - 0.25)[1] <= target:
+            centre -= 0.25
+
+    smallest, largest = denominators(centre)
     if largest > 1.0:
         raise ValueError(f"denominator reaches {largest:.3g}; the scores overflow the polynomial's "
                          "range, scale them down before the softmax")
     inv_epsilon = 2.0 ** int(np.floor(np.log2(smallest)))
-    return dict(min_x=low, max_x=high, n=n, l=l, inv_epsilon=inv_epsilon, output_alpha=output_alpha)
+    return dict(min_x=low, max_x=high, n=n, l=l, inv_epsilon=inv_epsilon,
+                output_alpha=output_alpha, shift=centre)

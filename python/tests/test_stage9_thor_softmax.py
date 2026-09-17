@@ -15,6 +15,7 @@ import pytest
 from thorfhe import THOR_BERT, ClearEngine, block_diagonal_masks
 from thorfhe.attention import attention_rotate_masks, ccmm_masks, make_copies_masks, transpose_masks
 from thorfhe.layer import DEFAULT_SOFTMAX_SCALE, SOFTMAX_SCALES
+from thorfhe.numeric import DivisionMixin
 from thorfhe.softmax import Softmax, calibrate
 
 G = THOR_BERT
@@ -88,6 +89,84 @@ def test_softmax_matches_the_real_thing(mask_families):
     assert np.abs(sums - 1.0).max() < Softmax.NARROW["output_alpha"]
     assert np.abs(got - want).max() < 5e-3
     assert np.abs(got - want).mean() < 1e-4
+
+
+def test_recentring_the_fit_buys_iterations_without_moving_the_softmax(mask_families):
+    """Lowering the centre lifts the denominator, and the softmax it produces has to stay put.
+
+    `he_exp` evaluates the fit at `(score - centre) / 32`, so every denominator term carries a common
+    factor of `exp(-centre / 2)`. Lowering the centre therefore multiplies the whole denominator and
+    leaves the ratio between its ends alone - which is worth doing, because the Goldschmidt iteration
+    costs one level per iteration and the count comes from `inv_epsilon`, the *smallest* denominator.
+    It is a constant folded into a plaintext, so it costs nothing.
+
+    What it is not free of is the polynomial: the fit is a minimax approximation to an exponential
+    over a finite domain, and a lower centre evaluates it further out. That is the thing this test
+    exists to pin - not the level saving, which is arithmetic, but that the softmax coming out the
+    far end is still a softmax. `Softmax.LAYERS` applies this per layer, where it is worth 37 levels
+    across the twelve.
+    """
+    rng = np.random.default_rng(63)
+    scores = rng.uniform(-8, 8, (G.n_blocks, G.dim, G.dim))
+    masks = [used_slots()] * 2 * G.n_output_ciphertexts
+
+    midpoint = calibrate(scores)
+    lifted = calibrate(scores, target=0.5)
+    assert lifted["shift"] < midpoint["shift"], "target=0.5 should have walked the centre down"
+    assert calibrate(scores, shift=midpoint["shift"]) == midpoint, (
+        "passing the centre it would have chosen must change nothing")
+
+    cost = {name: DivisionMixin.goldschmidt_iterations(p["inv_epsilon"], Softmax.internal_alpha / 10)
+            for name, p in (("midpoint", midpoint), ("lifted", lifted))}
+    assert cost["lifted"] < cost["midpoint"], (
+        f"recentring bought nothing: {cost['midpoint']} iterations -> {cost['lifted']}")
+
+    want = true_softmax(scores)
+    errors = {}
+    for name, parameters in (("midpoint", midpoint), ("lifted", lifted)):
+        engine, stages = build(mask_families)
+        got = decode_broadcast_diagonals(
+            engine, stages.he_softmax(encode_score_diagonals(engine, scores), masks, **parameters))
+        assert np.abs(got.sum(axis=2) - 1.0).max() < parameters["output_alpha"], (
+            f"{name}: the rows are not distributions")
+        errors[name] = float(np.abs(got - want).max())
+
+    # Measured on this input: 6.04e-4 at the midpoint over nine iterations, 6.44e-4 lifted over four.
+    # Flat, which is the claim - the fit is being evaluated 13.5 units further out for five fewer
+    # levels and gives up nothing for it. On BERT's own score distributions it comes out ahead
+    # instead, most of all on layer 2's wider polynomial (3.2e-3 -> 5.4e-4); a uniform [-8, 8] has no
+    # such structure to recover, so flat is what it should show here.
+    assert errors["lifted"] < 5e-3
+    assert errors["lifted"] <= 2 * errors["midpoint"], (
+        f"recentring cost accuracy: {errors['midpoint']:.3g} -> {errors['lifted']:.3g}")
+
+
+def test_the_layer_table_is_the_one_calibrate_produces():
+    """`Softmax.LAYERS` is measured output, so what it has to satisfy is its own contract.
+
+    Twelve rows because the constants are per layer; layer 2 alone on the wide polynomial, because
+    its scores are twice as wide; and every centre below THOR's, because that is the direction that
+    lifts the denominator. The numbers themselves come from `calibrate(scores, target=0.5)` on the
+    real checkpoint and cannot be re-derived without it - what is checked here is that they are
+    internally consistent and that nobody has half-edited the table.
+    """
+    assert sorted(Softmax.LAYERS) == list(range(12))
+    for index, row in Softmax.LAYERS.items():
+        base = Softmax.WIDE if index == 2 else Softmax.NARROW
+        assert (row["max_x"] >= 30) == (index == 2), f"layer {index}: wrong polynomial"
+        assert row["l"] == base["l"] and row["n"] == base["n"], f"layer {index}: temperature moved"
+        assert row["shift"] < (row["min_x"] + row["max_x"]) / 2, (
+            f"layer {index}: centre {row['shift']} is not below the midpoint, so it lifts nothing")
+    # The level cost is the reason the table exists, so it is the thing to pin. Ten is layer 8,
+    # whose smallest and largest denominators differ by 1.2e-4 whatever the centre; the rest sit at
+    # five to nine. Leaving the centres at THOR's midpoint costs 123 for the same twelve layers -
+    # and that is with `inv_epsilon` set honestly, which is where this started: layer 8's measured
+    # minimum floors to 2^-15, *below* NARROW's 2^-14, so the untuned table was not merely expensive
+    # but wrong, and `he_inv` saturates rather than failing when it is.
+    cost = [DivisionMixin.goldschmidt_iterations(row["inv_epsilon"], Softmax.internal_alpha / 10)
+            for row in Softmax.LAYERS.values()]
+    assert max(cost) <= 10, f"a layer wants {max(cost)} Goldschmidt iterations, i.e. that many levels"
+    assert sum(cost) == 86, f"the table costs {sum(cost)} levels across the twelve layers, not 86"
 
 
 def test_softmax_is_a_distribution_on_a_peaked_input(mask_families):

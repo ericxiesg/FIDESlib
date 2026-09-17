@@ -105,24 +105,31 @@ class NumericMixin:
             babies = merged
         return babies[0]
 
-    def he_exp(self, x, min_x: float, max_x: float, n: int, wide: bool):
+    def he_exp(self, x, min_x: float, max_x: float, n: int, wide: bool, shift: float | None = None):
         """THOR's ``he_exp1`` / ``he_exp2``: a degree-15 fit, then ``log2(n)`` squarings.
 
         The fit approximates ``exp(x / s)`` for ``s = 32`` (narrow) or ``64`` (wide); squaring ``log2(n)``
         times raises it to ``exp(n * x / s)``. ``wide`` also carries THOR's final factor of 128.
+
+        ``shift`` is the point the fit is centred on, and defaults to the window's midpoint - which is
+        what THOR uses, and what ``calibrate`` returns. It is separable from the window because the two
+        do different jobs: ``max_x`` chooses the polynomial, while the centre sets where the softmax
+        denominator lands, and the denominator's height is what the Goldschmidt iteration is priced on.
+        Every term carries a common factor of ``exp(-centre / 2)``, so moving the centre moves the whole
+        denominator without touching the ratio between its largest and smallest value.
         """
-        shift = (min_x + max_x) / 2 / (64 if wide else 32)
-        shifted = self.add(x, -shift)
+        centre = (min_x + max_x) / 2 if shift is None else shift
+        shifted = self.add(x, -centre / (64 if wide else 32))
         result = self.evaluate_polynomial(shifted, EXP2_COEFFICIENTS if wide else EXP1_COEFFICIENTS)
         for _ in range(int(np.log2(n))):
             result = self.rescale(self.relinearize(self.square(result)))
         return self.multiply(result, 128) if wide else result
 
-    def he_exp1(self, x, min_x: float, max_x: float, n: int):
-        return self.he_exp(x, min_x, max_x, n, wide=False)
+    def he_exp1(self, x, min_x: float, max_x: float, n: int, shift: float | None = None):
+        return self.he_exp(x, min_x, max_x, n, wide=False, shift=shift)
 
-    def he_exp2(self, x, min_x: float, max_x: float, n: int):
-        return self.he_exp(x, min_x, max_x, n, wide=True)
+    def he_exp2(self, x, min_x: float, max_x: float, n: int, shift: float | None = None):
+        return self.he_exp(x, min_x, max_x, n, wide=True, shift=shift)
 
     def he_tanh_for_pooler(self, x):
         """``tanh`` for the pooler, as two degree-15 polynomials with a bootstrap on either side.

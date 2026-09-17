@@ -192,3 +192,54 @@ denom 的绝对高度由窗口中心 `mid` 定——`he_exp` 只用 `mid` 做平
   而 Goldschmidt 对 0 会把 `1/D` 推向无穷——那些行不被下游读，但要穿过 bootstrap。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+---
+
+## 7. 补：窗口表已落地（承接 §6）
+
+`4068f20` 之后又做了：
+
+* `he_exp` 的拟合中心从窗口中点里**分离出来**，成了显式的 `shift`（默认仍是中点，
+  所以 `calibrate` 和现有调用都不变）。分开是因为两者干的事不同：`max_x` 选多项式，
+  中心决定 denom 落在哪里，而 Goldschmidt 的价钱是按 denom 的下端算的。
+* `calibrate(scores, target=0.5)`：往下走中心，直到最大的 denom 刚好还在 target 以下，
+  返回对应的 `shift` 和 `inv_epsilon`。**这张表就是它产出来的**，不是我手填的。
+* `Softmax.LAYERS`：12 行 `(shift, inv_epsilon)`，64 个 MRPC validation 样本上量的。
+  `stage_07_softmax` 现在按层查这张表。
+
+```
+layer   shift      min D     max D   levels        不动中心
+  0    -15.26    1.74e-2     0.466      5      10  (error 差 4 倍)
+  1    -10.26    1.06e-3     0.488      7      10
+  2    -19.75    2.54e-3     0.480      7      10  (error 差 6 倍)
+  3     -9.26    1.07e-3     0.462      7      10
+  4    -11.51    2.51e-3     0.457      7      10
+  5    -12.01    3.37e-3     0.490      7      10
+  6    -12.01    2.59e-3     0.488      7      10
+  7    -11.26    2.93e-3     0.492      7      10
+  8     -4.51    5.43e-5     0.442     10      10
+  9     -8.51    2.06e-4     0.447      9      11
+ 10    -15.26    5.11e-3     0.466      6      11
+ 11    -14.01    3.09e-3     0.491      7      11
+                                       86     123
+```
+
+**layer 8 要 10 次迭代**，比现在的 9 次多一个 level。这是没办法的：它的
+min/max 比值是 1.2e-4，和中心无关。但注意 **NARROW 的 2^-14 在 layer 8 上本来就是错的**——
+实测最小值 5.43e-5 floor 到 2^-15，在 2^-14 之下。所以不是"多花一个 level"，
+是"原来那个 level 数本来就不够，只是没人发现，因为 `he_inv` 在界外是饱和不是报错"。
+
+两个测试：
+* `test_recentring_the_fit_buys_iterations_without_moving_the_softmax`——同一组 score
+  跑两次，中心差 13.5，迭代 9 次 vs 4 次，误差 6.04e-4 vs 6.44e-4。**持平**，
+  这就是要钉的东西（level 省下来是算术，softmax 还是不是 softmax 才是要测的）。
+* `test_the_layer_table_is_the_one_calibrate_produces`——表的内部一致性和 86 这个总数。
+
+### 还是要你那边跑全量
+
+这张表是 408 行里的 64 行量的（本机 dataset cache 只有 64 行，`complete: false`）。
+`target=0.5` 给上界留了 2 倍，`inv_epsilon` floor 到 2 的幂给下界留了 1.8 倍（layer 8）
+到 3.5 倍。**请在全量上重跑一次 `calibrate(scores, target=0.5)`**，每层一次调用，
+输入是 `traces[sample][f"layer_{i}"]["scores_unmasked"][:, :tokens, :tokens]`。
+数不对就把表换掉。
+
