@@ -704,6 +704,26 @@ def command_magnitudes(args):
                         for i in range(half)]
         print(f"\nstage 06 outputs      {'  '.join(f'{m:.4g}' for m in magnitudes)}")
         print(f"stage 07 would refresh {'  '.join(f'{m:.4g}' for m in packed_pairs)}")
+
+        # The magnitude alone does not travel between machines - it depends on the input. The ratio to
+        # the plaintext score does, and it is the quantity actually in dispute: whether stage 06
+        # carries the score or some multiple of it. Checked at the slot where the plaintext score is
+        # largest, since that is the one a bound has to accommodate.
+        scale = SOFTMAX_SCALES.get(args.layer, DEFAULT_SOFTMAX_SCALE)
+        weight = layer_parameters(state, args.layer)
+        query = x @ weight["query.weight"].T + weight["query.bias"]
+        key = (x @ weight["key.weight"].T + weight["key.bias"]) * scale
+        heads = np.stack([query[:, h * g.n_out:(h + 1) * g.n_out]
+                          @ key[:, h * g.n_out:(h + 1) * g.n_out].T for h in range(g.n_blocks)])
+        head, token, other = np.unravel_index(np.abs(heads).argmax(), heads.shape)
+        diagonal = (int(other) - int(token)) % g.dim
+        held = np.asarray(engine.decrypt(scores[diagonal // g.pack]))[
+            g.slot(diagonal % g.pack, int(token), int(head))]
+        expected = float(heads[head, token, other])
+        print(f"\nplaintext score (with softmax_scale) max {abs(expected):.5g} "
+              f"at head {head}, ({token}, {other}) - diagonal {diagonal}")
+        print(f"the ciphertext holds {abs(held):.5g} there, a ratio of "
+              f"{abs(held) / abs(expected):.4f}")
         return 0
 
     layer.forward(packed, weights, layer.padding_mask(tokens), args.layer)
