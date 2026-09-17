@@ -44,6 +44,30 @@ def run_clear(geometry, x, w, b, depth=DEPTH, layer_index=0):
 
 
 # ---------------------------------------------------------------- 1. the packing
+def test_the_feed_forward_carrier_is_the_amplitude_the_layer_is_entered_at():
+    """`FeedForwardStages.carrier` and `ACTIVATION_SCALE` are two spellings of one number.
+
+    They are declared apart, and a non-linearity is where that costs. Every linear stage carries the
+    amplitude through untouched, so it can be wrong everywhere and cancel; GELU cannot, which is why
+    `stage_13` divides the tanh's argument by `carrier` and why `test_stage_13_is_gelu_in_place`
+    enters at `CARRIER * x` and expects `CARRIER * gelu(x @ w1.T)`. That test uses the same constant
+    on both sides, so it passes at any value of it - what it cannot see is the layer being *entered*
+    at a different amplitude than the one GELU divides out, which is `--output-scale`, which is
+    `ACTIVATION_SCALE`. Then GELU computes a different function and nothing says so.
+
+    The softmax is the same hazard and it did bite: its carrier is folded into a plaintext constant
+    rather than passed as a parameter, so nothing had to agree with anything, and `SOFTMAX_SCALES`
+    was wrong by four for a day and by two for layer 2 - see
+    `test_stage_06_hands_the_softmax_berts_own_score`.
+    """
+    from thorfhe.feedforward import FeedForwardStages
+
+    assert FeedForwardStages.carrier == ACTIVATION_SCALE, (
+        f"the feed-forward divides GELU's argument by {FeedForwardStages.carrier} while the layer is "
+        f"entered at {ACTIVATION_SCALE}; GELU is not linear, so it would compute a different "
+        f"function and every linear stage around it would carry the result along quite happily")
+
+
 @pytest.mark.parametrize("geometry", [SMALL, THOR_BERT], ids=["small", "bert"])
 @pytest.mark.parametrize("entry", [1.0, ACTIVATION_SCALE], ids=["at-1", "at-activation-scale"])
 def test_qkv_computes_xw_plus_bias(geometry, entry):
