@@ -14,6 +14,7 @@ import pytest
 
 from thorfhe import THOR_BERT, ClearEngine, block_diagonal_masks
 from thorfhe.attention import attention_rotate_masks, ccmm_masks, make_copies_masks, transpose_masks
+from thorfhe.layer import DEFAULT_SOFTMAX_SCALE, SOFTMAX_SCALES
 from thorfhe.softmax import Softmax, calibrate
 
 G = THOR_BERT
@@ -221,3 +222,26 @@ def test_score_refresh_scale_changes_only_what_stage_07_bootstraps(mask_families
         f"scaling the refresh moved the softmax by {difference:.3g}; it must not move at all")
     assert peaks[1.0] / peaks[scale] == pytest.approx(scale, rel=1e-6), (
         f"and it has to scale what is bootstrapped: {peaks[1.0]:.4g} -> {peaks[scale]:.4g}")
+
+
+def test_the_softmax_scale_is_the_one_that_gives_bert_its_own_temperature():
+    """`he_softmax` has to see BERT's score, and the constant is what makes it so.
+
+    Two measured facts fix it. Stage 06 carries the product exactly - not twice it, not four times -
+    which `test_attention_score_is_exactly_q_k_transpose` pins to 1e-12 and
+    `bench magnitudes --through 06` reports as a ratio of 1.0000 against the plaintext score. And
+    `stage_07_softmax` doubles on its way through the bootstrap, which its own docstring states. So
+    `he_softmax` sees `2 * (q.k) * scale`, and BERT's score is `(q.k) / sqrt(head_dim)`.
+
+    This was 1/64 until it was measured against BERT's own softmax on the real checkpoint, where it
+    is off by 0.908 at worst - a probability that should be near 1 coming back near 0.09 - while 1/16
+    is off by 0.00225. The softmax had been running at four times BERT's temperature, which is also
+    why its denominator sat seven times under `inv_epsilon`.
+
+    Nothing caught it because the stage tests calibrate to their synthetic scores, and a uniform
+    factor is exactly what a calibration absorbs. This one cannot: it is arithmetic on the constant.
+    """
+    assert 2 * DEFAULT_SOFTMAX_SCALE == pytest.approx(1 / np.sqrt(G.n_out)), (
+        f"he_softmax would see 2 * {DEFAULT_SOFTMAX_SCALE} = {2 * DEFAULT_SOFTMAX_SCALE} of q.k, "
+        f"against BERT's 1/sqrt({G.n_out}) = {1 / np.sqrt(G.n_out)}")
+    assert SOFTMAX_SCALES[2] == DEFAULT_SOFTMAX_SCALE / 2, "layer 2 keeps THOR's factor of two"

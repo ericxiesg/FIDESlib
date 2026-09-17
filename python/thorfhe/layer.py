@@ -31,14 +31,23 @@ from .softmax import Softmax
 #: and ``he_softmax(x)`` approximates ``softmax(x)`` (which is the contract ``test_stage9`` pins, and
 #: the units THOR's window is in - its [-27.2, 21.7] is the range of a BERT-base score).
 #:
-#: Counting the factors under THOR's doubled-ciphertext convention: q and k are each carried at 2x,
-#: stage 06's own masks contribute a half, and ``stage_07_softmax``'s bootstrap fold doubles again -
-#: measured end to end, ``he_softmax`` sees ``4 * (q.k) * scale``. Setting ``scale = 1/64`` makes that
-#: ``(q.k) / 16 * 4 == (q.k) / 8``, the score after BERT's ``1/sqrt(head_dim)``. Layer 2 keeps THOR's
-#: factor of two. THOR writes 1/512 and 1/1024 here, which its own softmax must compensate elsewhere;
-#: this port's value is the one its own stages measure, and ``--per-stage`` is how to re-check it.
-SOFTMAX_SCALES = {2: 1 / 128}
-DEFAULT_SOFTMAX_SCALE = 1 / 64
+#: Counting the factors: stage 06 carries the product exactly - `bench magnitudes --through 06`
+#: reports a ratio of 1.0000 against the plaintext score, and
+#: ``test_attention_score_is_exactly_q_k_transpose`` pins it to 1e-12 - and ``stage_07_softmax``'s
+#: bootstrap fold doubles it. So ``he_softmax`` sees ``2 * (q.k) * scale``, and matching BERT's
+#: ``(q.k) / sqrt(64)`` needs ``scale = 1/16``.
+#:
+#: It was 1/64 until this was measured, on an accounting that had q and k each carried at 2x and
+#: stage 06's masks contributing a half. Only the *bias* is doubled (`x @ W.T + 2b`, not
+#: `2(x @ W.T + b)` - see ``test_qkv_computes_xw_plus_bias``), so that came out 2x too large, and the
+#: softmax ran at four times BERT's temperature. End to end against BERT's own softmax on the real
+#: checkpoint: 1/64 is off by 0.908 at worst, 1/16 by 0.00225.
+#:
+#: Layer 2 keeps THOR's factor of two. THOR writes 1/512 and 1/1024 here, which its own softmax must
+#: compensate elsewhere; this port's value is the one its own stages measure, and
+#: ``bench magnitudes --through 06`` is how to re-check it.
+SOFTMAX_SCALES = {2: 1 / 32}
+DEFAULT_SOFTMAX_SCALE = 1 / 16
 
 
 @dataclass

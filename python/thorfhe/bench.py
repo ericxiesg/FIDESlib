@@ -711,8 +711,12 @@ def command_magnitudes(args):
         # largest, since that is the one a bound has to accommodate.
         scale = SOFTMAX_SCALES.get(args.layer, DEFAULT_SOFTMAX_SCALE)
         weight = layer_parameters(state, args.layer)
-        query = x @ weight["query.weight"].T + weight["query.bias"]
-        key = (x @ weight["key.weight"].T + weight["key.bias"]) * scale
+        # `x @ W.T + 2b`, not `+ b`: `encode_weight` halves the weights to pay for the `y + conj(y)`
+        # that makes the result real, and the bias is not halved to match - see
+        # `test_qkv_computes_xw_plus_bias`. Referencing the single bias makes this ratio read 0.90
+        # when the stage is exact, which is how four hours went into a disagreement about a factor.
+        query = x @ weight["query.weight"].T + 2 * weight["query.bias"]
+        key = (x @ weight["key.weight"].T + 2 * weight["key.bias"]) * scale
         heads = np.stack([query[:, h * g.n_out:(h + 1) * g.n_out]
                           @ key[:, h * g.n_out:(h + 1) * g.n_out].T for h in range(g.n_blocks)])
         head, token, other = np.unravel_index(np.abs(heads).argmax(), heads.shape)
