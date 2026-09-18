@@ -130,6 +130,21 @@ def _instrumented(args, engine):
     return instrument(engine, args._op_timings)
 
 
+def plaintext_cache_tag(args) -> str:
+    """Everything that changes what a weight encodes to, folded into the directory name.
+
+    The scales are baked into the plaintexts by `encode_layer`, and the ring and scaling parameters
+    decide the coefficients, so a cache written under one set must not be read under another. Naming
+    them rather than hashing the arrays is the whole point of keying by provenance - but then the
+    name has to carry everything the provenance depends on.
+    """
+    parts = [str(getattr(args, "model", "model")).replace("/", "_"),
+             f"n{args.log_n}", f"d{args.depth}", f"sb{args.scaling_bits}",
+             f"fmb{args.first_mod_bits}", f"rs{args.residual_scale:g}",
+             f"srs{args.score_refresh_scale:g}"]
+    return "-".join(parts)
+
+
 def rotation_key_cost(args):
     """``(level -> bytes, budget in bytes or None)`` for choosing the extra rotation keys.
 
@@ -393,9 +408,15 @@ def print_stage_rows(index, rows, stream=sys.stderr):
 def run_encrypted(model, encoded, args, timings: Timings, traces):
     """Encrypt, run ``args.layers`` encoder layers, decrypt, finish in plaintext."""
     from .layer import EncoderLayer, encode_layer
+    from .plaintext_store import store_for
 
     config = model.config
     hidden_all, logits = [], []
+
+    # The engine comes first now, because the plaintext store encodes through it. Nothing is built
+    # here: `encode_layer` is handed the store and returns fields that encode - or load - on access.
+    engine = make_engine(args, THOR_BERT)
+    store = store_for(engine, args.plaintext_cache, tag=plaintext_cache_tag(args))
 
     with timed(timings, "encode weights"):
         # Every layer up front is 9.7 GB each at THOR's geometry - the plaintexts are one value per
@@ -405,10 +426,9 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         weights = [encode_layer(layer_parameters(model.state, index), index,
                                 residual_scale=args.residual_scale,
                                 score_refresh_scale=args.score_refresh_scale,
-                                lazy=args.lazy_weights or args.compact)
+                                lazy=args.lazy_weights or args.compact, store=store)
                    for index in range(args.layers)]
 
-    engine = make_engine(args, THOR_BERT)
     layer = EncoderLayer(engine, residual_scale=args.residual_scale,
                          refresh_scale=args.refresh_scale,
                          score_refresh_scale=args.score_refresh_scale,
@@ -545,6 +565,8 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             print(f"  sample {sample + 1}/{len(encoded)} done "
                   f"({timings.total:.1f}s elapsed)", file=sys.stderr, flush=True)
 
+    if store is not None and not args.quiet:
+        print(f"  {store.describe()}", file=sys.stderr, flush=True)
     args._bootstrap_margins = getattr(engine, "bootstrap_margins", None)
     args._recoverable_bound = getattr(engine, "recoverable_bound", None)
     return np.array(logits), np.array(hidden_all), stage_rows
@@ -886,6 +908,7 @@ def command_workingset(args):
 
     from .encoding import encode_activations
     from .layer import EncoderLayer, encode_layer
+    from .plaintext_store import store_for
     from .workingset import tracking_engine
 
     g = THOR_BERT
@@ -1068,6 +1091,13 @@ def build_parser():
                              "the keys stop fitting a 32 GB card. Implies --binary-rotations. A cap, "
                              "not a target: with --rotation-key-budget the greedy stops early rather "
                              "than overrun")
+    engine.add_argument("--plaintext-cache", default=None, metavar="DIR",
+                        help="keep encoded weights under DIR and reuse them. Encoding is 96%% of a "
+                             "layer on the device (19,137 calls at 58 ms) and the weights do not "
+                             "depend on the sample, so this is paid once: about 9.3 GiB a layer, "
+                             "112 GiB for all twelve. Keyed by checkpoint, layer, field and the "
+                             "scales that are baked in, so it cannot be read back under parameters "
+                             "it was not written under")
     engine.add_argument("--rotation-key-budget", type=float, default=None, metavar="GIB",
                         help="how much key memory the extra rotation keys may bring the set to. "
                              "Given one, they are chosen by rotations removed per byte instead of "

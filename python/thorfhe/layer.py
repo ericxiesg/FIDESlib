@@ -140,7 +140,7 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
                  score_refresh_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD,
-                 lazy: bool = False) -> LayerWeights | "LazyLayerWeights":
+                 lazy: bool = False, store=None) -> LayerWeights | "LazyLayerWeights":
     """Encode one layer's BERT arrays. ``parameters`` uses HuggingFace's names, without the prefix.
 
     Expected keys: ``{query,key,value}.{weight,bias}``, ``attention.output.dense.{weight,bias}``,
@@ -149,6 +149,11 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
 
     ``lazy`` returns a :class:`LazyLayerWeights` instead, which encodes each field as it is read and
     holds none of them. At THOR's geometry that is the difference between 9.7 GB and 3.2 GB.
+
+    ``store`` is a :class:`~thorfhe.plaintext_store.PlaintextStore`, which takes each field's *thunk*
+    and returns the field already encoded - from disk when it has been encoded before. It receives
+    the thunk rather than the arrays so that a hit builds neither: encoding is 96% of a layer on the
+    device, and the arrays that feed it are 9.7 GB.
     """
     def get(name):
         return np.asarray(parameters[name])
@@ -210,6 +215,9 @@ def encode_layer(parameters: dict, layer_index: int, *, residual_scale: float = 
         output_norm=lambda: (encode_bias(feedforward, get("output.LayerNorm.weight")),
                              encode_bias(feedforward, get("output.LayerNorm.bias"))),
     )
+    if store is not None:
+        fields = {name: (lambda name=name, build=build: store(layer_index, name, build))
+                  for name, build in fields.items()}
     if lazy:
         return LazyLayerWeights(fields)
     return LayerWeights(**{name: build() for name, build in fields.items()})
