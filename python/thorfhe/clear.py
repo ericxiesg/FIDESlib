@@ -106,6 +106,8 @@ class ClearEngine:
         #: a measurement, not a constant: stage 07 bootstraps the doubled scores, and on the
         #: `peaked_input` test those reach 20.4 of 32 - 64% of the bound, with nothing saying so.
         self.bootstrap_message_margin = 1.0
+        #: ``(peak, peak / recoverable_bound)`` for every bootstrap this engine has run, in order.
+        self.bootstrap_margins: list[tuple[float, float]] = []
         self.bootstrap_noise_only = bootstrap_noise_only
         self._rng = np.random.default_rng(seed)
 
@@ -353,6 +355,14 @@ class ClearEngine:
             raise ScaleMismatch("bootstrap: ciphertext must be canonical (scale D^1)")
         self._require_degree_one(ct, "bootstrap")
         peak = float(np.max(np.abs(ct.slots)))
+        # What the bound question actually is on hardware. The guard below only fires once a message
+        # is already over q0/(2*Delta); the number that matters before that is how much room was left,
+        # because the device's tail is wider than this engine's. Measured on the real checkpoint, the
+        # slot distributions agree to the 99th percentile and part company only in the extreme - so a
+        # bootstrap that clears the bound by 1.3x here is one the device wraps, silently, in whichever
+        # few slots ran wide. Recorded for every bootstrap, reported by `bench --bootstrap-margin`.
+        self.bootstrap_margins.append((peak, peak / self.recoverable_bound if
+                                       self.recoverable_bound else float("inf")))
         if self.strict and peak > self.recoverable_bound * self.bootstrap_message_margin:
             raise ScaleMismatch(
                 f"bootstrap: the message reaches {peak:.4g}, which is "

@@ -11,6 +11,7 @@ computes the same polynomial, so the two agree up to CKKS noise even though the 
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 import numpy as np
@@ -160,7 +161,20 @@ class DeltaCiphertext:
         return f"DeltaCiphertext(delta={self.delta:g})"
 
 
+def _debug() -> bool:
+    """``THORFHE_DEBUG`` in the environment, read per call so a test can set it and a run cannot.
+
+    Duplicated from `thorfhe.layer` rather than imported: `numeric` sits below `layer` and importing
+    upward would make the two circular.
+    """
+    return bool(os.environ.get("THORFHE_DEBUG"))
+
+
 class DivisionMixin:
+    #: What the per-iteration debug probes are named after. Stage 07 is the only caller; an owner
+    #: that wants them under another name sets this.
+    _probe_tag = "07"
+
     #: Check that a denominator lies in the range its iteration was set up for, where the values can
     #: be read. Off for a dry run over dummy data - :func:`thorfhe.he.plan_rotations` measures the
     #: *schedule*, and the zeros it feeds the layer make every value-based check meaningless.
@@ -211,6 +225,14 @@ class DivisionMixin:
             error = k * error * (2 - k * error)
 
             a, b = self._restore_magnitude(a, b)
+            # Under THORFHE_DEBUG, every step of the iteration. `07c` and `07d` bracket the whole of
+            # it, and on the device they disagree by seventeen orders of magnitude with the input
+            # already correct - so the question is which step, and nothing between the two says.
+            # `delta` is carried beside the value because it is the iteration's own bookkeeping and a
+            # probe that reported only the ciphertext would be reporting `value * delta`.
+            if _debug():
+                self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_a", [a.ciphertext])
+                self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_b", [b.ciphertext])
 
         return a.ciphertext, a.delta, error
 

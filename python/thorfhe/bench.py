@@ -545,7 +545,36 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             print(f"  sample {sample + 1}/{len(encoded)} done "
                   f"({timings.total:.1f}s elapsed)", file=sys.stderr, flush=True)
 
+    args._bootstrap_margins = getattr(engine, "bootstrap_margins", None)
+    args._recoverable_bound = getattr(engine, "recoverable_bound", None)
     return np.array(logits), np.array(hidden_all), stage_rows
+
+
+def print_bootstrap_margins(args, stream=sys.stdout):
+    """How close each bootstrap came to q0/(2*Delta), worst first.
+
+    The guard in `ClearEngine.bootstrap` fires on a message already over the bound. This is the
+    number to look at before that: the device's slot distribution matches this engine's to the 99th
+    percentile and runs wider in the extreme, so a bootstrap that only clears the bound by a small
+    factor here is one the device wraps in whichever few slots ran wide - and a wrapped slot is not
+    refreshed, it is replaced, after which `he_inv` and `he_invsqrt` amplify it without limit.
+    """
+    margins = getattr(args, "_bootstrap_margins", None)
+    if not margins:
+        return
+    bound = args._recoverable_bound
+    ratios = sorted((ratio, peak) for peak, ratio in margins)
+    print(f"\nbootstrap headroom against q0/(2*Delta) = {bound:.4g} ({len(margins)} bootstraps)",
+          file=stream)
+    print(f"  {'':4}{'peak':>12}{'of bound':>11}{'headroom':>11}", file=stream)
+    for ratio, peak in ratios[-5:][::-1]:
+        print(f"  {'':4}{peak:>12.4g}{ratio:>10.1%}{1 / ratio if ratio else float('inf'):>10.2f}x",
+              file=stream)
+    worst = ratios[-1][0]
+    print(f"  tightest {1 / worst:.2f}x. The device's tail is wider than this engine's, so anything "
+          f"under about 3x is worth scaling down\n  (--score-refresh-scale for stage 07, "
+          f"--refresh-scale for LayerNormStages.refresh, --residual-scale for stage 15).",
+          file=stream)
 
 
 # ---------------------------------------------------------------------- commands
@@ -656,6 +685,7 @@ def command_fhe(args):
         print_stage_rows(index, rows, stream=sys.stdout)
     print(f"\ntiming")
     print(timings.format())
+    print_bootstrap_margins(args)
     ops = getattr(args, "_op_timings", None)
     if ops is not None:
         print(f"\nengine primitives ({args.layers} encrypted layers, {len(encoded)} samples)")
