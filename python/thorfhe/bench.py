@@ -671,6 +671,7 @@ def command_magnitudes(args):
     speak of; the default runs the whole layer.
     """
     import collections
+    import os
     import traceback
 
     import numpy as np
@@ -720,9 +721,10 @@ def command_magnitudes(args):
     for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
         owner.check_ranges = False
 
+    # lazy: one encoded layer is 9.7 GiB and this only needs one field at a time
     weights = encode_layer(layer_parameters(state, args.layer), args.layer,
                            residual_scale=args.residual_scale,
-                           score_refresh_scale=args.score_refresh_scale)
+                           score_refresh_scale=args.score_refresh_scale, lazy=True)
     # The layer is entered at `ACTIVATION_SCALE`, and that amplitude squares into the attention
     # score. Measuring at 1 instead is what made stage 06 look like it carried `(q.k) * scale`
     # when it carries four times that - see `SOFTMAX_SCALES`.

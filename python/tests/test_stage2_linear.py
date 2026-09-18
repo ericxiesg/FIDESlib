@@ -16,6 +16,30 @@ def test_add_sub_scalar(engine):
     assert np.max(np.abs(engine.decrypt_real(engine.subtract(2.0, cx)) - (2.0 - x))) < 1e-6
 
 
+def test_subtract_a_ciphertext_from_a_plaintext_vector(engine):
+    """`plaintext - ciphertext`, which has a code path of its own and exactly one caller.
+
+    `pyfideslib.subtract` dispatches on the left operand: a scalar goes to `EvalScalarSub`, an
+    ndarray encodes and does `EvalNegate(EvalSubPt(y, pt))`. Only the scalar branch was covered
+    here, and only `he_invsqrt` uses the vector one - `numeric.py`'s `subtract((3 / k) * mask, a)`
+    is the single call site in the port that passes an array on the left.
+
+    `he_invsqrt` is reached only from LayerNorm, and LayerNorm is where a device run diverges:
+    `--per-stage` puts every stage up to `attention_dense` within 1e-3 and `norm_1` at a best-fit
+    scale of -1.5e107. An untested primitive on exactly that path is worth a test of its own, and a
+    vector left operand is not the same code as a scalar one on either engine.
+    """
+    x = rand(engine, 31)
+    mask = np.zeros(engine.slots)
+    mask[::4] = 1.0                       # the shape `he_invsqrt` uses: a sparse plaintext indicator
+    left = 3.0 * mask
+    got = engine.decrypt_real(engine.subtract(left, engine.encrypt(x)))
+    assert np.max(np.abs(got - (left - x))) < 1e-6
+    # and the sign is the thing to be sure of: off the mask this is -x, not +x
+    off = mask == 0
+    assert np.max(np.abs(got[off] + x[off])) < 1e-6
+
+
 def test_mult_plaintext_and_rescale(engine):
     x, w = rand(engine, 12), rand(engine, 13)
     cx = engine.encrypt(x)

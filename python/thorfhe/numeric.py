@@ -305,12 +305,44 @@ class InverseSqrtMixin:
             count += 1
         return count
 
+    def _check_invsqrt_range(self, denominator, mask, epsilon: float):
+        """Refuse a variance outside ``[epsilon, 1]`` where the values can be read.
+
+        The slots examined are the ones ``mask`` marks - for LayerNorm that is slot zero of each
+        token, where `_fold_into_slot_zero` leaves the statistic; the rest hold partial sums that mean
+        nothing on their own and would make any bound look violated.
+        """
+        if not (getattr(self, "check_ranges", True) and getattr(self.engine, "inspectable", False)):
+            return
+        values = np.real(np.asarray(self.engine.decrypt(denominator)))
+        carried = np.abs(np.asarray(mask)) > 1e-12
+        if not carried.any():
+            return
+        low, high = float(values[carried].min()), float(values[carried].max())
+        if low >= epsilon and high <= 1.0:
+            return
+        raise ValueError(
+            f"he_invsqrt: the variance runs over [{low:.4g}, {high:.4g}] (median "
+            f"{float(np.median(values[carried])):.4g}) on the {int(carried.sum())} slots that carry "
+            f"a statistic, but the iteration is set up for [{epsilon:.4g}, 1]. Below the lower bound "
+            f"the iteration does not converge to 1/sqrt(x), and a negative value diverges outright - "
+            f"which is what a LayerNorm returning a best-fit scale of -1e107 looks like. The window "
+            f"comes from `min_var/max_var`, so this says the variance left "
+            f"`LayerNormStages.VARIANT_BOUNDS` rather than that the arithmetic is wrong.")
+
     def he_invsqrt(self, denominator, ones, mask, epsilon: float, alpha: float):
         """``1 / sqrt(denominator)`` for a denominator known to lie in ``[epsilon, 1]``.
 
         ``ones`` is the encrypted indicator the accumulator starts from (THOR's ``masks["invsqrt_b"]``)
         and ``mask`` the plaintext indicator of the same slots. Two levels per iteration.
+
+        Range-checked like :meth:`he_inv`, and for the same reason: the schedule comes from ``epsilon``
+        alone, so a value outside the window is not merely less accurate. `he_inv` has had this guard
+        since it caught three bugs in the softmax; this one never did, and stage 11 is where a device
+        run diverges - `norm_1` comes back with a best-fit scale of -1.5e107 while every stage before
+        it is accurate to 1e-3.
         """
+        self._check_invsqrt_range(denominator, mask, epsilon)
         a = denominator
         b = ones
         error = epsilon
