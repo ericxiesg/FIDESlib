@@ -231,8 +231,11 @@ class EncoderLayer:
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
                  refresh_after_dense: bool = False, refresh_after_context: bool = False,
-                 compact: bool = False):
+                 compact: bool = False, boundary_refresh_scale: float = 4.0):
         self.engine = engine
+        #: What a layer boundary divides by before its bootstrap, or 0 to refresh nothing there.
+        #: Only layers after the first are affected - the first gets a fresh encryption.
+        self.boundary_refresh_scale = boundary_refresh_scale
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
         #: optional ``(stage_name, ciphertexts) -> anything`` callback. When set, a trace records what
@@ -363,6 +366,17 @@ class EncoderLayer:
         scope = {}
 
         attention, dense, norm, ff = self.attention, self.dense, self.norm, self.feedforward
+
+        if layer_index > 0 and self.boundary_refresh_scale:
+            # A layer costs 36 levels: it enters at 37 and leaves at 1, measured. Nothing refreshed
+            # between layers, so the second one asked for twenty levels it did not have and died in
+            # `pcmm` at level -1 - which is why every run so far has been `--layers 1`.
+            #
+            # The state also leaves a layer at about 19.4 and grows (22.6 after the second), which is
+            # already past the bootstrap's recoverable q0/(2*Delta) of 16, so it cannot simply be
+            # refreshed: `refresh` halves internally and this divides further, by an integer, which
+            # costs neither a level nor a scale degree.
+            x = norm.refresh(np.asarray(x), scale=self.boundary_refresh_scale)
 
         scope["residual"], scope["complexified"] = attention.stage_01_complexify_x(x, layer_index)
         # With `stream_qkv` the copies are not built here at all: each projection makes its own and

@@ -151,3 +151,26 @@ def test_debug_reports_what_compact_turned_on(monkeypatch, capsys):
     monkeypatch.delenv("THORFHE_DEBUG")
     EncoderLayer(ClearEngine(THOR_BERT, depth=20), compact=True)
     assert "[compact]" not in capsys.readouterr().out
+
+
+def test_a_layer_boundary_refreshes_so_the_next_layer_has_levels():
+    """A layer costs 36 levels, so the second one starts at 1 unless the boundary refreshes it.
+
+    Measured on the real checkpoint: a layer enters at 37 and leaves at 1, and nothing between layers
+    bootstrapped. The second layer then asked `pcmm` for twenty levels it did not have and died at
+    level -1, which is why every run in this project has been `--layers 1`.
+
+    The state also leaves a layer at about 19.4 and grows - 22.6 after the second - against a
+    recoverable bound of 16, so the boundary cannot simply bootstrap: it divides first.
+    """
+    import inspect
+
+    from thorfhe.layer import EncoderLayer
+    from thorfhe.layernorm import LayerNormStages
+
+    assert "boundary_refresh_scale" in inspect.signature(EncoderLayer.__init__).parameters
+    assert EncoderLayer.__init__.__kwdefaults__["boundary_refresh_scale"] > 1, (
+        "the boundary bootstrap needs a divisor: the hidden state leaves a layer above the bound")
+    # `refresh` has to take the divisor per call, because the two sites want different ones: after
+    # stage 10 the attention dense reaches 3.8 to 5.2, a layer boundary carries about 19 to 23.
+    assert "scale" in inspect.signature(LayerNormStages.refresh).parameters

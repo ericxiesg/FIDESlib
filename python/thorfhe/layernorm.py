@@ -180,7 +180,7 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         self.probed("11.residual", residual)
         return self.he_layernorm1(residual, gamma, beta, ones)
 
-    def refresh(self, x):
+    def refresh(self, x, scale=None):
         """Bootstrap a real 8-ciphertext bundle, folding pairs so it costs four bootstraps not eight.
 
         Not a THOR stage - ``he.py`` has no refresh here. It is an inserted one, and it is *semantically
@@ -205,7 +205,10 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         """
         half = len(x) // 2
         out = np.empty((len(x),), dtype=object)
-        restore = int(self.refresh_scale)
+        # `scale` overrides the attribute for one call, because the two sites that refresh want
+        # different divisors: after stage 10 the attention dense reaches 3.8 to 5.2, while a layer
+        # boundary carries the whole hidden state at about 19 to 23.
+        restore = int(self.refresh_scale if scale is None else scale)
         for index in range(half):
             merged = self.add(x[index], self.multiply_1j(x[index + half]))
             merged = self.bootstrap(self.rescale(self.multiply(merged, 0.5 / restore)))

@@ -434,7 +434,8 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                          score_refresh_scale=args.score_refresh_scale,
                          binary_rotations=rotation_mode(args),
                          refresh_after_dense=args.refresh_after_dense,
-                         compact=args.compact)
+                         compact=args.compact,
+                         boundary_refresh_scale=args.boundary_refresh_scale)
     layer.attention.inverse_lift = args.inverse_lift
     def magnitude_probe(name, value):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
@@ -1105,6 +1106,13 @@ def build_parser():
                              "the keys stop fitting a 32 GB card. Implies --binary-rotations. A cap, "
                              "not a target: with --rotation-key-budget the greedy stops early rather "
                              "than overrun")
+    engine.add_argument("--boundary-refresh-scale", type=float, default=4.0, metavar="S",
+                        help="divide the hidden state by S before the bootstrap that starts every "
+                             "layer after the first; 0 refreshes nothing there. A layer costs 36 "
+                             "levels (in at 37, out at 1), so without this the second layer dies in "
+                             "pcmm at level -1 - which is why every run so far has been --layers 1. "
+                             "S is needed because the state leaves a layer at about 19 and grows, "
+                             "against a recoverable bound of 16")
     engine.add_argument("--inverse-lift", type=int, default=1, metavar="N",
                         help="multiply the softmax denominator by N before he_inv refreshes it, and "
                              "divide it back out afterwards. The bootstrap's error is absolute - "
