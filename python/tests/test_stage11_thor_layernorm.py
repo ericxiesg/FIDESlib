@@ -169,6 +169,12 @@ def test_stage_16_is_invariant_to_a_scaled_residual(masks, scale):
     The level cost is unchanged for a reason visible in the code rather than measured: `he_invsqrt`
     takes `epsilon = min_var / max_var` (layernorm.py:133), a ratio, and `var_e / max_denominator`
     is a ratio too - so dividing both bounds by `s^2` changes neither.
+
+    `layer_index=None` on purpose. The data here is `normal(0, 1.2)`, not a checkpoint's, and
+    `MEASURED_VARIANCE` is a window fitted to what BERT actually produces - tight enough that this
+    synthetic variance falls under it. None is the uncalibrated fallback, which is what a test of the
+    scaling *property* wants: the property holds for any window, and pinning one here would make this
+    test fail whenever the calibration is re-measured.
     """
     rng = np.random.default_rng(29)
     values = rng.normal(0, 1.2, (D.dim, D.features))
@@ -183,7 +189,7 @@ def test_stage_16_is_invariant_to_a_scaled_residual(masks, scale):
         x = [engine.encrypt(m) for m in encode(values / factor)]
         out = stages.stage_16_output_layernorm(
             x, encode_bias(D, gamma), encode_bias(D, beta),
-            engine.encrypt(np.ones(D.slot_count)), layer_index=0)
+            engine.encrypt(np.ones(D.slot_count)), layer_index=None)
         got[factor] = [np.real(np.asarray(engine.decrypt(ct))) for ct in out]
         levels[factor] = engine.level(out[0])
 
@@ -307,3 +313,45 @@ def test_refresh_stays_the_identity_under_a_scaled_bootstrap(masks, scale):
         f"{np.max(np.abs(results[1.0] - results[scale])):.3g}")
     assert peaks[1.0] / peaks[scale] == pytest.approx(scale, rel=1e-9), (
         f"and it has to scale what is bootstrapped: {peaks[1.0]:.4g} -> {peaks[scale]:.4g}")
+
+
+def test_the_measured_variance_table_covers_every_layer_and_is_ordered():
+    """The window is calibration, so it has to be a measurement of all twelve, not of one."""
+    from thorfhe.layernorm import LayerNormStages as LN
+
+    assert sorted(LN.MEASURED_VARIANCE) == list(range(12))
+    for index, (a_lo, a_hi, b_lo, b_hi) in LN.MEASURED_VARIANCE.items():
+        assert 0 < a_lo < a_hi, index
+        assert 0 < b_lo < b_hi, index
+
+
+def test_the_old_single_window_does_not_fit_the_last_layer():
+    """Why this exists: `VARIANT_BOUNDS` is fitted to layer 0, and the last layer falls under it.
+
+    LN1's lower bound is 0.15 and layer 11 measures 0.023, which is 0.092 once
+    `ACTIVATION_SCALE ** 2` is put back - below the bound, where `he_invsqrt` does not converge.
+    Layer 10 lands at 0.156, inside by four percent, which is not margin on a device whose bootstrap
+    carries 0.017 of absolute error.
+    """
+    from thorfhe.layernorm import LayerNormStages as LN
+    from thorfhe.numeric import ACTIVATION_SCALE
+
+    square = ACTIVATION_SCALE ** 2
+    assert square * LN.MEASURED_VARIANCE[11][0] < 0.15
+    assert 0.15 < square * LN.MEASURED_VARIANCE[10][0] < 0.15 * 1.05
+    # layer 0, the one it was fitted to, sits comfortably inside
+    assert square * LN.MEASURED_VARIANCE[0][0] > 5 * 0.15
+
+
+def test_a_tighter_window_is_the_point_it_buys_levels():
+    """`he_invsqrt`'s iteration count comes from the window's ratio, and each iteration is two levels."""
+    from thorfhe.layernorm import LayerNormStages as LN
+    from thorfhe.numeric import InverseSqrtMixin
+
+    old = (InverseSqrtMixin.invsqrt_iterations(0.15 / 10.0, 0.001)
+           + InverseSqrtMixin.invsqrt_iterations(0.2 / 150.0, 0.001))
+    _, lo1, hi1 = LN.variance_bounds(LN, 0, 1)
+    _, lo2, hi2 = LN.variance_bounds(LN, 0, 2)
+    new = (InverseSqrtMixin.invsqrt_iterations(lo1 / hi1, 0.001)
+           + InverseSqrtMixin.invsqrt_iterations(lo2 / hi2, 0.001))
+    assert new < old, f"layer 0 should need fewer iterations, got {new} against {old}"

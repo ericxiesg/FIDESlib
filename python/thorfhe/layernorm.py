@@ -25,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 
 from .geometry import Geometry
-from .numeric import InverseSqrtMixin, NumericMixin
+from .numeric import ACTIVATION_SCALE, InverseSqrtMixin, NumericMixin
 from .stages import Stages
 
 #: the rotations that fold a token's ``2^k`` slots together, and broadcast them back.
@@ -170,7 +170,7 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         """
         return [self.add(*self.align(a, b)) for a, b in zip(x, y)]
 
-    def stage_11_attention_layernorm(self, x, dense, gamma, beta, ones):
+    def stage_11_attention_layernorm(self, x, dense, gamma, beta, ones, *, layer_index=None):
         """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels.
 
         Whether it does is exactly what `11.residual` reports: the residual is aligned down to the
@@ -178,7 +178,9 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         """
         residual = self._residual(x, dense)
         self.probed("11.residual", residual)
-        return self.he_layernorm1(residual, gamma, beta, ones)
+        var_e, min_var, max_var = self.variance_bounds(layer_index, 1)
+        return self.he_layernorm1(residual, gamma, beta, ones,
+                                  var_e=var_e, min_var=min_var, max_var=max_var)
 
     def refresh(self, x, scale=None):
         """Bootstrap a real 8-ciphertext bundle, folding pairs so it costs four bootstraps not eight.
@@ -241,6 +243,58 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
     #: The bounds each stage-16 variant declares, before `residual_scale`.
     VARIANT_BOUNDS = {2: (1e-5, 0.2, 150.0), 3: (1e-5, 0.75, 2500.0)}
 
+    #: Per-token variance of what each LayerNorm is handed, as ``(LN1 min, LN1 max, LN2 min, LN2
+    #: max)``, measured on the **plaintext** model over 200 MRPC validation sentences - `hidden +
+    #: dense` for stage 11 and `norm_1 + output` for stage 16. No FHE and no level budget involved,
+    #: so it is exact and cheap to redo for another checkpoint.
+    #:
+    #: Plaintext, so :data:`~thorfhe.numeric.ACTIVATION_SCALE` has to be put back: every activation
+    #: in the port carries twice its value, and a variance carries the square of that. The bounds
+    #: below are multiplied by four in :meth:`variance_bounds`, not here, so the numbers stay the
+    #: ones a plaintext run reproduces.
+    #:
+    #: `VARIANT_BOUNDS` is one window for all twelve layers and it does not fit them. Two things
+    #: follow from this table. It is *wrong* at the bottom for the late layers - LN1 reaches 0.039 at
+    #: layer 10 and 0.023 at layer 11, against a lower bound of 0.15 - and it is far too *wide* for
+    #: the early ones, which costs levels: `he_invsqrt`'s iteration count comes from the window's
+    #: ratio and each iteration is two levels. A layer spends 36 of the 37 available, so that is not
+    #: bookkeeping.
+    #:
+    #: It also explains the variant rule it replaces. Variants 2 and 3 differ in nothing but their
+    #: default bounds, and THOR routes layers 9 and 10 to the wider one - which is exactly where LN2
+    #: reaches 1832 and 1638 against everything else's 3.99 to 111.
+    MEASURED_VARIANCE = {
+        0: (0.2228, 0.6868, 1.002, 7.566),    1: (0.2032, 0.8268, 0.8749, 8.749),
+        2: (0.2184, 1.004, 0.8972, 111.5),    3: (0.2289, 0.9494, 0.8829, 51.42),
+        4: (0.1509, 1.267, 0.8383, 46.99),    5: (0.1358, 1.411, 0.8326, 35.03),
+        6: (0.1859, 1.179, 0.8222, 23.04),    7: (0.1581, 1.139, 0.7519, 15.76),
+        8: (0.1242, 1.251, 0.6857, 34.34),    9: (0.09679, 1.244, 0.6591, 1832.0),
+        10: (0.039, 1.264, 0.6816, 1638.0),   11: (0.02297, 1.361, 0.6971, 3.987),
+    }
+
+    #: What the measured window is widened by on each side, so the ratio the iteration is priced on
+    #: is four times what 200 sentences showed. Sixteen sentences put layer 9's LN2 maximum at 625
+    #: and two hundred at 1832, so the sample moves and the margin is not decoration. Two is where
+    #: the saving still holds: 3.2 levels a layer against 4.5 at 1.3, and nothing at all by 4.
+    BOUNDS_MARGIN = 2.0
+
+    def variance_bounds(self, layer_index, which: int):
+        """``(var_e, min_var, max_var)`` for this layer's stage 11 (``which=1``) or 16 (``which=2``).
+
+        Falls back to `VARIANT_BOUNDS` for a layer with no measurement, which is what a geometry or a
+        checkpoint this table was not measured on will get.
+        """
+        entry = self.MEASURED_VARIANCE.get(layer_index)
+        if entry is None:
+            if which == 1:
+                return 1e-5, 0.15, 10.0
+            return self.VARIANT_BOUNDS[3 if layer_index in (9, 10) else 2]
+        low, high = (entry[0], entry[1]) if which == 1 else (entry[2], entry[3])
+        # The measurement is of plaintext values; the ciphertext carries ACTIVATION_SCALE times them
+        # and a variance carries its square.
+        square = ACTIVATION_SCALE ** 2
+        return 1e-5, square * low / self.BOUNDS_MARGIN, square * high * self.BOUNDS_MARGIN
+
     def stage_16_output_layernorm(self, x, gamma, beta, ones, *, layer_index):
         """THOR routes layers 9 and 10 to the widest variance window; everything else to variant 2.
 
@@ -248,9 +302,11 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         follow. Their *ratio* is untouched, which is what sets `he_invsqrt`'s iteration count - so
         this changes no levels.
         """
-        number = 3 if layer_index in (9, 10) else 2
-        variant = self.he_layernorm3 if number == 3 else self.he_layernorm2
-        var_e, min_var, max_var = self.VARIANT_BOUNDS[number]
+        # Variants 2 and 3 differ in nothing but their default bounds, so with a per-layer window
+        # the choice between them carries no information - it was the two-entry approximation of
+        # this table. `he_layernorm2` is kept as the entry point because `HALVES` is keyed by it.
+        variant = self.he_layernorm2
+        var_e, min_var, max_var = self.variance_bounds(layer_index, 2)
         square = self.residual_scale ** 2
         return variant(x, gamma, beta, ones, var_e=var_e / square,
                        min_var=min_var / square, max_var=max_var / square)

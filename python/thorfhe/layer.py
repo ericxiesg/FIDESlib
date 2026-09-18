@@ -432,7 +432,8 @@ class EncoderLayer:
         if self.refresh_after_dense:
             attention_dense = keep("refreshed_dense", norm.refresh(attention_dense))
         norm_1 = keep("norm_1", norm.stage_11_attention_layernorm(
-            scope["residual"], attention_dense, *weights.attention_norm, self.norm_ones))
+            scope["residual"], attention_dense, *weights.attention_norm, self.norm_ones,
+            layer_index=layer_index))
         drop("residual")
         attention_dense = None
 
