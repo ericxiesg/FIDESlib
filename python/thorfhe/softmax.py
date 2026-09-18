@@ -48,6 +48,13 @@ class SoftmaxMixin:
     #: the internal precision target of every division but the last.
     internal_alpha = 0.1
 
+    #: What `he_inv` multiplies the denominator by before refreshing it. One leaves the schedule
+    #: exactly as it was. Above one it moves the denominator up `[epsilon, 1]`, where the bootstrap's
+    #: absolute error - 0.017 on the device, against layer 0's epsilon of 2^-6 = 0.0156 - is a
+    #: smaller fraction of it. Level-free, because the scalar is an integer; refused by
+    #: `_check_inversion_range` if it would push the denominator past 1.
+    inverse_lift = 1
+
     def _carrying(self, attention_mask):
         """``ones``, restricted to the query rows that hold a real token.
 
@@ -117,7 +124,8 @@ class SoftmaxMixin:
         epsilon = precision / 128 / 2
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
                                               epsilon=epsilon, alpha=alpha / 10,
-                                              support=self._support(attention_mask))
+                                              support=self._support(attention_mask),
+                                              lift=self.inverse_lift)
 
         # the final inverse is only needed in the first group, which is where the broadcast starts
         window = g.group_size if final else g.slot_count
@@ -148,7 +156,8 @@ class SoftmaxMixin:
         self.probed("07c.denominator", [total])
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
                                               epsilon=inv_epsilon, alpha=self.internal_alpha / 10,
-                                              support=self._support(attention_mask))
+                                              support=self._support(attention_mask),
+                                              lift=self.inverse_lift)
         self.probed("07d.inverse_denominator", [inv_D])
         for _ in range(int(np.log2(l)) - 1):
             exp_u, inv_D, delta, precision = self.update_inv_D(

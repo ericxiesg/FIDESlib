@@ -435,6 +435,7 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                          binary_rotations=rotation_mode(args),
                          refresh_after_dense=args.refresh_after_dense,
                          compact=args.compact)
+    layer.attention.inverse_lift = args.inverse_lift
     def magnitude_probe(name, value):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
 
@@ -1104,6 +1105,14 @@ def build_parser():
                              "the keys stop fitting a 32 GB card. Implies --binary-rotations. A cap, "
                              "not a target: with --rotation-key-budget the greedy stops early rather "
                              "than overrun")
+    engine.add_argument("--inverse-lift", type=int, default=1, metavar="N",
+                        help="multiply the softmax denominator by N before he_inv refreshes it, and "
+                             "divide it back out afterwards. The bootstrap's error is absolute - "
+                             "0.017 on the device against layer 0's epsilon of 2^-6 - so a "
+                             "denominator low in [epsilon, 1] is mostly error. Level-free (the "
+                             "scalar is an integer); refused if N would push the denominator past 1. "
+                             "Measured on the clear engine with 0.017 injected: 35.6 of relative "
+                             "error at 1, 0.63 at 3")
     engine.add_argument("--plaintext-cache", default=None, metavar="DIR",
                         help="keep encoded weights under DIR and reuse them. Encoding is 96%% of a "
                              "layer on the device (19,137 calls at 58 ms) and the weights do not "

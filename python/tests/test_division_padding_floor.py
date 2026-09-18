@@ -10,6 +10,7 @@ exactly: `b` first moves at iteration 3 and is four orders out by iteration 5.
 import os
 
 import numpy as np
+import pytest
 
 from thorfhe.clear import ClearEngine
 from thorfhe.encoding import block_diagonal_masks
@@ -87,3 +88,53 @@ def test_the_floor_has_to_sit_inside_the_range_not_at_its_top():
     assert _run(with_support=True, floor=0.25) < 1e2
     assert _run(with_support=True, floor=0.75) < 1e2
     assert 0 < PADDING_FLOOR < 1
+
+
+# --------------------------------------------------------------------------- the integer lift
+def _invert(lift, boot_error=0.0, top=0.2925):
+    """1/D over a denominator spanning [2^-6, top], the way layer 0's does."""
+    low, high = block_diagonal_masks(THOR_BERT)
+    slots = THOR_BERT.slot_count
+    live = np.arange(0, slots, 128)
+    support = np.zeros(slots)
+    support[live] = 1.0
+    denominator = np.zeros(slots)
+    denominator[live] = np.linspace(2.0 ** -6, top, live.size)
+
+    engine = ClearEngine(THOR_BERT, depth=37, bootstrap_level=20)
+    stages = Division(engine, THOR_BERT, masks=low, complement_masks=high)
+    rng = np.random.default_rng(1)
+    exact = Division.bootstrap
+
+    def noisy(self, x, keep_levels=None):
+        out = exact(self, x, keep_levels)
+        if boot_error:
+            out.slots = out.slots + boot_error * rng.standard_normal(out.slots.size)
+        return out
+
+    Division.bootstrap = noisy
+    try:
+        out, delta, _ = stages.he_inv(engine.encrypt(denominator), engine.encrypt(support),
+                                      epsilon=2.0 ** -6, alpha=0.001, support=support, lift=lift)
+    finally:
+        Division.bootstrap = exact
+    got = np.real(engine.decrypt(out))[live] / delta
+    return float((np.abs(got - 1.0 / denominator[live]) / (1.0 / denominator[live])).max())
+
+
+def test_the_lift_does_not_change_the_answer_in_exact_arithmetic():
+    """It multiplies before the refresh and divides out of the returned delta: the value is the same."""
+    assert _invert(lift=1) < 1e-5
+    assert _invert(lift=3) < 1e-4
+
+
+def test_the_lift_is_what_makes_a_low_denominator_survive_the_bootstrap():
+    """0.017 of absolute error against layer 0's epsilon of 2^-6 leaves the bottom of the range noise."""
+    assert _invert(lift=1, boot_error=0.017) > 10
+    assert _invert(lift=3, boot_error=0.017) < 1.0
+
+
+def test_a_lift_that_would_push_the_denominator_past_one_is_refused():
+    """The range check runs after the lift, so an unsafe one raises instead of quietly diverging."""
+    with pytest.raises(Exception):
+        _invert(lift=4)

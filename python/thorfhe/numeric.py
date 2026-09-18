@@ -220,7 +220,7 @@ class DivisionMixin:
         return count
 
     def he_inv(self, denominator, ones, epsilon: float, alpha: float, delta: float = 1.0,
-               support=None):
+               support=None, lift: int = 1):
         """``1 / denominator`` for a denominator known to lie in ``[epsilon, 1]``.
 
         ``ones`` is an encrypted indicator of the slots that carry data - THOR's ``masks["inv_a"]`` -
@@ -231,10 +231,24 @@ class DivisionMixin:
         the bootstrap's error, half of it negative, and a negative denominator makes the iteration
         diverge - see :data:`PADDING_FLOOR`. It is a plaintext add, so it costs no level.
 
+        ``lift`` multiplies the denominator by an integer *before* the bootstrap, and divides it back
+        out of the returned ``delta``. The bootstrap's error is absolute - 0.017 on the device, which
+        is larger than layer 0's whole ``epsilon`` of 2^-6 - so a denominator sitting low in
+        ``[epsilon, 1]`` is mostly error by the time the iteration sees it. Moving it up the range is
+        the only lever that does not need a better bootstrap, and because an integer scalar is
+        level-free it is the rare one that costs nothing. The range check runs *after* the lift, so a
+        lift that would push the denominator past 1 is refused rather than silently wrong.
+
         Returns ``(ciphertext, delta, precision)``: the value is ``ciphertext / delta``, and
         ``precision`` is the achieved lower bound on the normalised denominator (it ends above
         ``1 - alpha``). One level per iteration.
         """
+        lift = max(1, int(lift))
+        if lift > 1:
+            # Before the bootstrap: the point is to make the bootstrap's fixed absolute error a
+            # smaller fraction of the message, and an integer scalar costs no level.
+            denominator = self.multiply(denominator, lift)
+            epsilon = epsilon * lift
         self._check_inversion_range(denominator, ones, epsilon)
         # `ones` is a fresh encryption and the denominator has been through a stage, so they are
         # almost never at the same level; FIXEDMANUAL will not multiply across levels.
@@ -269,7 +283,9 @@ class DivisionMixin:
                 self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_a", [a.ciphertext])
                 self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_b", [b.ciphertext])
 
-        return a.ciphertext, a.delta, error
+        # `a.delta / lift`, because the iteration inverted `lift * denominator` and the caller asked
+        # about `denominator`: the value is `ciphertext / delta`, so dividing the delta multiplies it.
+        return a.ciphertext, a.delta / lift, error
 
     def _check_inversion_range(self, denominator, ones, epsilon: float):
         """Refuse a denominator outside ``[epsilon, 1]`` where the values can be read.
