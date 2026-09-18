@@ -339,7 +339,7 @@ class Stages:
 
         The price is that the copies cannot be shared between the three projections, since each
         consumes the stream. Stages 03/04/05 therefore make them three times: 180 rotations instead
-        of 60, against a layer's 8138.
+        of 60, against a layer's 8258.
         """
         out_dim, diag_dim, in_dim = ws.shape
         window = self.g.n_blocks if window is None else window
@@ -441,7 +441,7 @@ class Stages:
     #: needs (headroom 2.7 GiB against the 3 GiB key generation wants for its scratch).
     #:
     #: Costs the copies three times over rather than once, since a stream cannot be shared: 180
-    #: rotations instead of 60, against a layer's 8138.
+    #: rotations instead of 60, against a layer's 8258.
     stream_qkv = False
 
     def apply_qkv_weight_bias(self, x, weight, bias):

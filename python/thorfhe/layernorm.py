@@ -164,8 +164,14 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         return [self.add(*self.align(a, b)) for a, b in zip(x, y)]
 
     def stage_11_attention_layernorm(self, x, dense, gamma, beta, ones):
-        """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels."""
-        return self.he_layernorm1(self._residual(x, dense), gamma, beta, ones)
+        """The attention residual and its LayerNorm. No bootstrap: stage 10 leaves enough levels.
+
+        Whether it does is exactly what `11.residual` reports: the residual is aligned down to the
+        dense output, so this level is the one the whole 14-level LayerNorm chain has to run on.
+        """
+        residual = self._residual(x, dense)
+        self.probed("11.residual", residual)
+        return self.he_layernorm1(residual, gamma, beta, ones)
 
     def refresh(self, x):
         """Bootstrap a real 8-ciphertext bundle, folding pairs so it costs four bootstraps not eight.

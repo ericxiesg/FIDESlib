@@ -33,6 +33,12 @@ class RotationPlan:
     basis: "RotationBasis | bool"
     #: how many engine rotations a layer costs under this basis, when it is known
     rotations: int | None = None
+    #: what the dry run asked for, before any basis decomposed it: ``{index: times used}`` and
+    #: ``{index: highest level}``. Kept because choosing a basis is a *budget* question - the size of
+    #: a truncated key depends on the level it is used at - and that cannot be re-derived from
+    #: ``levels``, which is already the decomposition's own demand.
+    demand: dict[int, int] | None = None
+    demand_levels: dict[int, int] | None = None
 
 
 def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
@@ -42,7 +48,10 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
                    binary_rotations: bool = False,
                    extra_rotation_keys: int = 0,
                    refresh_after_dense: bool = False,
-                   compact: bool = False) -> "RotationPlan":
+                   compact: bool = False,
+                   key_cost=None,
+                   rotation_key_budget: int | None = None,
+                   rotation_max_steps: int = 4) -> "RotationPlan":
     """The rotation keys this scope needs, and how the run must reach the indices they do not cover.
 
     Derived by running the stages on the clear engine with dummy data: every ``rotate`` records the
@@ -50,9 +59,16 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
     THOR's ``rotation_contexts`` table, computed rather than transcribed, so it cannot drift away from
     the code that uses the keys.
 
-    ``extra_rotation_keys`` asks for that many keys beyond the powers of two, chosen from the indices
-    the dry run rotated by most (see :mod:`thorfhe.rotation`); the returned ``basis`` then has to go
-    to the layer as its ``binary_rotations``, or the run will spend keys the plan did not build.
+    ``extra_rotation_keys`` asks for at most that many keys beyond the powers of two, chosen from the
+    indices the dry run rotated by most (see :mod:`thorfhe.rotation`); the returned ``basis`` then has
+    to go to the layer as its ``binary_rotations``, or the run will spend keys the plan did not build.
+    With ``key_cost`` (``level -> bytes``, normally :func:`~thorfhe.budget.key_bytes` bound to the
+    parameters) the extra keys are chosen by rotations removed per byte rather than per key, and
+    ``rotation_key_budget`` caps the bytes the key set may reach - which is the form the question
+    actually takes on a 32 GB card. ``rotation_max_steps`` is how far a single index may be reached
+    through, and it is where most of the saving is: at four, the same six extra keys cost 3465
+    rotations a layer instead of 4237, for 0.01 GiB. Six buys four more rotations for four times the
+    planning, so it is not the default.
 
     ``scope="layer"`` covers a whole encoder layer (about 210 indices) and needs the production
     geometries, since stages 10-16 change representation. ``scope="qkv"`` covers stages 01-05 only
@@ -146,12 +162,15 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
         # re-derive the plan through the basis' own decomposition so the keys built are exactly the
         # keys spent - see `thorfhe.rotation`.
         basis = factored_basis(engine.rotation_counts, geometry.slot_count,
-                               extra_keys=extra_rotation_keys)
+                               extra_keys=extra_rotation_keys, max_steps=rotation_max_steps,
+                               levels=plan, key_cost=key_cost, budget=rotation_key_budget)
         return RotationPlan(levels=key_levels(basis, plan), basis=basis,
-                            rotations=rotation_cost(basis, engine.rotation_counts))
+                            rotations=rotation_cost(basis, engine.rotation_counts),
+                            demand=dict(engine.rotation_counts), demand_levels=plan)
     return RotationPlan(levels=plan, basis=binary_rotations,
                         rotations=sum(engine.rotation_counts.values())
-                        if not binary_rotations else None)
+                        if not binary_rotations else None,
+                        demand=dict(engine.rotation_counts), demand_levels=plan)
 
 
 def plan_rotation_keys(*args, **kwargs) -> dict[int, int]:

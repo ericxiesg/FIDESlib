@@ -123,7 +123,7 @@ class ClearEngine:
     KEYSWITCH_BITS_BELOW_SCALE = 40    # one rotation, conjugation or relinearisation
 
     #: Model only the bootstrap's error and skip the rest. The others are real but negligible against
-    #: it, and they are the expensive ones: a key-switch is 2^-40 of the scale and a layer's 8138
+    #: it, and they are the expensive ones: a key-switch is 2^-40 of the scale and a layer's 8258
     #: rotations accumulate 8.2e-11, against a bootstrap error of 4.9e-04 at `q0/Delta = 32` - one
     #: part in 5.9 million. Modelling them costs an allocation of two `slot_count` arrays per
     #: operation, which is what puts a noise-modelled layer out of reach of a small machine while the

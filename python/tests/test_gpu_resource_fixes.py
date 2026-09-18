@@ -119,6 +119,37 @@ def test_binary_rotations_agree_with_direct_ones():
     assert all(index & (index - 1) == 0 for index in binary_engine.rotations_used)
 
 
+def test_a_factored_basis_rotates_where_the_direct_key_would():
+    """Three- and four-step chains have to land on the same slot a single key would.
+
+    `RotationBasis` reaches an index by meeting in the middle when no pair of keys covers it, and a
+    chain that does not sum to the index is silent: it rotates to a plausible-looking wrong slot. The
+    engine is the only place that can say the chain composes, so compose it there.
+    """
+    from thorfhe.rotation import RotationBasis, binary_indices
+
+    low, high = block_diagonal_masks(SMALL)
+    slots = SMALL.slot_count
+    basis = RotationBasis(binary_indices(slots) + [3, 45, 300], slots, max_steps=4)
+    direct_engine = ClearEngine(SMALL, depth=20)
+    factored_engine = ClearEngine(SMALL, depth=20)
+    direct = Stages(direct_engine, SMALL, masks=low, complement_masks=high)
+    factored = Stages(factored_engine, SMALL, masks=low, complement_masks=high,
+                      binary_rotations=basis)
+
+    values = np.arange(slots, dtype=float)
+    # 348 = 3 + 45 + 300 is the case that exists for this test: no pair of keys reaches it, so a
+    # pairwise basis would spend its binary expansion and a broken meet-in-the-middle would land
+    # somewhere else entirely.
+    for delta in (3, 45, 300, 348, 348 - slots, 1, 5, 1234, -7, slots - 1, slots):
+        want = direct_engine.decrypt(direct.rotate(direct_engine.encrypt(values), delta))
+        got = factored_engine.decrypt(factored.rotate(factored_engine.encrypt(values), delta))
+        assert np.abs(got - want).max() == 0.0, delta
+
+    assert basis.steps(348) == (3, 45, 300)
+    assert set(factored_engine.rotations_used) <= set(basis.indices)
+
+
 def test_rotation_steps_are_the_binary_expansion():
     _, stages = small_stages()
     assert stages.rotation_steps(1) == [1]

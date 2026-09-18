@@ -117,6 +117,27 @@ def describe_rotations(args, rotations=None):
     return "binary" if args.binary_rotations else "one key per index"
 
 
+def rotation_key_cost(args):
+    """``(level -> bytes, budget in bytes or None)`` for choosing the extra rotation keys.
+
+    Without a budget the greedy spends its whole allowance on whichever index is rotated by most,
+    which on this layer is one used at depth - the most expensive key there is. Priced, it can prefer
+    two keys used below the bootstrap level that together cost less and remove more.
+    """
+    from .budget import key_bytes
+    special = getattr(args, "special_primes", 11)
+    if getattr(args, "no_truncate", False):
+        def cost(level, _depth=args.depth):
+            return key_bytes(log_n=args.log_n, level=_depth, special_primes=special,
+                             dnum=args.dnum)
+    else:
+        def cost(level, _depth=args.depth):
+            return key_bytes(log_n=args.log_n, level=min(level + 1, _depth),
+                             special_primes=special, dnum=args.dnum)
+    gib = getattr(args, "rotation_key_budget", None)
+    return cost, None if gib is None else int(gib * (1 << 30))
+
+
 def rotation_mode(args):
     """What a layer takes as its ``binary_rotations``.
 
@@ -136,13 +157,15 @@ def make_engine(args, geometry):
                  else args.bootstrap_level)
         if args.extra_rotation_keys:
             from .he import plan_rotations
+            cost, budget = rotation_key_cost(args)
             # the plan has to be made on the configuration that will run: `factored_basis` chooses
             # its extra keys from measured rotation frequencies, and `compact` changes them
             args._rotation_basis = plan_rotations(
                 geometry, depth=args.depth, bootstrap_level=level,
                 extra_rotation_keys=args.extra_rotation_keys,
                 refresh_after_dense=args.refresh_after_dense,
-                compact=args.compact).basis
+                compact=args.compact, key_cost=cost, rotation_key_budget=budget,
+                rotation_max_steps=args.rotation_max_steps).basis
         # The noise model off by default - the clear engine's job is to prove the schedule and the
         # algebra, and exact arithmetic is what makes a failure there unambiguous. Switched on, it
         # carries the *device's* bootstrap error, which is what turns a 19-minute GPU run that comes
@@ -164,6 +187,7 @@ def make_engine(args, geometry):
     # ciphertext at `depth - GetBootstrapDepth()`. Planning against a different number silently
     # builds keys for levels the run never reaches - and, worse, hides that the level budget does not
     # fit at all. Derive it, and only let --bootstrap-level override it deliberately.
+    key_cost, key_budget = rotation_key_cost(args)
     achievable = args.depth - resolve_bootstrap_depth(args)
     level = achievable if args.bootstrap_level is None else args.bootstrap_level
     if level > achievable and not args.quiet:
@@ -173,7 +197,10 @@ def make_engine(args, geometry):
     rotations = plan_rotations(geometry, depth=args.depth, bootstrap_level=level,
                                binary_rotations=args.binary_rotations,
                                extra_rotation_keys=args.extra_rotation_keys,
-                               refresh_after_dense=args.refresh_after_dense)
+                               refresh_after_dense=args.refresh_after_dense,
+                               compact=args.compact,
+                               key_cost=key_cost, rotation_key_budget=key_budget,
+                               rotation_max_steps=args.rotation_max_steps)
     plan = rotations.levels
     args._rotation_basis = rotations.basis if args.extra_rotation_keys else None
     if args.extra_rotation_keys and not args.quiet:
@@ -883,13 +910,16 @@ def command_budget(args):
 
     plan = None
     rotations = None
+    key_cost, key_budget = rotation_key_cost(args)
     if not args.keys:
         level = (args.depth - resolve_bootstrap_depth(args) if args.bootstrap_level is None
                  else args.bootstrap_level)
         rotations = plan_rotations(THOR_BERT, depth=args.depth, bootstrap_level=level,
                                    binary_rotations=args.binary_rotations,
                                    extra_rotation_keys=args.extra_rotation_keys,
-                                   refresh_after_dense=args.refresh_after_dense)
+                                   refresh_after_dense=args.refresh_after_dense,
+                                   key_cost=key_cost, rotation_key_budget=key_budget,
+                                   rotation_max_steps=args.rotation_max_steps)
         plan = rotations.levels
     predicted = estimate(log_n=args.log_n, depth=args.depth, dnum=args.dnum,
                          rotation_levels=plan, rotation_keys=args.keys,
@@ -984,9 +1014,24 @@ def build_parser():
                              "rotation count. The only way a full layer's keys fit a 32 GB card")
     engine.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N",
                         help="keep N rotation keys beyond the powers of two, chosen by measuring "
-                             "which indices the layer rotates by most. Six of them halve the "
-                             "rotation count (8138 -> 4117) for 1.0 GiB more key memory; past nine "
-                             "the keys stop fitting a 32 GB card. Implies --binary-rotations")
+                             "which indices the layer rotates by most. Six of them cut the "
+                             "rotation count from 8258 to 3465 for 1.0 GiB more key memory; past nine "
+                             "the keys stop fitting a 32 GB card. Implies --binary-rotations. A cap, "
+                             "not a target: with --rotation-key-budget the greedy stops early rather "
+                             "than overrun")
+    engine.add_argument("--rotation-key-budget", type=float, default=None, metavar="GIB",
+                        help="how much key memory the extra rotation keys may bring the set to. "
+                             "Given one, they are chosen by rotations removed per byte instead of "
+                             "per key - keys are level-truncated, so an index rotated below the "
+                             "bootstrap level is a fraction of the price of one rotated at depth")
+    engine.add_argument("--rotation-max-steps", type=int, default=4, metavar="N",
+                        help="how many keys one rotation index may be reached through. Two is a pair "
+                             "of keys and the binary expansion for everything else; four meets in "
+                             "the middle and costs 3465 rotations a layer instead of 4237 for the "
+                             "same keys. Planning cost only - the decomposition is cached")
+    engine.add_argument("--special-primes", type=int, default=11, metavar="K",
+                        help="how many special primes the context has; only used to price keys. "
+                             "Recover it from a run's key-memory line, it depends on the digits")
     engine.add_argument("--device-memory", action="store_true",
                         help="print the device pool at every stage boundary. An OOM says which stage "
                              "was unlucky, not which one was large; this says where the memory is.")
@@ -1078,6 +1123,8 @@ def build_parser():
     budget.add_argument("--no-bootstrap", action="store_true")
     budget.add_argument("--binary-rotations", action="store_true")
     budget.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N")
+    budget.add_argument("--rotation-key-budget", type=float, default=None, metavar="GIB")
+    budget.add_argument("--rotation-max-steps", type=int, default=4, metavar="N")
     budget.add_argument("--refresh-after-dense", action="store_true")
     budget.add_argument("--keys", type=int, default=None,
                         help="skip the (slow) rotation plan and assume this many untruncated keys")

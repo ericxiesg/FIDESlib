@@ -121,7 +121,7 @@ def test_the_rotation_plan_is_made_on_the_configuration_that_runs():
     time, not correctness, so nothing else would report it.
 
     Measured at THOR's geometry with six extra keys the greedy lands on the same 21 either way, and
-    the rotation count goes 4117 -> 4237. That the answer is currently the same is not a reason to
+    the rotation count goes 3345 -> 3465. That the answer is currently the same is not a reason to
     derive it from the wrong profile.
     """
     import inspect

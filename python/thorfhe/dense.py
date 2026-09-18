@@ -53,4 +53,5 @@ class DenseStages(Stages):
             # the mask multiply cost a level, so the un-folded half follows it down
             biased = self.add(self.add(self.level_down(wx[index], 1), folded), bias[index])
             out[index] = self.add(biased, self.conjugate(biased))
+        self.probed("10.attention_dense", out)
         return out
