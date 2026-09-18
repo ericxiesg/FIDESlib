@@ -170,6 +170,30 @@ def _debug() -> bool:
     return bool(os.environ.get("THORFHE_DEBUG"))
 
 
+#: What the slots outside a division's support are lifted to before the iteration runs.
+#:
+#: They should be zero and on the clear engine they are, which is harmless: the iteration keeps an
+#: exact zero at zero. On the device they are whatever the bootstrap left, and `he_inv` bootstraps its
+#: denominator - measured there at 0.017 of absolute error (10.9 bits, `test_bootstrap_noise_level`),
+#: so half of those slots come out **negative**. Goldschmidt started from a positive `ones` cannot
+#: converge to `1/x` for a negative `x`; it grows every step instead. Injecting that error on the
+#: clear engine reproduces the device exactly - `b` first moves at iteration 3 and is 1e4 by
+#: iteration 5 - and the same magnitude with its sign removed changes nothing at all.
+#:
+#: A half, because the filler has to survive the same error that made the problem. One is the top of
+#: `[epsilon, 1]` and the fastest point to converge from, and it does not work: the bootstrap's error
+#: lands on these slots too, so a filler of 1.0 leaves them at 1.017 and the iteration diverges from
+#: *above* the range instead of below it. Measured, with 0.017 of signed error injected on the clear
+#: engine - `iter05_b` is 1.0e4 with no filler, 2.0e4 at 1.0, and 0.0039 (the exact clean value) at
+#: 0.25, 0.5 and 0.75 alike. The midpoint is the furthest from both ends.
+#:
+#: This stops the divergence, not the imprecision. A live slot whose denominator is near the
+#: bootstrap's own error is still wrong by a lot - at 0.017 the smallest denominator here, 0.05,
+#: comes back 58% off - and no filler can help that. That half is bootstrap precision, which
+#: `test_bootstrap_noise_level` already records as 10.9 bits where 20-25 is wanted.
+PADDING_FLOOR = 0.5
+
+
 class DivisionMixin:
     #: What the per-iteration debug probes are named after. Stage 07 is the only caller; an owner
     #: that wants them under another name sets this.
@@ -195,11 +219,17 @@ class DivisionMixin:
             count += 1
         return count
 
-    def he_inv(self, denominator, ones, epsilon: float, alpha: float, delta: float = 1.0):
+    def he_inv(self, denominator, ones, epsilon: float, alpha: float, delta: float = 1.0,
+               support=None):
         """``1 / denominator`` for a denominator known to lie in ``[epsilon, 1]``.
 
         ``ones`` is an encrypted indicator of the slots that carry data - THOR's ``masks["inv_a"]`` -
         which is what the iteration starts from and what confines the result to those slots.
+
+        ``support`` is the same indicator as a *plaintext*, and giving it lifts everything outside it
+        to :data:`PADDING_FLOOR` once the denominator has been refreshed. Without it those slots carry
+        the bootstrap's error, half of it negative, and a negative denominator makes the iteration
+        diverge - see :data:`PADDING_FLOOR`. It is a plaintext add, so it costs no level.
 
         Returns ``(ciphertext, delta, precision)``: the value is ``ciphertext / delta``, and
         ``precision`` is the achieved lower bound on the normalised denominator (it ends above
@@ -209,6 +239,11 @@ class DivisionMixin:
         # `ones` is a fresh encryption and the denominator has been through a stage, so they are
         # almost never at the same level; FIXEDMANUAL will not multiply across levels.
         start, refreshed = self.align(ones, self.bootstrap(denominator))
+        if support is not None:
+            # After the bootstrap, because the bootstrap is what puts a sign on these slots, and as a
+            # plaintext add, which is level-free.
+            refreshed = self.add(refreshed, PADDING_FLOOR * (1.0 - np.clip(np.asarray(
+                support, dtype=float), 0.0, 1.0)))
         a = DeltaCiphertext(start, delta)
         b = DeltaCiphertext(refreshed, delta)
         error = epsilon
@@ -365,7 +400,11 @@ class InverseSqrtMixin:
         it is accurate to 1e-3.
         """
         self._check_invsqrt_range(denominator, mask, epsilon)
-        a = denominator
+        # Same reason as `he_inv`'s `support`: outside the mask these slots hold whatever the chain
+        # above left, the device's is signed, and a negative input to this iteration diverges the same
+        # way. `mask` is already the plaintext indicator here, so the lift costs one plaintext add.
+        a = self.add(denominator, PADDING_FLOOR * (1.0 - np.clip(np.asarray(mask, dtype=float),
+                                                                 0.0, 1.0)))
         b = ones
         error = epsilon
 

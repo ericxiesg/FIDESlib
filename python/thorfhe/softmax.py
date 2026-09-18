@@ -74,6 +74,20 @@ class SoftmaxMixin:
             return self.ones                      # nothing is padding; do not spend the multiply
         return self.rescale(self.multiply(self.ones, query))
 
+    def _support(self, attention_mask):
+        """The plaintext twin of :meth:`_carrying`: 1 on the slots the division's answer is kept on.
+
+        `he_inv` lifts everything outside this to `PADDING_FLOOR` after refreshing its denominator,
+        because a padding row's denominator is exactly zero and the device's bootstrap turns zero
+        into plus or minus 0.017 - and a negative denominator diverges the iteration.
+        """
+        g = self.g
+        used = ((np.arange(g.slot_count) % g.n_slot) < g.n_blocks).astype(float)
+        if attention_mask is None:
+            return used
+        query = np.maximum.reduce([np.real(np.asarray(mask)) for mask in attention_mask])
+        return np.minimum(used, query)
+
     def _sum_over_groups(self, terms):
         """Sum the score ciphertexts and then fold the groups together: the softmax denominator."""
         total = terms[0]
@@ -102,7 +116,8 @@ class SoftmaxMixin:
         total = self._sum_over_groups(list(squared))
         epsilon = precision / 128 / 2
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
-                                              epsilon=epsilon, alpha=alpha / 10)
+                                              epsilon=epsilon, alpha=alpha / 10,
+                                              support=self._support(attention_mask))
 
         # the final inverse is only needed in the first group, which is where the broadcast starts
         window = g.group_size if final else g.slot_count
@@ -132,7 +147,8 @@ class SoftmaxMixin:
         total = self._sum_over_groups(exp_u)
         self.probed("07c.denominator", [total])
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
-                                              epsilon=inv_epsilon, alpha=self.internal_alpha / 10)
+                                              epsilon=inv_epsilon, alpha=self.internal_alpha / 10,
+                                              support=self._support(attention_mask))
         self.probed("07d.inverse_denominator", [inv_D])
         for _ in range(int(np.log2(l)) - 1):
             exp_u, inv_D, delta, precision = self.update_inv_D(
