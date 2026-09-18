@@ -41,7 +41,8 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
                    feedforward: Geometry | None = None,
                    binary_rotations: bool = False,
                    extra_rotation_keys: int = 0,
-                   refresh_after_dense: bool = False) -> "RotationPlan":
+                   refresh_after_dense: bool = False,
+                   compact: bool = False) -> "RotationPlan":
     """The rotation keys this scope needs, and how the run must reach the indices they do not cover.
 
     Derived by running the stages on the clear engine with dummy data: every ``rotate`` records the
@@ -102,10 +103,15 @@ def plan_rotations(geometry: Geometry, depth: int, layer_index: int = 0, *,
                  "output.LayerNorm.weight": np.zeros(g.features),
                  "output.LayerNorm.bias": np.zeros(g.features)}
 
-        weights = encode_layer(dummy, layer_index, qkv=g, dense=dense, feedforward=feedforward)
+        weights = encode_layer(dummy, layer_index, qkv=g, dense=dense, feedforward=feedforward,
+                               lazy=compact)
+        # `compact` has to match the run: `factored_basis` picks its extra keys from the *measured*
+        # frequency of each index, and streaming the QKV copies makes them three times instead of
+        # once. A basis chosen on the wrong profile spends keys where the run does not rotate.
         layer = EncoderLayer(engine, qkv=g, dense=dense, feedforward=feedforward,
                              binary_rotations=dry_binary,
-                             refresh_after_dense=refresh_after_dense)
+                             refresh_after_dense=refresh_after_dense,
+                             compact=compact)
         # The dummy weights are zeros, so every intermediate value is an artefact of that rather than
         # of the circuit: the scores are uniform and he_inv's denominator lands far below the range
         # real activations put it in. What is being measured here is which rotations happen at which

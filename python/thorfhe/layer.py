@@ -12,6 +12,8 @@ them (the key projection's ``softmax_scale``, the feed-forward's ``1/64``, the h
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -76,6 +78,29 @@ class LayerWeights:
     intermediate: tuple
     output_dense: tuple
     output_norm: tuple
+
+
+#: The options that trade recomputation for held memory. All off by default, all exact - none of them
+#: changes a single output value, only what is alive while it is produced.
+#:
+#: ===================  ==========================================  ==================
+#: option               what it stops holding                       what it costs
+#: ===================  ==========================================  ==================
+#: ``stream_qkv``       the 64 rotated copies, 2743 -> 1652 MiB     copies made 3x
+#: ``lazy_weights``     the encoded layer, 9.7 -> 3.2 GiB           re-encoded per layer
+#: ===================  ==========================================  ==================
+#:
+#: Together they are the 1.07 GiB that decides whether `--extra-rotation-keys 6` fits: `bench budget`
+#: puts the factored basis at 2.7 GiB of headroom against the 3 GiB key generation wants for scratch.
+#:
+#: `THORFHE_DEBUG=1` makes a compact layer report what it turned on and what each stage held, which
+#: is the same thing `test_compact.py` asserts.
+COMPACT_OPTIONS = ("stream_qkv", "lazy_weights")
+
+
+def debug_enabled() -> bool:
+    """``THORFHE_DEBUG`` in the environment. Read per call so a test can set it and a run cannot."""
+    return bool(os.environ.get("THORFHE_DEBUG"))
 
 
 class LazyLayerWeights:
@@ -197,7 +222,8 @@ class EncoderLayer:
                  refresh_scale: float = 1.0, qkv: Geometry = THOR_BERT,
                  dense: Geometry = THOR_ATTENTION_DENSE,
                  feedforward: Geometry = THOR_FEEDFORWARD, binary_rotations: bool = False,
-                 refresh_after_dense: bool = False, refresh_after_context: bool = False):
+                 refresh_after_dense: bool = False, refresh_after_context: bool = False,
+                 compact: bool = False):
         self.engine = engine
         self.g_qkv, self.g_dense, self.g_ff = qkv, dense, feedforward
 
@@ -240,6 +266,17 @@ class EncoderLayer:
         self.feedforward = FeedForwardStages(engine, feedforward, masks=ff_low,
                                              complement_masks=ff_high,
                                              binary_rotations=binary_rotations)
+
+        #: Hold as little as possible and pay for it in recomputation - see `COMPACT_OPTIONS`.
+        #: Exact: every value a compact layer produces is the value a plain one produces, and
+        #: `test_compact.py` pins that at both geometries.
+        self.compact = compact
+        if compact:
+            for owner in (self.attention, self.dense, self.norm, self.feedforward):
+                owner.stream_qkv = True
+        if compact and debug_enabled():
+            print(f"[compact] stream_qkv on for {4} stage owners; pass lazy=True to encode_layer "
+                  f"for the other half", flush=True)
 
         #: Insert a bootstrap between stages 10 and 11. Not THOR's, and semantically the
         #: identity - see `LayerNormStages.refresh`. It halves the layer's deepest level

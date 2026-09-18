@@ -136,10 +136,13 @@ def make_engine(args, geometry):
                  else args.bootstrap_level)
         if args.extra_rotation_keys:
             from .he import plan_rotations
+            # the plan has to be made on the configuration that will run: `factored_basis` chooses
+            # its extra keys from measured rotation frequencies, and `compact` changes them
             args._rotation_basis = plan_rotations(
                 geometry, depth=args.depth, bootstrap_level=level,
                 extra_rotation_keys=args.extra_rotation_keys,
-                refresh_after_dense=args.refresh_after_dense).basis
+                refresh_after_dense=args.refresh_after_dense,
+                compact=args.compact).basis
         # The noise model off by default - the clear engine's job is to prove the schedule and the
         # algebra, and exact arithmetic is what makes a failure there unambiguous. Switched on, it
         # carries the *device's* bootstrap error, which is what turns a 19-minute GPU run that comes
@@ -360,7 +363,7 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         weights = [encode_layer(layer_parameters(model.state, index), index,
                                 residual_scale=args.residual_scale,
                                 score_refresh_scale=args.score_refresh_scale,
-                                lazy=args.lazy_weights)
+                                lazy=args.lazy_weights or args.compact)
                    for index in range(args.layers)]
 
     engine = make_engine(args, THOR_BERT)
@@ -368,7 +371,8 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                          refresh_scale=args.refresh_scale,
                          score_refresh_scale=args.score_refresh_scale,
                          binary_rotations=rotation_mode(args),
-                         refresh_after_dense=args.refresh_after_dense)
+                         refresh_after_dense=args.refresh_after_dense,
+                         compact=args.compact)
     def magnitude_probe(name, value):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
 
@@ -997,6 +1001,11 @@ def build_parser():
                         help="the same for `LayerNormStages.refresh`; 4 on the real checkpoint")
     engine.add_argument("--score-refresh-scale", type=float, default=1.0,
                         help="the same for stage 07's score bootstrap; 16 on the real checkpoint")
+    engine.add_argument("--compact", action="store_true",
+                        help="every option that trades recomputation for held memory, together: "
+                             "streamed QKV copies and lazily encoded weights. Exact - no output "
+                             "value changes - and worth 1.07 GiB on the device, which is the margin "
+                             "--extra-rotation-keys needs. THORFHE_DEBUG=1 reports what it did")
     engine.add_argument("--lazy-weights", action="store_true",
                         help="encode each of a layer's weight fields as it is read rather than "
                              "holding the layer. One encoded layer is 9.7 GB at THOR's geometry and "
