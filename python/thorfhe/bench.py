@@ -35,7 +35,8 @@ from .layer import ACTIVATION_SCALE
 from .geometry import (FEEDFORWARD_WINDOW, THOR_ATTENTION_DENSE, THOR_BERT,
                        THOR_FEEDFORWARD)
 from .hub import HubClient
-from .metrics import Classification, Fidelity, ProbabilityAgreement, Timings, as_dict
+from .metrics import (Classification, Fidelity, OpTimings, ProbabilityAgreement, Timings,
+                      as_dict, instrument)
 from .tokenizer import BertTokenizer
 
 DEFAULT_MODEL = "textattack/bert-base-uncased-MRPC"
@@ -117,6 +118,18 @@ def describe_rotations(args, rotations=None):
     return "binary" if args.binary_rotations else "one key per index"
 
 
+def _instrumented(args, engine):
+    """Wrap the engine's primitives when --time-ops asked for it, and remember where the totals are.
+
+    A phase total says a layer took 1131 seconds. This says which primitive did, which is the
+    question a device sitting at 0% utilisation actually poses.
+    """
+    if not getattr(args, "time_ops", False):
+        return engine
+    args._op_timings = OpTimings()
+    return instrument(engine, args._op_timings)
+
+
 def rotation_key_cost(args):
     """``(level -> bytes, budget in bytes or None)`` for choosing the extra rotation keys.
 
@@ -170,11 +183,12 @@ def make_engine(args, geometry):
         # algebra, and exact arithmetic is what makes a failure there unambiguous. Switched on, it
         # carries the *device's* bootstrap error, which is what turns a 19-minute GPU run that comes
         # back at 7.5e17 into a five-minute laptop run that comes back at 7.5e17.
-        return ClearEngine(geometry, depth=args.depth, bootstrap_level=level,
+        return _instrumented(args, ClearEngine(
+                           geometry, depth=args.depth, bootstrap_level=level,
                            strict=not args.lenient, noise_model=args.noise_model,
                            scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
                            bootstrap_precision_bits=args.bootstrap_precision_bits,
-                           bootstrap_noise_only=args.bootstrap_noise_only)
+                           bootstrap_noise_only=args.bootstrap_noise_only))
 
     import pyfideslib
 
@@ -217,14 +231,15 @@ def make_engine(args, geometry):
         print(f"\npredicted GPU footprint ({len(plan)} rotation keys):", file=sys.stderr)
         print(predicted.format(args.card_gib * (1 << 30)), file=sys.stderr, flush=True)
 
-    return pyfideslib.Engine(args.device, log_n=args.log_n, depth=args.depth,
+    return _instrumented(args, pyfideslib.Engine(
+                             args.device, log_n=args.log_n, depth=args.depth,
                              scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
                              dnum=args.dnum, rotation_indexes=plan,
                              bootstrap_level_budget=budget, bootstrap_level=level,
                              secret_key_dist=dist,
                              light_plaintext_cache=args.light_plaintext_cache,
                              truncate_keys=not args.no_truncate_keys,
-                             allow_key_grow=args.allow_key_grow)
+                             allow_key_grow=args.allow_key_grow))
 
 
 def decode_six_blocks(engine, ciphertexts, geometry=THOR_ATTENTION_DENSE):
@@ -641,6 +656,10 @@ def command_fhe(args):
         print_stage_rows(index, rows, stream=sys.stdout)
     print(f"\ntiming")
     print(timings.format())
+    ops = getattr(args, "_op_timings", None)
+    if ops is not None:
+        print(f"\nengine primitives ({args.layers} encrypted layers, {len(encoded)} samples)")
+        print(ops.format())
 
     _write_json(args, dict(command="fhe", model=args.model, engine=args.engine,
                            layers=args.layers, samples=len(encoded),
@@ -1032,6 +1051,11 @@ def build_parser():
     engine.add_argument("--special-primes", type=int, default=11, metavar="K",
                         help="how many special primes the context has; only used to price keys. "
                              "Recover it from a run's key-memory line, it depends on the digits")
+    engine.add_argument("--time-ops", action="store_true",
+                        help="count and time every engine primitive, and print the table at the end. "
+                             "A phase total says the layer took 1131s; this says which of its 53,385 "
+                             "calls did. Costs about 0.2 us a call, against 19 ms measured on the "
+                             "device, so it does not move what it measures")
     engine.add_argument("--device-memory", action="store_true",
                         help="print the device pool at every stage boundary. An OOM says which stage "
                              "was unlucky, not which one was large; this says where the memory is.")

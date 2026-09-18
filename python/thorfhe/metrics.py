@@ -141,6 +141,71 @@ class Timings:
         return "\n".join(lines)
 
 
+@dataclass
+class OpTimings:
+    """Wall-clock and call count per engine primitive.
+
+    `Timings` splits a run by phase, which says a layer took 1131 seconds but not what it spent them
+    on. A layer issues about 53,000 engine calls and they are not alike: a plaintext multiply and a
+    bootstrap differ by four orders of magnitude, and a device at 0% utilisation is a statement about
+    where the *other* time went. Recorded around the engine rather than inside it, so it costs one
+    dictionary update per call and works the same on both engines.
+    """
+
+    counts: dict = field(default_factory=dict)
+    seconds: dict = field(default_factory=dict)
+
+    def record(self, name: str, elapsed: float):
+        self.counts[name] = self.counts.get(name, 0) + 1
+        self.seconds[name] = self.seconds.get(name, 0.0) + elapsed
+
+    @property
+    def total(self) -> float:
+        return sum(self.seconds.values())
+
+    def format(self) -> str:
+        total = self.total
+        lines = [f"  {'primitive':<18}{'calls':>9}{'seconds':>11}{'share':>8}{'us/call':>11}"]
+        for name, seconds in sorted(self.seconds.items(), key=lambda kv: -kv[1]):
+            count = self.counts[name]
+            lines.append(f"  {name:<18}{count:>9}{seconds:>11.2f}{seconds / total if total else 0:>8.1%}"
+                         f"{seconds / count * 1e6:>11.1f}")
+        lines.append(f"  {'total':<18}{sum(self.counts.values()):>9}{total:>11.2f}")
+        return "\n".join(lines)
+
+
+#: What `--time-ops` wraps. Everything that reaches the device, plus the two host-side encodings,
+#: because the point of the measurement is to tell those apart.
+TIMED_PRIMITIVES = (
+    "multiply", "add", "add_inplace", "subtract", "negate", "rotate", "rescale", "relinearize",
+    "square", "conjugate", "multiply_1j", "bootstrap", "level_down", "encode", "encrypt",
+    "decrypt", "encode_to_light_plaintext", "noise_level", "level")
+
+
+def instrument(engine, ops: "OpTimings"):
+    """Wrap ``engine``'s primitives in place so each call is counted and timed.
+
+    Instance attributes, so nothing is patched globally and a second engine in the same process is
+    unaffected. Returns the engine for chaining.
+    """
+    import time
+
+    for name in TIMED_PRIMITIVES:
+        bound = getattr(engine, name, None)
+        if bound is None or not callable(bound):
+            continue
+
+        def wrapper(*args, _call=bound, _name=name, **kwargs):
+            start = time.perf_counter()
+            try:
+                return _call(*args, **kwargs)
+            finally:
+                ops.record(_name, time.perf_counter() - start)
+
+        setattr(engine, name, wrapper)
+    return engine
+
+
 def as_dict(*records) -> dict:
     """Flatten a set of metric records into one JSON-serialisable dict."""
     out = {}
