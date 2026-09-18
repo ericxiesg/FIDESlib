@@ -202,6 +202,36 @@ class Stages:
             return x
         return self.engine.bootstrap(x, keep_levels)
 
+    #: How far `bootstrap_twice` lifts the residual before refreshing it. The gain in accuracy is
+    #: this many bits, and the ceiling is the message bound: `2^bits * |error|` has to stay inside it,
+    #: so at a measured error of 2.6e-05 against `q0/Delta = 2` anything up to 2^15 is in range.
+    meta_bts_bits = 10
+
+    def bootstrap_twice(self, x, keep_levels=None):
+        """Meta-BTS: refresh, refresh the residual error, and add it back scaled down.
+
+        `b0 = BTS(x)` leaves `x + e`. Reducing `b0` to the input's modulus and subtracting gives
+        `-e`, which is small enough that lifting it by an integer `2^k` - level-free - puts it back
+        in a range the bootstrap handles well. Refreshing that gives `-2^k e + e'`, and scaling by
+        `2^-k` and adding to `b0` returns `x + 2^-k e'`: the same message with the error `k` bits
+        smaller.
+
+        Two bootstraps and one level for `k` bits. This is what thor-openfhe gets from OpenFHE's
+        `EvalBootstrap(ct, numIterations=2, precision=10)`; FIDESlib's GPU path takes those two
+        arguments and forwards them only on its CPU fallback (`CryptoContext.cpp:1763-1778`), and
+        `FIDESlib::CKKS::Bootstrap` has no such parameter - so on the device it is a no-op, and the
+        iteration has to be built out of primitives instead. All of them exist.
+        """
+        first = self.bootstrap(x, keep_levels)
+        drop = self.engine.level(first) - self.engine.level(x)
+        at_input = self.engine.level_down(first, by=drop) if drop > 0 else first
+        residual = self.subtract(x, at_input)
+        lifted = self.multiply(residual, 2 ** self.meta_bts_bits)      # integer: no level, no degree
+        second = self.bootstrap(lifted, keep_levels)
+        corrected = self.rescale(self.multiply(second, 2.0 ** -self.meta_bts_bits))
+        left, right = self.align(first, corrected)
+        return self.add(left, right)
+
     def level_down(self, x, by: int):
         return self.engine.level_down(x, by)
 

@@ -108,3 +108,51 @@ def test_the_softmax_does_not_survive_the_device_at_fifty_bits(mask_families):
         f"sb=50 came back at {device:.4g}, i.e. it survived. The bootstrap error there is 1.56e-2 "
         f"against a denominator of the same size, so either the noise model or `LAYERS` has changed "
         f"and the parameter choice needs re-measuring")
+
+
+def test_meta_bts_buys_its_bits_back(mask_families):
+    """Two bootstraps and one level for `meta_bts_bits` bits of precision.
+
+    `b0 = BTS(x)` is `x + e`; reducing it to the input's modulus and subtracting isolates `-e`, which
+    an integer multiply lifts back into a range the bootstrap resolves well, and scaling the refreshed
+    residual down again returns the message with the error `k` bits smaller. Measured against a single
+    bootstrap at the device's own precision, the gain is exactly `2^k`.
+
+    This is what thor-openfhe gets from `EvalBootstrap(ct, numIterations=2, precision=10)`. FIDESlib's
+    GPU path accepts both arguments and forwards them only on its CPU fallback, so passing them there
+    does nothing - but every primitive the iteration needs is exposed, which is what this pins.
+    """
+    from thorfhe.stages import Stages
+
+    (low, high), *_ = mask_families
+    rng = np.random.default_rng(3)
+    values = rng.uniform(-0.4, 0.4, G.slot_count)
+
+    def error(k):
+        engine = ClearEngine(G, depth=40, bootstrap_level=35, noise_model=True, scaling_bits=59,
+                             first_mod_bits=60, bootstrap_precision_bits=15)
+        engine.bootstrap_message_margin = 1e9
+        stages = Stages(engine, G, masks=low, complement_masks=high)
+        stages.meta_bts_bits = k
+        ct = engine.level_down(engine.encrypt(values), by=30)
+        once = stages.bootstrap(ct)
+        if k is None:
+            return float(np.abs(np.real(engine.decrypt(once)) - values).max()), 0
+        out = stages.bootstrap_twice(ct)
+        return (float(np.abs(np.real(engine.decrypt(out)) - values).max()),
+                engine.level(once) - engine.level(out))
+
+    single, _ = error(None)
+    for k in (6, 10):
+        meta, levels = error(k)
+        assert single / meta == pytest.approx(2 ** k, rel=0.15), (
+            f"k={k} should buy {2 ** k}x, got {single / meta:.0f}x")
+        assert levels == 1, f"k={k} cost {levels} levels, not one"
+
+    # The ceiling is the message bound: the lifted residual has to stay inside what the sine can
+    # recover, so `2^k * |e| < q0/(2*Delta)`. At 15 bits that is 2.5e-04 * 2^13 = 2.07 against 1.0,
+    # and the residual comes back as its own residue instead - no gain at all, not a smaller one.
+    too_far, _ = error(13)
+    assert too_far > single / 2, (
+        f"k=13 lifts the residual past the bound and should stop working, but gave "
+        f"{single / too_far:.0f}x")
