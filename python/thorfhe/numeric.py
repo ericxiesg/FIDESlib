@@ -312,6 +312,13 @@ class DivisionMixin:
         if not carried.any():
             return
         low, high = float(values[carried].min()), float(values[carried].max())
+        if _debug():
+            # What the window would have to be, beside what it is. The cost of the schedule
+            # comes from the ratio, so a window far looser than the data is levels spent on
+            # nothing - which is what the LayerNorm table turned out to be worth four of.
+            print(f"[range] he_inv observed [{low:.6g}, {high:.6g}] "
+                  f"ratio {low / high:.6g} against epsilon {epsilon:.6g}",
+                  flush=True)
         if low >= epsilon and high <= 1.0:
             return
         median = float(np.median(values[carried]))
@@ -392,6 +399,13 @@ class InverseSqrtMixin:
         if not carried.any():
             return
         low, high = float(values[carried].min()), float(values[carried].max())
+        if _debug():
+            # What the window would have to be, beside what it is. The cost of the schedule
+            # comes from the ratio, so a window far looser than the data is levels spent on
+            # nothing - which is what the LayerNorm table turned out to be worth four of.
+            print(f"[range] he_invsqrt observed [{low:.6g}, {high:.6g}] "
+                  f"ratio {low / high:.6g} against epsilon {epsilon:.6g}",
+                  flush=True)
         if low >= epsilon and high <= 1.0:
             return
         raise ValueError(
