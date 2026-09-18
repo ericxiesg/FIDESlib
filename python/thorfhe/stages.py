@@ -161,11 +161,23 @@ class Stages:
         expands it through its own cache, so one encode serves every level. Keyed by content rather
         than identity because several masks are rebuilt per call site.
 
+        The key is a *digest* of the content, not the content. Holding the bytes made every entry
+        cost its array twice over - once for the light plaintext and once for the key - and a layer
+        has 19,137 distinct arrays at half a MiB each, so the cache alone was 9.3 GiB of host memory
+        per layer and nothing ever evicts it. A twelve-layer run would need 112 GiB for the keys.
+        The digest is Python's own hash of the same bytes, so it costs what the old key cost (183 us
+        against 221 us, measured on a 512 KiB array) and retains eight bytes instead of half a MiB.
+
+        That trades an exact comparison for a 64-bit one. Over a layer's 19,137 entries the odds of
+        two different arrays sharing a digest are about 1e-11, which is far below the other ways this
+        run can go wrong - but it is not zero, and the way to stop relying on it is to hand encoded
+        weights down from `encode_layer` (see `he.LightWeights`) so there is no content cache at all.
+
         ``ClearEngine`` has no such notion and wants the array itself, so this is a no-op there.
         """
         if not isinstance(value, np.ndarray) or not hasattr(self.engine, "encode_to_light_plaintext"):
             return value
-        key = (value.shape, value.dtype.str, value.tobytes())
+        key = (value.shape, value.dtype.str, hash(value.tobytes()))
         cached = self._plaintexts.get(key)
         if cached is None:
             cached = self.engine.encode_to_light_plaintext(value)

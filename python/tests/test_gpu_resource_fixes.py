@@ -5,6 +5,8 @@ invisible on the clear engine: a rotation key that is never generated, a plainte
 instead of reused, and a grid of ciphertexts that is held instead of streamed. None of them changes a
 single decrypted value, which is why they need tests of their own rather than an accuracy assertion.
 """
+import sys
+
 import numpy as np
 import pytest
 
@@ -91,6 +93,24 @@ def test_a_mask_is_encoded_once_however_often_it_is_used():
 
     stages.multiply(ct, 1.0 - mask)
     assert engine.encodes == 2
+
+
+def test_the_cache_does_not_retain_a_copy_of_every_array_it_has_seen():
+    """The key is a digest, because holding the bytes cost the array twice over.
+
+    A layer has 19,137 distinct arrays at half a MiB, nothing evicts them, and keying on the content
+    itself meant the cache held 9.3 GiB of host memory per layer for the keys alone - 112 GiB across
+    twelve layers, on top of the light plaintexts it exists to hold.
+    """
+    engine, stages = small_stages(engine=CountingEngine(SMALL, depth=DEPTH))
+    ct = engine.encrypt(np.ones(SMALL.slot_count))
+    mask = (np.arange(SMALL.slot_count) % SMALL.n_slot < 2).astype(float)
+    stages.multiply(ct, mask)
+
+    (key,) = stages._plaintexts
+    assert not any(isinstance(part, (bytes, bytearray, memoryview)) for part in key), key
+    assert sys.getsizeof(key) < mask.nbytes / 100, (
+        f"the cache key is {sys.getsizeof(key)} bytes against an array of {mask.nbytes}")
 
 
 def test_the_clear_engine_still_gets_its_arrays():
