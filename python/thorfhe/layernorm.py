@@ -131,7 +131,14 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         sum_of_squares = self.rescale(
             self.multiply(self._fold_into_slot_zero(sum_of_squares), statistic))
 
-        variance = self.subtract(self.multiply(sum_of_squares, n), squared_total)
+        # The two halves, before they cancel. `variance` is their difference and it is four to
+        # eight orders of magnitude smaller than either - so the ratio these two report *is* the
+        # condition number of the subtraction, measured rather than assumed, and it is the number
+        # that says how much relative precision a device has to carry into this line.
+        scaled_squares = self.multiply(sum_of_squares, n)
+        self.probed("11a1.n_sum_of_squares", [scaled_squares])
+        self.probed("11a2.squared_total", [squared_total])
+        variance = self.subtract(scaled_squares, squared_total)
         variance = self.add(variance, (var_e / max_denominator) * statistic)
 
         # The same probes stage 07 has, for the same reason: `07a`-`07d` split the softmax into
