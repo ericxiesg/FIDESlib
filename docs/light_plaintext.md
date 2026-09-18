@@ -43,6 +43,14 @@ for a single tower has no compact form and is rejected instead of silently wrapp
 Using OpenFHE's encoder is the point: any discrepancy between the compact and the dense path would
 otherwise be our own IFFT's rounding, not a real difference.
 
+**It asks that encoder for two towers, not the whole chain.** OpenFHE materialises one NTT per tower,
+and this reads exactly two of them — tower 0 for the coefficients and tower 1 for the check below —
+so the level it encodes at is a pure cost knob under FIXEDMANUAL, where the diagram above says the
+coefficients do not depend on the level at all. Encoding at level 0 built all 38 towers at depth 37
+to keep two, and that was **96% of a layer's wall clock on the device**: 19 137 encodes at 58 ms, or
+1109 s of 1154 s, against 4.16 s for all 22 bootstraps. Under FLEXIBLE* the scaling factor *is*
+level-dependent, so there the `level_hint` is honoured instead.
+
 `ExpandLightPlaintext(lp, level)` (`level` = *consumed* levels, OpenFHE's convention):
 
 * **CPU backend** — build each tower as a `NativePoly` of `coeffs[j] mod q_i`, assemble a `DCRTPoly`

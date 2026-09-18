@@ -2182,9 +2182,26 @@ LightPlaintext CryptoContextImpl<DCRTPoly>::MakeLightPlaintext(const std::vector
 	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 
 	// Encode once. OpenFHE does the special IFFT and the rounding; we keep only the integer result.
-	// Level 0 keeps every tower, which is what the single-tower cross-check below wants.
-	const uint32_t encodeLevel = levelHint >= 0 ? static_cast<uint32_t>(levelHint) : 0u;
-	lbcrypto::Plaintext pt	   = context->MakeCKKSPackedPlaintext(value, 1, encodeLevel, nullptr, slots);
+	//
+	// The level this encodes at decides how many RNS towers OpenFHE materialises, and each one is an
+	// NTT over N coefficients. Nothing below reads more than two of them - tower 0 for the value and
+	// tower 1 for the cross-check - so encoding at level 0 builds the whole chain (38 towers at depth
+	// 37) to keep two, and measured on the device that is 96% of a layer's wall clock: 19,137 of
+	// these at 58 ms each is 1109 s of 1154 s, against 4.16 s for all 22 bootstraps.
+	//
+	// Under a level-independent scaling technique the encoded coefficients do not depend on the level
+	// at all, so the deepest level that still leaves two towers gives the identical answer for a
+	// fraction of the work. FLEXIBLE* carries the scaling factor of its level, so there the hint has
+	// to be honoured - that is what the guard in ExpandLightPlaintext is about.
+	const auto encodeParams		  = std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(context->GetCryptoParameters());
+	const auto encodeTechnique	  = encodeParams->GetScalingTechnique();
+	const bool encodeLevelMatters = encodeTechnique == lbcrypto::FLEXIBLEAUTO || encodeTechnique == lbcrypto::FLEXIBLEAUTOEXT;
+	const size_t towers			  = encodeParams->GetElementParams()->GetParams().size();
+	// two towers left: the value, and the one the check below compares it against
+	const uint32_t cheapestLevel  = towers > 2 ? static_cast<uint32_t>(towers - 2) : 0u;
+	const uint32_t encodeLevel =
+		encodeLevelMatters ? (levelHint >= 0 ? static_cast<uint32_t>(levelHint) : 0u) : cheapestLevel;
+	lbcrypto::Plaintext pt = context->MakeCKKSPackedPlaintext(value, 1, encodeLevel, nullptr, slots);
 
 	lbcrypto::DCRTPoly poly = pt->GetElement<lbcrypto::DCRTPoly>();
 	poly.SetFormat(Format::COEFFICIENT);
