@@ -469,7 +469,11 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             layer.trace_sink = stage_sink if trace is not None else None
             # The probes look inside a stage, which only matters when a stage is the one that is
             # wrong; they cost a handful of decryptions, so they ride along with --per-stage.
-            layer.attention.probe = magnitude_probe if trace is not None else None
+            # every stage owner, not just the attention: the softmax's `07a`-`07d` were the only
+            # probes for a long time because they were the only ones that could fire, and stage 11
+            # is where a device run diverges
+            for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
+                owner.probe = magnitude_probe if trace is not None else None
             with timed(timings, f"layer {index}"):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)

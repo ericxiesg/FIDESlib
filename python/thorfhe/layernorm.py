@@ -134,8 +134,15 @@ class LayerNormStages(NumericMixin, InverseSqrtMixin, Stages):
         variance = self.subtract(self.multiply(sum_of_squares, n), squared_total)
         variance = self.add(variance, (var_e / max_denominator) * statistic)
 
+        # The same probes stage 07 has, for the same reason: `07a`-`07d` split the softmax into
+        # "the scores are wrong" and "the inverse is wrong" in one line, and stage 11 is where a
+        # device run diverges with nothing to say which half. The variance is what `he_invsqrt` has
+        # to find in `[min_var/max_var, 1]`, and the clear engine puts it there - so if the device
+        # does not, this is the line that says so.
+        self.probed("11a.variance", [variance])
         inverse = self.he_invsqrt(variance, ones, statistic,
                                   epsilon=min_var / max_var, alpha=alpha)
+        self.probed("11b.inverse_sqrt", [inverse])
         inverse = self._broadcast_from_slot_zero(inverse)
 
         out = np.empty((len(x),), dtype=object)
