@@ -179,3 +179,42 @@ def test_encode_layer_routes_every_field_through_the_store(tmp_path):
         ["query", "key", "value", "attention_dense", "attention_norm",
          "intermediate", "output_dense", "output_norm"])
     assert {index for index, _ in seen} == {5}
+
+
+def test_a_mask_is_content_addressed_and_survives_the_run(tmp_path):
+    """Masks have no provenance to key on, so they are hashed - but only 689 a layer, so it is cheap."""
+    counter = {"encoded": 0}
+    mask = np.arange(16.0)
+
+    first = make_store(tmp_path, counter).plaintext(mask)
+    assert counter["encoded"] == 1
+    second = make_store(tmp_path, counter).plaintext(mask.copy())
+    assert counter["encoded"] == 1, "an identical mask was re-encoded across runs"
+    assert first == second
+
+    make_store(tmp_path, counter).plaintext(mask + 1)
+    assert counter["encoded"] == 2, "a different mask must not collide with the first"
+
+
+def test_stages_routes_masks_through_the_store_when_it_has_one(tmp_path):
+    from thorfhe import SMALL, ClearEngine, Stages
+
+    class LightEngine(ClearEngine):
+        def encode_to_light_plaintext(self, message, level=None):
+            return FakeLight(message)
+
+    engine = LightEngine(SMALL, depth=12)
+    stages = Stages(engine, SMALL, masks={}, complement_masks={})
+    counter = {"encoded": 0}
+    stages.plaintext_store = make_store(tmp_path, counter)
+
+    mask = np.ones(SMALL.slot_count)
+    assert isinstance(stages.plaintext(mask), FakeLight)
+    assert counter["encoded"] == 1
+    stages.plaintext(mask.copy())          # in-memory hit, no digest, no store call
+    assert counter["encoded"] == 1
+
+    fresh = Stages(engine, SMALL, masks={}, complement_masks={})
+    fresh.plaintext_store = make_store(tmp_path, counter)
+    fresh.plaintext(mask.copy())           # new process would hit the disk, not re-encode
+    assert counter["encoded"] == 1

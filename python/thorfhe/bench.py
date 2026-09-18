@@ -462,8 +462,17 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         # distinction is the difference between a broken circuit and a probe reading the noise.
         magnitude = np.abs(good)
         p50, p99 = np.quantile(magnitude, [0.5, 0.99])
+        # How many slots are negative, and how many are above one. Every iterative numeric in the
+        # port - `he_inv`, `he_invsqrt` - is derived for an input in `[epsilon, 1]` and diverges
+        # outside it, in whichever slots stepped out. `min` and `max` say it happened somewhere;
+        # these say how much of the vector it is, which is the difference between "a few slots are
+        # out of range" and "the whole thing is wrong".
+        outside = ""
+        below, above = int((good < 0).sum()), int((good > 1.0).sum())
+        if below or above:
+            outside = f"  <0 {below}/{good.size}  >1 {above}/{good.size}"
         print(f"{head}  min {good.min():+.4g}  max {good.max():+.4g}"
-              f"  |x| p50 {p50:.4g}  p99 {p99:.4g}"
+              f"  |x| p50 {p50:.4g}  p99 {p99:.4g}{outside}"
               + (f"  NON-FINITE {(~finite).sum()}/{slots.size}" if not finite.all() else ""),
               file=sys.stderr, flush=True)
 
@@ -536,6 +545,10 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
             # is where a device run diverges
             for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
                 owner.probe = magnitude_probe if trace is not None else None
+                # The masks have no provenance to key on, so they stay content-addressed - but a
+                # layer has 689 of them against the weights' 19,137, so the digest is affordable and
+                # they need not be re-encoded on every run either.
+                owner.plaintext_store = store
             with timed(timings, f"layer {index}"):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)

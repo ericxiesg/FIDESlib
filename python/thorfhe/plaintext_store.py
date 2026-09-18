@@ -27,6 +27,7 @@ half a MiB each and which nothing evicts.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -93,6 +94,34 @@ class PlaintextStore:
         #: (hits, misses) in fields, not in plaintexts - one field is thousands of them.
         self.hits = 0
         self.misses = 0
+
+    def plaintext(self, array):
+        """One mask, content-addressed, for the arrays that have no provenance to key on.
+
+        The masks are built at their call sites from the geometry, so there is no name to give them -
+        and unlike the weights there are few enough that hashing is cheap. A layer reaches this about
+        2,000 times for 689 distinct arrays, and only the first of each pays the digest: 689 sha1s at
+        648 us is under half a second, against the 38.8 s the device spent re-encoding them on a run
+        whose weights were already cached.
+
+        sha1 rather than the `hash()` `Stages` uses in memory, because that is salted per process and
+        a file has to be found again tomorrow.
+        """
+        digest = hashlib.sha1(np.ascontiguousarray(array).view(np.uint8)).hexdigest()
+        path = self.root / LAYOUT / self.tag / "masks" / digest[:2] / f"{digest}.flpt"
+        if path.is_file():
+            try:
+                light = self.read(path)
+            except (OSError, ValueError) as error:
+                print(f"thorfhe: ignoring unreadable cached mask at {path} ({error})")
+            else:
+                self.hits += 1
+                return light
+        light = self.encode(array)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.write(light, path)
+        self.misses += 1
+        return light
 
     def directory(self, layer_index: int, name: str) -> Path:
         return self.root / LAYOUT / self.tag / f"layer{layer_index:02d}" / name

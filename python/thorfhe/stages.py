@@ -71,6 +71,9 @@ class Stages:
         self.complement_masks = complement_masks
         #: content -> engine plaintext, so a mask is encoded once per engine rather than per multiply
         self._plaintexts: dict = {}
+        #: A `thorfhe.plaintext_store.PlaintextStore`, or None. Masks go through it when it is set,
+        #: so they survive the run the way the weights do.
+        self.plaintext_store = None
 
     # ---------------------------------------------------------------- primitives
     def rotate(self, x, delta: int):
@@ -180,7 +183,9 @@ class Stages:
         key = (value.shape, value.dtype.str, hash(value.tobytes()))
         cached = self._plaintexts.get(key)
         if cached is None:
-            cached = self.engine.encode_to_light_plaintext(value)
+            store = self.plaintext_store
+            cached = (store.plaintext(value) if store is not None
+                      else self.engine.encode_to_light_plaintext(value))
             self._plaintexts[key] = cached
         return cached
 
