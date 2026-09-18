@@ -195,33 +195,42 @@ PYBIND11_MODULE(_core, m) {
 		},
 		py::arg("sk"), py::arg("ct"), py::arg("length") = 0, "Decrypt to a complex128 numpy array")
 	  // ---- arithmetic ----
-	  .def("EvalAdd", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
-	  .def("EvalAddPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
-	  .def("EvalAddLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
-	  .def("EvalAddScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalAdd))
-	  .def("EvalAddInPlace", py::overload_cast<CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAddInPlace))
-	  .def("EvalSub", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub))
-	  .def("EvalSubPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalSub))
-	  .def("EvalSubScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalSub))
-	  .def("EvalScalarSub", py::overload_cast<double, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub))
-	  .def("EvalNegate", &CryptoContextImpl<DCRTPoly>::EvalNegate)
-	  .def("EvalMult", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
-	  .def("EvalMultPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
-	  .def("EvalMultLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalMult))
-	  .def("EvalMultScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalMult))
-	  .def("EvalSquare", &CryptoContextImpl<DCRTPoly>::EvalSquare)
-	  .def("EvalMultNoRelin", &CryptoContextImpl<DCRTPoly>::EvalMultNoRelin)
-	  .def("EvalSquareNoRelin", &CryptoContextImpl<DCRTPoly>::EvalSquareNoRelin)
-	  .def("EvalRelinearize", &CryptoContextImpl<DCRTPoly>::EvalRelinearize)
-	  .def("EvalMultByI", &CryptoContextImpl<DCRTPoly>::EvalMultByI)
-	  .def("EvalMultByInteger", &CryptoContextImpl<DCRTPoly>::EvalMultByInteger)
-	  .def("EvalConjugate", &CryptoContextImpl<DCRTPoly>::EvalConjugate)
-	  .def("EvalRotate", &CryptoContextImpl<DCRTPoly>::EvalRotate)
-	  .def("Rescale", &CryptoContextImpl<DCRTPoly>::Rescale)
-	  .def("EvalLevelReduce", &CryptoContextImpl<DCRTPoly>::EvalLevelReduce)
+	  // Every one of these releases the GIL for the duration of the C++ call. They take and return
+	  // opaque handles and touch no Python object while running, so nothing needs it held, and a
+	  // layer issues thousands of them: 8138 rotations alone with binary keys. The device sits at
+	  // 1-3% utilisation even on the runs that finish, which is what holding the GIL across every
+	  // dispatch looks like. pybind11 reacquires before converting the return value, so the numpy
+	  // paths are unaffected.
+	  .def("EvalAdd", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalAddPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalAddLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalAddScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalAddInPlace", py::overload_cast<CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAddInPlace), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalSub", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalSubPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalSubScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalScalarSub", py::overload_cast<double, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalNegate", &CryptoContextImpl<DCRTPoly>::EvalNegate, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMult", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
+	  .def("EvalSquare", &CryptoContextImpl<DCRTPoly>::EvalSquare, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultNoRelin", &CryptoContextImpl<DCRTPoly>::EvalMultNoRelin, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalSquareNoRelin", &CryptoContextImpl<DCRTPoly>::EvalSquareNoRelin, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalRelinearize", &CryptoContextImpl<DCRTPoly>::EvalRelinearize, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultByI", &CryptoContextImpl<DCRTPoly>::EvalMultByI, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalMultByInteger", &CryptoContextImpl<DCRTPoly>::EvalMultByInteger, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalConjugate", &CryptoContextImpl<DCRTPoly>::EvalConjugate, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalRotate", &CryptoContextImpl<DCRTPoly>::EvalRotate, py::call_guard<py::gil_scoped_release>())
+	  .def("Rescale", &CryptoContextImpl<DCRTPoly>::Rescale, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalLevelReduce", &CryptoContextImpl<DCRTPoly>::EvalLevelReduce, py::call_guard<py::gil_scoped_release>())
+	  // no guard: a getter, called often enough that releasing and reacquiring would cost more
+	  // than the call
 	  .def("GetRemainingLevels", &CryptoContextImpl<DCRTPoly>::GetRemainingLevels)
 	  .def("EvalBootstrap", &CryptoContextImpl<DCRTPoly>::EvalBootstrap, py::arg("ct"), py::arg("numIterations") = 1, py::arg("precision") = 0,
-		py::arg("prescaled") = false, py::arg("stopAfterStage") = -1);
+		py::arg("prescaled") = false, py::arg("stopAfterStage") = -1,
+		py::call_guard<py::gil_scoped_release>());
 
 	m.def("GenCryptoContext", [](CCParams<CryptoContextCKKSRNS>& p) { return GenCryptoContext(p); });
 }

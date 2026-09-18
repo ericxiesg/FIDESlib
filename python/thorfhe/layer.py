@@ -320,8 +320,12 @@ class EncoderLayer:
         attention, dense, norm, ff = self.attention, self.dense, self.norm, self.feedforward
 
         scope["residual"], scope["complexified"] = attention.stage_01_complexify_x(x, layer_index)
+        # With `stream_qkv` the copies are not built here at all: each projection makes its own and
+        # consumes them as they come, which is 1.07 GiB less held at the cost of making them three
+        # times. `rotated` is the largest single item in a layer's working set.
         scope["rotated"] = keep("rotated",
-                                attention.stage_02_make_rotated_copies(scope["complexified"]))
+                                scope["complexified"] if attention.stream_qkv
+                                else attention.stage_02_make_rotated_copies(scope["complexified"]))
         drop("complexified")
         scope["query"] = keep("query", attention.stage_03_query(scope["rotated"], *weights.query))
         scope["key"] = keep("key", attention.stage_04_key(scope["rotated"], *weights.key))

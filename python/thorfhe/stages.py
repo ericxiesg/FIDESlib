@@ -314,6 +314,61 @@ class Stages:
                 rotated[base + r] = self.rotate(rotated[base + r - 1], -self.g.group_size)
         return rotated
 
+    def iter_rotated_copies(self, x):
+        """The same copies as :meth:`stage_02_make_rotated_copies`, yielded as ``(index, ciphertext)``.
+
+        The array form is ``pack * len(x)`` ciphertexts - 64 at THOR's geometry, near full level, and
+        the largest single item in a layer's working set. They are built all at once and then read one
+        at a time, so it is holding them that costs, not making them. Each copy is one rotation of the
+        one before it, so a generator holds one per source instead of sixteen.
+        """
+        for source in range(x.shape[0]):
+            base = self.g.pack * source
+            current = x[source]
+            yield base, current
+            for r in range(1, self.g.pack):
+                current = self.rotate(current, -self.g.group_size)
+                yield base + r, current
+
+    def pcmm_streamed(self, ws, copies, *, window=None, masks=None, complements=None):
+        """:meth:`pcmm` over copies taken as they are produced rather than out of a filled array.
+
+        Same arithmetic, same result, different thing held. `pcmm` holds all ``in_dim`` copies and
+        forms one ``(out, diag)`` sum at a time; this holds one copy and all ``out_dim * diag_dim``
+        sums - 64 against 24 at THOR's QKV geometry, both near full level.
+
+        The price is that the copies cannot be shared between the three projections, since each
+        consumes the stream. Stages 03/04/05 therefore make them three times: 180 rotations instead
+        of 60, against a layer's 8138.
+        """
+        out_dim, diag_dim, in_dim = ws.shape
+        window = self.g.n_blocks if window is None else window
+
+        partials = np.full((out_dim, diag_dim), None, dtype=object)
+        for index, copy in copies:
+            prepared = self.prepare_for_multiply(copy)
+            for out_index in range(out_dim):
+                # `pcmm` reads `prepared[(pack * out_index + j) % in_dim]` for its j-th term, so the
+                # copy that has just arrived is the j-th term of this row for exactly one j
+                j = (index - self.g.pack * out_index) % in_dim
+                for diag_index in range(diag_dim):
+                    term = self.multiply(ws[out_index, diag_index, j], prepared)
+                    if partials[out_index, diag_index] is None:
+                        partials[out_index, diag_index] = term
+                    else:
+                        self.add_inplace(partials[out_index, diag_index], term)
+
+        output = np.full((out_dim,), None, dtype=object)
+        for out_index in range(out_dim):
+            temp = self.level_down(self.rescale(partials[out_index, 0]), by=1)
+            for diag_index in range(1, diag_dim):
+                partial = self.rescale(partials[out_index, diag_index])
+                self.add_inplace(temp, self.rotate_internal(partial, window - diag_index,
+                                                            window=window, masks=masks,
+                                                            complements=complements))
+            output[out_index] = temp
+        return output
+
     def diagonal_product(self, ws, prepared, out_index: int, diag_index: int):
         """One block diagonal's plaintext-ciphertext inner product, over all the input copies."""
         in_dim = ws.shape[2]
@@ -380,13 +435,26 @@ class Stages:
             output[out_index] = temp
         return output
 
+    #: Stages 03-05 make their own rotated copies and stream them, instead of reading an array the
+    #: caller built. Measured at THOR's geometry, depth 37, one projection: peak 84 ciphertexts and
+    #: 2743 MiB held against **50 and 1652** - 1.07 GiB, which is the margin `--extra-rotation-keys`
+    #: needs (headroom 2.7 GiB against the 3 GiB key generation wants for its scratch).
+    #:
+    #: Costs the copies three times over rather than once, since a stream cannot be shared: 180
+    #: rotations instead of 60, against a layer's 8138.
+    stream_qkv = False
+
     def apply_qkv_weight_bias(self, x, weight, bias):
         """``pcmm`` then bias then ``y + conj(y)``, which makes the result real (THOR stages 03-05).
 
         The conjugate doubles the real part; ``encode_weight`` halves the weights to compensate but
         ``encode_bias`` does not, so the result is ``x @ w.T + 2 * b``. See docs/thor_port.md.
+
+        With ``stream_qkv`` set, ``x`` is the *complexified* input and the copies are made here; the
+        result is identical either way (`test_streaming_the_copies_computes_the_same_projection`).
         """
-        wx = self.pcmm(weight, x)
+        wx = (self.pcmm_streamed(weight, self.iter_rotated_copies(x)) if self.stream_qkv
+              else self.pcmm(weight, x))
         output = np.full((wx.shape[0],), None, dtype=object)
         for i in range(wx.shape[0]):
             biased = self.add(bias[i], wx[i])
