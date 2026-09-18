@@ -127,3 +127,29 @@ for s in (1.00049, 0.250732, 0.0158389, 0.00400755):   # he_inv 真实用到的�
 第二次就会拿到坏的，而这正好是"`b` 比 `a` 先坏"的形状）。那种情况请告诉我，我去读 `multNoRelin`。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+---
+
+## 5. 附：那个测试已经写成 pytest 了，不用手抄
+
+`python/tests/test_he_inv_primitives.py`（本次一并推）。用现成的 `engine` fixture，
+所以 `cpu` 和 `cuda:0` 各跑一遍——**如果 cpu 过而 cuda:0 不过，就定位到设备算子了**。
+
+```
+cd python && PYFIDESLIB_DEVICES=cpu,cuda:0 python -m pytest tests/test_he_inv_primitives.py -q
+```
+
+49 个用例：
+
+| 测什么 | 参数 |
+|---|---|
+| `subtract(标量, 密文)` | `he_inv` 真实用到的 5 个标量 × 4 个 level |
+| `multiply(密文, 整数)` | 真实的 6 个因子 × 4 个 level，并断言 **level 不变** |
+| `add(ct, conjugate(ct))` | 4 个 level，断言 level 不变 |
+| **一整步 Goldschmidt，连做 5 步** | 断言**量级不增长**（不是断言精度——`want` 最后衰减到 1e-9，在噪声底上断精度是脆的） |
+
+最后一个是重点：单个算子都在容差内、而组合起来发散，是完全可能的，
+而设备上看到的正是"一步之内 0.0039 → 219.6 然后每轮平方"。
+
+我这边没有 CUDA，跑不了，但我用一个精确算术的假引擎把 49 个用例的**函数体**都执行过了，
+不会因为拼错 API 浪费你一轮。
