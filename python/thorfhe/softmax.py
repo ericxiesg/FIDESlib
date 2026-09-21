@@ -128,6 +128,13 @@ class SoftmaxMixin:
         # inherited. `k` goes with it because it is an integer chosen from `delta` and it is squared
         # by the line above, so it is the one factor here that can be large.
         self.probed(f"07e.halved_denominator_k{k}", [total], self._support(attention_mask))
+        # `precision / 128 / 2`, and the 128 is not simply the token count. I tried replacing it
+        # with the number of real tokens, on the reading that the sum of squares runs over the
+        # unmasked keys only and so the standard `S^2 / n` bound wants the smaller `n`. It is not
+        # safe: at 44 real tokens the epsilon goes to 0.0416 while the denominator that arrives
+        # reaches down to 0.0205, and `_check_inversion_range` refuses it. Whatever the 128 encodes,
+        # it is not "how many terms the sum has", so the bound cannot be retightened that way -
+        # see bugs/RESPONSE-the-128-is-not-the-token-count-20260921.md.
         epsilon = precision / 128 / 2
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
                                               epsilon=epsilon, alpha=alpha / 10,
