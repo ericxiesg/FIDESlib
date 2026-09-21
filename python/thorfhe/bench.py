@@ -437,7 +437,7 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                          compact=args.compact,
                          boundary_refresh_scale=args.boundary_refresh_scale)
     layer.attention.inverse_lift = args.inverse_lift
-    def magnitude_probe(name, value):
+    def magnitude_probe(name, value, mask=None):
         """Report an intermediate's magnitude and level. No reference needed, and that is the point.
 
         A stage that is wrong is wrong somewhere, and the plaintext model has nothing to compare its
@@ -473,6 +473,15 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         below, above = int((good < 0).sum()), int((good > 1.0).sum())
         if below or above:
             outside = f"  <0 {below}/{good.size}  >1 {above}/{good.size}"
+        # Split by the carried slots when the caller knows them. `07a`'s maximum is 37.5 on the
+        # device against 12.43 here, and whether that sits in a real token or in padding decides
+        # what to look at next - per-stage fidelity only ever compares the carried ones.
+        if mask is not None:
+            carried = np.tile(np.asarray(mask, dtype=float).ravel(),
+                              len(flat))[:slots.size][finite] > 1e-9
+            if carried.any() and not carried.all():
+                outside += (f"  carried max {np.abs(good[carried]).max():.4g}"
+                            f"  padding max {np.abs(good[~carried]).max():.4g}")
         print(f"{head}  min {good.min():+.4g}  max {good.max():+.4g}"
               f"  |x| p50 {p50:.4g}  p99 {p99:.4g}{outside}"
               + (f"  NON-FINITE {(~finite).sum()}/{slots.size}" if not finite.all() else ""),

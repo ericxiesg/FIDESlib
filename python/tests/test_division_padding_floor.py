@@ -53,7 +53,7 @@ def _run(with_support, boot_error=0.017, floor=None):
     # while the iteration is falling apart inside. That is why this reads the per-iteration probe
     # rather than the result - and why the bug survived so long behind a plausible-looking output.
     trace = {}
-    stages.probe = lambda name, cts: trace.__setitem__(
+    stages.probe = lambda name, cts, mask=None: trace.__setitem__(
         name, float(np.abs(np.real(engine.decrypt(cts[0]))).max()))
 
     Division.bootstrap = noisy

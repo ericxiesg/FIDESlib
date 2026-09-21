@@ -53,10 +53,16 @@ class Stages:
     #: where to look. ``None`` everywhere unless a caller sets it, and never called in a normal run.
     probe = None
 
-    def probed(self, name, value):
-        """Report an intermediate if anyone is listening, and return it unchanged."""
+    def probed(self, name, value, mask=None):
+        """Report an intermediate if anyone is listening, and return it unchanged.
+
+        ``mask`` is a plaintext indicator of the slots that carry data. Given one, the reader can
+        split its statistics by it, which is the difference between "the maximum is in a real token"
+        and "the maximum is in padding nobody reads" - per-stage fidelity compares the carried slots
+        only, so a padding slot can be far out without it noticing.
+        """
         if self.probe is not None:
-            self.probe(name, value)
+            self.probe(name, value, mask)
         return value
 
     def __init__(self, engine, geometry: Geometry, masks=None, complement_masks=None,

@@ -147,7 +147,11 @@ class SoftmaxMixin:
         # he.py feeds he_exp a ciphertext already divided by the range scale; the division is a scalar
         # multiply, so under FIXEDMANUAL it needs its own rescale before anything is added to it.
         normalised = [self.rescale(self.multiply(ct, 1.0 / scale)) for ct in scores]
-        exp_u = [self.he_exp(ct, min_x, max_x, n, wide=wide, shift=shift) for ct in normalised]
+        # The mask on the next line is what decides whether a score matters: a slot it zeroes
+        # contributes nothing to the denominator however far out of the fit's window it was. So the
+        # range check is given it, and judges only the slots that survive.
+        exp_u = [self.he_exp(ct, min_x, max_x, n, wide=wide, shift=shift, support=mask)
+                 for ct, mask in zip(normalised, attention_mask)]
         exp_u = [self.rescale(self.multiply(ct, mask)) for ct, mask in zip(exp_u, attention_mask)]
 
         self.probed("07b.exp", exp_u)
@@ -364,8 +368,11 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
         # this engine's 12.43, and 37.5 is past the window `he_exp`'s degree-15 fit was made on. With
         # only `07a` there is no way to tell a bootstrap that inflated its input from an input that
         # was already large; with both, subtracting them is the whole question.
-        self.probed("07a0.score_refresh_input", np.asarray(packed, dtype=object))
-        self.probed("07a.refreshed_scores", refreshed)
+        # The query-side support, so the reader can say whether an out-of-range score sits in a real
+        # token or in padding. Cheap: it is the same plaintext `_support` already builds.
+        support = self._support(attention_mask) if attention_mask is not None else None
+        self.probed("07a0.score_refresh_input", np.asarray(packed, dtype=object), support)
+        self.probed("07a.refreshed_scores", refreshed, support)
 
         if parameters is None:
             parameters = self.LAYERS.get(layer_index,

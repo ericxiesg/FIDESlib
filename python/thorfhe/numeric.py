@@ -106,7 +106,8 @@ class NumericMixin:
             babies = merged
         return babies[0]
 
-    def he_exp(self, x, min_x: float, max_x: float, n: int, wide: bool, shift: float | None = None):
+    def he_exp(self, x, min_x: float, max_x: float, n: int, wide: bool, shift: float | None = None,
+               support=None):
         """THOR's ``he_exp1`` / ``he_exp2``: a degree-15 fit, then ``log2(n)`` squarings.
 
         The fit approximates ``exp(x / s)`` for ``s = 32`` (narrow) or ``64`` (wide); squaring ``log2(n)``
@@ -120,14 +121,14 @@ class NumericMixin:
         denominator without touching the ratio between its largest and smallest value.
         """
         centre = (min_x + max_x) / 2 if shift is None else shift
-        self._check_exp_range(x, min_x, max_x, wide)
+        self._check_exp_range(x, min_x, max_x, wide, support)
         shifted = self.add(x, -centre / (64 if wide else 32))
         result = self.evaluate_polynomial(shifted, EXP2_COEFFICIENTS if wide else EXP1_COEFFICIENTS)
         for _ in range(int(np.log2(n))):
             result = self.rescale(self.relinearize(self.square(result)))
         return self.multiply(result, 128) if wide else result
 
-    def _check_exp_range(self, x, min_x: float, max_x: float, wide: bool):
+    def _check_exp_range(self, x, min_x: float, max_x: float, wide: bool, support=None):
         """Refuse a score outside the window the degree-15 fit was made on.
 
         `he_inv` and `he_invsqrt` have had this guard for a while and `he_exp` never did, which left
@@ -138,9 +139,11 @@ class NumericMixin:
         polynomial does not degrade, it takes off - and everything downstream (`07b` negative, `07c`
         negative in 12,080 slots, `07d` at 5.7e5) is what that looks like afterwards.
 
-        Every slot is checked, not just the carried ones: `he_softmax` masks *after* the exponential,
-        so the polynomial is evaluated on the padding too and a padding score out of range diverges
-        just as well as a real one.
+        ``support`` is the mask `he_softmax` applies to the exponential immediately afterwards, and
+        only the slots it keeps are judged. A slot it zeroes contributes nothing to the denominator
+        however far outside the window it was, and the maximum score is usually in one of them: on
+        this engine `07a` peaks at 12.43 in padding against 10.21 in a real token. Without the mask
+        this guard would refuse a run over a slot whose value is about to be multiplied by zero.
 
         ``x`` arrives already divided by the range scale, so it is multiplied back to compare against
         the window, which is stated in score units.
@@ -152,6 +155,11 @@ class NumericMixin:
             return
         scale = 64.0 if wide else 32.0
         values = np.real(np.asarray(self.engine.decrypt(x))) * scale
+        if support is not None:
+            keep = np.abs(np.real(np.asarray(support))).ravel() > 1e-9
+            if not keep.any():
+                return
+            values = values[keep[:values.size]] if keep.size >= values.size else values
         low, high = float(values.min()), float(values.max())
         if _debug():
             print(f"[range] he_exp observed [{low:.6g}, {high:.6g}] "
