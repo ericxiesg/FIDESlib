@@ -19,6 +19,26 @@
 #include <vector>
 
 namespace py = pybind11;
+
+// Releasing the GIL around the compute calls is a build-time choice, so it can be ruled in or out
+// without editing this file. Build with -DTHORFHE_RELEASE_GIL=0 to hold the GIL across every
+// dispatch, which is what the binding did before 4c98d0b.
+//
+// It exists because a device-side crash appeared after a rebuild and the GIL release was one of
+// three suspects; a flag settles in one build what hand-synthesising a bindings file settles in an
+// afternoon. The other two suspects are excluded by inspection: 7a03a0d changed only
+// `MakeLightPlaintext`, whose sole callers are this file and its own overload, and fb5d499 added
+// early returns that every caller skips by passing stopAfterStage = -1.
+#ifndef THORFHE_RELEASE_GIL
+#define THORFHE_RELEASE_GIL 1
+#endif
+
+#if THORFHE_RELEASE_GIL
+#define THORFHE_GIL , py::call_guard<py::gil_scoped_release>()
+#else
+#define THORFHE_GIL
+#endif
+
 using namespace fideslib;
 
 using CC = CryptoContext<DCRTPoly>;
@@ -201,36 +221,35 @@ PYBIND11_MODULE(_core, m) {
 	  // 1-3% utilisation even on the runs that finish, which is what holding the GIL across every
 	  // dispatch looks like. pybind11 reacquires before converting the return value, so the numpy
 	  // paths are unaffected.
-	  .def("EvalAdd", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalAddPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalAddLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalAddScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalAdd), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalAddInPlace", py::overload_cast<CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAddInPlace), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalSub", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalSubPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalSubScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalScalarSub", py::overload_cast<double, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalNegate", &CryptoContextImpl<DCRTPoly>::EvalNegate, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMult", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalMult), py::call_guard<py::gil_scoped_release>())
-	  .def("EvalSquare", &CryptoContextImpl<DCRTPoly>::EvalSquare, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultNoRelin", &CryptoContextImpl<DCRTPoly>::EvalMultNoRelin, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalSquareNoRelin", &CryptoContextImpl<DCRTPoly>::EvalSquareNoRelin, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalRelinearize", &CryptoContextImpl<DCRTPoly>::EvalRelinearize, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultByI", &CryptoContextImpl<DCRTPoly>::EvalMultByI, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalMultByInteger", &CryptoContextImpl<DCRTPoly>::EvalMultByInteger, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalConjugate", &CryptoContextImpl<DCRTPoly>::EvalConjugate, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalRotate", &CryptoContextImpl<DCRTPoly>::EvalRotate, py::call_guard<py::gil_scoped_release>())
-	  .def("Rescale", &CryptoContextImpl<DCRTPoly>::Rescale, py::call_guard<py::gil_scoped_release>())
-	  .def("EvalLevelReduce", &CryptoContextImpl<DCRTPoly>::EvalLevelReduce, py::call_guard<py::gil_scoped_release>())
+	  .def("EvalAdd", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd) THORFHE_GIL)
+	  .def("EvalAddPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd) THORFHE_GIL)
+	  .def("EvalAddLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalAdd) THORFHE_GIL)
+	  .def("EvalAddScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalAdd) THORFHE_GIL)
+	  .def("EvalAddInPlace", py::overload_cast<CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalAddInPlace) THORFHE_GIL)
+	  .def("EvalSub", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub) THORFHE_GIL)
+	  .def("EvalSubPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalSub) THORFHE_GIL)
+	  .def("EvalSubScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalSub) THORFHE_GIL)
+	  .def("EvalScalarSub", py::overload_cast<double, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalSub) THORFHE_GIL)
+	  .def("EvalNegate", &CryptoContextImpl<DCRTPoly>::EvalNegate THORFHE_GIL)
+	  .def("EvalMult", py::overload_cast<const CT&, const CT&>(&CryptoContextImpl<DCRTPoly>::EvalMult) THORFHE_GIL)
+	  .def("EvalMultPt", py::overload_cast<const CT&, PT&>(&CryptoContextImpl<DCRTPoly>::EvalMult) THORFHE_GIL)
+	  .def("EvalMultLightPt", py::overload_cast<const CT&, const LPT&>(&CryptoContextImpl<DCRTPoly>::EvalMult) THORFHE_GIL)
+	  .def("EvalMultScalar", py::overload_cast<const CT&, double>(&CryptoContextImpl<DCRTPoly>::EvalMult) THORFHE_GIL)
+	  .def("EvalSquare", &CryptoContextImpl<DCRTPoly>::EvalSquare THORFHE_GIL)
+	  .def("EvalMultNoRelin", &CryptoContextImpl<DCRTPoly>::EvalMultNoRelin THORFHE_GIL)
+	  .def("EvalSquareNoRelin", &CryptoContextImpl<DCRTPoly>::EvalSquareNoRelin THORFHE_GIL)
+	  .def("EvalRelinearize", &CryptoContextImpl<DCRTPoly>::EvalRelinearize THORFHE_GIL)
+	  .def("EvalMultByI", &CryptoContextImpl<DCRTPoly>::EvalMultByI THORFHE_GIL)
+	  .def("EvalMultByInteger", &CryptoContextImpl<DCRTPoly>::EvalMultByInteger THORFHE_GIL)
+	  .def("EvalConjugate", &CryptoContextImpl<DCRTPoly>::EvalConjugate THORFHE_GIL)
+	  .def("EvalRotate", &CryptoContextImpl<DCRTPoly>::EvalRotate THORFHE_GIL)
+	  .def("Rescale", &CryptoContextImpl<DCRTPoly>::Rescale THORFHE_GIL)
+	  .def("EvalLevelReduce", &CryptoContextImpl<DCRTPoly>::EvalLevelReduce THORFHE_GIL)
 	  // no guard: a getter, called often enough that releasing and reacquiring would cost more
 	  // than the call
 	  .def("GetRemainingLevels", &CryptoContextImpl<DCRTPoly>::GetRemainingLevels)
 	  .def("EvalBootstrap", &CryptoContextImpl<DCRTPoly>::EvalBootstrap, py::arg("ct"), py::arg("numIterations") = 1, py::arg("precision") = 0,
-		py::arg("prescaled") = false, py::arg("stopAfterStage") = -1,
-		py::call_guard<py::gil_scoped_release>());
+		py::arg("prescaled") = false, py::arg("stopAfterStage") = -1 THORFHE_GIL);
 
 	m.def("GenCryptoContext", [](CCParams<CryptoContextCKKSRNS>& p) { return GenCryptoContext(p); });
 }
