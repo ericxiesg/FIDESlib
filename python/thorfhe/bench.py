@@ -958,8 +958,18 @@ def command_workingset(args):
 
     level = args.depth - resolve_bootstrap_depth(args)
     engine, tracker = tracking_engine(g, depth=args.depth, bootstrap_level=level)
+    # `compact` belongs here as much as anywhere: `stream_qkv` exists precisely to stop the layer
+    # holding the 64 rotated copies, and this is the tool that says what holding them costs. Without
+    # the flag this measured the path nobody runs any more.
     layer = EncoderLayer(engine, binary_rotations=rotation_mode(args),
-                         refresh_after_dense=args.refresh_after_dense)
+                         refresh_after_dense=args.refresh_after_dense,
+                         compact=args.compact)
+    # Dummy weights are zeros, so every value in the layer is an artefact of that: the variance a
+    # LayerNorm sees is 3e-12 and no window covers it. What is being measured here is how many
+    # ciphertexts each stage holds, which the values do not affect - so turn the range checks off,
+    # exactly as `plan_rotations` does for the same reason.
+    for owner in (layer.attention, layer.dense, layer.norm, layer.feedforward):
+        owner.check_ranges = False
 
     for owner, names in ((layer.attention, ("stage_01_complexify_x", "stage_02_make_rotated_copies",
                                             "stage_03_query", "stage_04_key", "stage_05_value",
@@ -1299,6 +1309,9 @@ def build_parser():
     working.add_argument("--no-bootstrap", action="store_true")
     working.add_argument("--binary-rotations", action="store_true", default=True)
     working.add_argument("--extra-rotation-keys", type=int, default=0, metavar="N")
+    working.add_argument("--compact", action="store_true",
+                         help="measure the path `--compact` actually runs: streamed QKV copies, so "
+                              "the 64 rotated copies are never all alive at once")
     working.add_argument("--refresh-after-dense", action="store_true", default=True)
     working.add_argument("--quiet", action="store_true")
     working.set_defaults(handler=command_workingset)
