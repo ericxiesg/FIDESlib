@@ -121,6 +121,13 @@ class SoftmaxMixin:
             squared[index] = self.rescale(self.relinearize(self.square(scaled)))
 
         total = self._sum_over_groups(list(squared))
+        # The second `he_inv`'s denominator, which nothing measured until now. The device reports its
+        # first iteration at 1e6 where this engine is at 0.25, and the iteration cannot be blamed for
+        # an input it was handed: `07c` covers the *first* `he_inv` only. `07e` is the same quantity
+        # one temperature halving later, so the pair says whether `update_inv_D` amplified or
+        # inherited. `k` goes with it because it is an integer chosen from `delta` and it is squared
+        # by the line above, so it is the one factor here that can be large.
+        self.probed(f"07e.halved_denominator_k{k}", [total], self._support(attention_mask))
         epsilon = precision / 128 / 2
         inv_D, delta, precision = self.he_inv(total, self._carrying(attention_mask),
                                               epsilon=epsilon, alpha=alpha / 10,
