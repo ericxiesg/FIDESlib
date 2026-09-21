@@ -339,8 +339,10 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
         """
         half = len(scores) // 2
         refreshed = np.empty((len(scores),), dtype=object)
+        packed = []
         for index in range(half):
             merged = self.add(scores[index], self.multiply_1j(scores[index + half]))
+            packed.append(merged)
             merged = self.bootstrap(merged)
             if layer_index != 2:
                 merged = self.level_down(merged, 3)
@@ -356,6 +358,13 @@ class Softmax(SoftmaxMixin, NumericMixin, DivisionMixin, AttentionContext):
         # The bootstrap is the first thing in the layer that stages 01-06 do not do, so when the
         # softmax is the first wrong stage this is the line that splits the question in two: the
         # refreshed scores are 2x the scores stage 06 produced, and those are measurable.
+        #
+        # `07a0` is what that bootstrap was *given*, so the pair brackets it. The device needs this:
+        # its stage 06 `scores` are right to 3e-7 while `07a` comes out at a maximum of 37.5 against
+        # this engine's 12.43, and 37.5 is past the window `he_exp`'s degree-15 fit was made on. With
+        # only `07a` there is no way to tell a bootstrap that inflated its input from an input that
+        # was already large; with both, subtracting them is the whole question.
+        self.probed("07a0.score_refresh_input", np.asarray(packed, dtype=object))
         self.probed("07a.refreshed_scores", refreshed)
 
         if parameters is None:

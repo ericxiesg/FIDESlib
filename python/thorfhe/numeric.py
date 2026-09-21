@@ -120,11 +120,56 @@ class NumericMixin:
         denominator without touching the ratio between its largest and smallest value.
         """
         centre = (min_x + max_x) / 2 if shift is None else shift
+        self._check_exp_range(x, min_x, max_x, wide)
         shifted = self.add(x, -centre / (64 if wide else 32))
         result = self.evaluate_polynomial(shifted, EXP2_COEFFICIENTS if wide else EXP1_COEFFICIENTS)
         for _ in range(int(np.log2(n))):
             result = self.rescale(self.relinearize(self.square(result)))
         return self.multiply(result, 128) if wide else result
+
+    def _check_exp_range(self, x, min_x: float, max_x: float, wide: bool):
+        """Refuse a score outside the window the degree-15 fit was made on.
+
+        `he_inv` and `he_invsqrt` have had this guard for a while and `he_exp` never did, which left
+        the first step of the softmax as the only iterative numeric in the port that could leave its
+        range silently. It is not a hypothetical: the device measured `07a.refreshed_scores` at a
+        maximum of 37.5 against layer 0's window of [-27.25, 21.73], while this engine measures 12.43
+        on the same input. A minimax fit is only a fit *on its interval* - 1.7x outside it a degree-15
+        polynomial does not degrade, it takes off - and everything downstream (`07b` negative, `07c`
+        negative in 12,080 slots, `07d` at 5.7e5) is what that looks like afterwards.
+
+        Every slot is checked, not just the carried ones: `he_softmax` masks *after* the exponential,
+        so the polynomial is evaluated on the padding too and a padding score out of range diverges
+        just as well as a real one.
+
+        ``x`` arrives already divided by the range scale, so it is multiplied back to compare against
+        the window, which is stated in score units.
+        """
+        # `check_ranges` lives on the mixins that own an iteration; `NumericMixin` is
+        # mixed into owners that have it and owners that do not, so ask rather than assume.
+        if not (getattr(self, "check_ranges", True)
+                and getattr(self.engine, "inspectable", False)):
+            return
+        scale = 64.0 if wide else 32.0
+        values = np.real(np.asarray(self.engine.decrypt(x))) * scale
+        low, high = float(values.min()), float(values.max())
+        if _debug():
+            print(f"[range] he_exp observed [{low:.6g}, {high:.6g}] "
+                  f"against window [{min_x:.6g}, {max_x:.6g}]", flush=True)
+        # A tolerance, because the window's ends are legitimate inputs and the scale is divided out
+        # and multiplied back: `u / 32 * 32` is not `u` for every double, so a value drawn at the
+        # boundary lands a few ULP outside it. What this guard is for is 1.7x outside, not 1e-15.
+        slack = 1e-9 * (max_x - min_x)
+        if low >= min_x - slack and high <= max_x + slack:
+            return
+        outside = int(((values < min_x - slack) | (values > max_x + slack)).sum())
+        raise ValueError(
+            f"he_exp: the score runs over [{low:.4g}, {high:.4g}] on {outside} of {values.size} "
+            f"slots outside the window [{min_x:.4g}, {max_x:.4g}] the degree-15 fit was made on. "
+            f"Outside its interval a minimax fit diverges rather than degrading, so this does not "
+            f"surface as a slightly worse softmax - it surfaces as `he_inv` failing two stages "
+            f"later. The window comes from `thorfhe.softmax.Softmax.LAYERS`; re-calibrate it, or "
+            f"find what made the scores larger than the calibration saw.")
 
     def he_exp1(self, x, min_x: float, max_x: float, n: int, shift: float | None = None):
         return self.he_exp(x, min_x, max_x, n, wide=False, shift=shift)
