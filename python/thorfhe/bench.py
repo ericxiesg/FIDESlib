@@ -482,14 +482,18 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         below, above = int((good < 0).sum()), int((good > 1.0).sum())
         if below or above:
             outside = f"  <0 {below}/{good.size}  >1 {above}/{good.size}"
-            # Where, not just how many. The device's first `he_inv` converges in every slot but one
-            # or two - `>1 1/32768` with a 99th percentile three orders below the maximum - and a
-            # count cannot say whether that slot is a padding row, a group boundary or slot zero,
-            # while an index can. Slots are reported modulo the geometry's `n_slot` as well, because
-            # the layout repeats and the residue is usually the informative half.
-            far = np.argsort(-np.abs(good))[:3]
-            outside += "  worst at " + ",".join(
-                f"{int(i)}(%{int(i) % THOR_BERT.n_slot})" for i in far)
+        # Where the maximum is, always - not only once a value has left its range. The position has
+        # decided the question repeatedly: `07d`'s single bad slot is slot 0 on every device run,
+        # while the bootstrap's own worst slots never repeat, and that contrast is what says the
+        # failure comes from an operation rather than from noise. Reporting it only on the probe
+        # that has already gone out of range gives it for the step after the one that matters -
+        # `inv_iter01_b` is in range and is where the answer would be. Three indices cost nothing.
+        #
+        # Slots are reported modulo the geometry's `n_slot` as well, because the layout repeats and
+        # the residue is usually the informative half.
+        far = np.argsort(-np.abs(good))[:3]
+        outside += "  worst at " + ",".join(
+            f"{int(i)}(%{int(i) % THOR_BERT.n_slot})" for i in far)
         # Split by the carried slots when the caller knows them. `07a`'s maximum is 37.5 on the
         # device against 12.43 here, and whether that sits in a real token or in padding decides
         # what to look at next - per-stage fidelity only ever compares the carried ones.

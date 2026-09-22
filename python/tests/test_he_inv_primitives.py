@@ -117,15 +117,25 @@ def test_conjugate_at_slot_zero_its_own_fixed_point(device):
         and ranks 688th of 8448 carried slots, with 8.1% of them smaller. The actual minimum, 0.02643,
         sits at `%2048 == 436`.
 
-    Structureless noise and a structureless input cannot produce a failure that lands on the same
-    slot every time. What is left is an operation, and slot 0 is special to exactly one: conjugation
-    is the Galois automorphism sending slot j to slot -j, so slot 0 is its fixed point. `he_inv`
-    calls it once per iteration inside `_restore_magnitude`, which is how `07d` would acquire it -
-    and stage 07's score unpack calls it too, which is where `07a`'s three worst carried slots were
-    slot 0 of ciphertexts 5, 6 and 7, the three built by `multiply_1j(subtract(conjugated, merged))`.
+      - and not the input's shape either: bootstrapping a vector with 8448 carried slots and 24320
+        exact zeros gives sigma 0.0155 against the dense vector's 0.0156, with the same p50 to three
+        figures.
 
-    Two symptoms, one slot, one operation between them. The clear engine cannot see any of this
-    because its conjugate is numpy's, exact by construction.
+    Structureless noise and a structureless input cannot produce a failure that lands on the same
+    slot every time, so what is left is an operation. This test covers conjugate because it sits
+    directly above both symptoms - `_restore_magnitude` calls `add(ct, conjugate(ct))` once per
+    Goldschmidt iteration, and stage 07's unpack builds its imaginary halves with
+    `multiply_1j(subtract(conjugated, merged))`, which is where `07a`'s three worst carried slots
+    were: slot 0 of ciphertexts 5, 6 and 7.
+
+    It is worth being clear that this is association, not a mechanism. I first argued slot 0 must be
+    conjugation's fixed point, and that is wrong: conjugation acts on slots in place, sending v_j to
+    conj(v_j), so as a permutation it fixes every slot and singles out none. (In the *coefficient*
+    domain the automorphism does fix index 0, which is a real special case in a kernel - but an error
+    there lands on every slot equally, not on one.) So this checks an operator that is upstream of
+    both symptoms; it does not predict that it will fail.
+
+    The clear engine cannot answer it either way, because its conjugate is numpy's.
 
     Checks the identity on a real message (conj is identity), the doubling `_restore_magnitude`
     actually performs, and a complex message (conj flips the imaginary part), each at the levels the
