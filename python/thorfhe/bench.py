@@ -124,6 +124,14 @@ def _instrumented(args, engine):
     A phase total says a layer took 1131 seconds. This says which primitive did, which is the
     question a device sitting at 0% utilisation actually poses.
     """
+    # `inspectable` is how `he_inv`, `he_exp` and `he_invsqrt` ask whether they may read their own
+    # input back and refuse one outside the range they are derived for. Only `ClearEngine` declares
+    # it, because there reading is free - which left every one of those guards silent on the device,
+    # the one place a value can actually leave the range. The flag says the bench holds the secret
+    # key and will pay a decryption for the answer. It is an ordinary Python attribute on the
+    # pybind11 object, the same way `instrument` rebinds the primitives below.
+    if getattr(args, "check_ranges", False):
+        engine.inspectable = True
     if not getattr(args, "time_ops", False):
         return engine
     args._op_timings = OpTimings()
@@ -1180,6 +1188,14 @@ def build_parser():
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "
                              "which stage a divergence comes from")
+    engine.add_argument("--check-ranges", action="store_true",
+                        help="let he_inv/he_exp/he_invsqrt verify their input range on the device "
+                             "too. The guards are written against `engine.inspectable`, which only "
+                             "the clear engine sets, so on hardware they have always been silent - "
+                             "and hardware is where they are needed: a denominator over 1 makes "
+                             "Goldschmidt's `2 - k*b` change sign and diverge rather than fail. "
+                             "Costs one decryption per guarded call (about a dozen a layer, 76 ms "
+                             "each on a GV100), so it is opt-in rather than always on")
     # The three level-free scalings that keep a bootstrap's input inside `q0/Delta`. They are folded
     # into plaintexts, so they cost nothing at all, and they are what the 22-site magnitude
     # measurement settled at: residual 256, refresh 4, score_refresh 16. Defaults are 1.0 because

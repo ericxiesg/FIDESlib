@@ -138,3 +138,45 @@ def test_a_lift_that_would_push_the_denominator_past_one_is_refused():
     """The range check runs after the lift, so an unsafe one raises instead of quietly diverging."""
     with pytest.raises(Exception):
         _invert(lift=4)
+
+
+def test_the_lift_is_already_at_its_ceiling_and_the_bootstrap_is_what_is_left():
+    """Raising the lift always helps and cannot go past 3, which is not enough at 0.017 of error.
+
+    The denominator `07c` hands the first `he_inv` spans [2^-6, 0.3036] on the real checkpoint - a
+    19.4:1 dynamic range. The top caps the lift at 1/0.3036 = 3.29, because above 1 the correction
+    `2 - k*b` changes sign and Goldschmidt inverts instead of converging. So `--inverse-lift 3` is
+    essentially maximal, and the sweep below says it is also strictly best: at every error level,
+    more lift is less error. Dropping the lift to buy headroom would make this worse, not better.
+
+    What that leaves is the bootstrap. At lift 3 the *smallest* carried denominator sits at 0.0468
+    against an absolute bootstrap error of 0.017 - a signal-to-noise ratio of 2.8 - and the relative
+    error on 1/D comes out proportional to it, about 36x the bootstrap's. That is the whole budget:
+    no arrangement of level-free integers fixes a denominator whose bottom is three times its noise.
+    """
+    top = 0.3036
+    assert 1.0 / top == pytest.approx(3.29, abs=0.01), "the cliff is what caps the lift"
+
+    # More lift is less error, at the error the device is documented to have.
+    errors = [_invert(lift=lift, boot_error=0.017, top=top) for lift in (1, 2, 3)]
+    assert errors[0] > errors[1] > errors[2], f"the lift stopped helping: {errors}"
+
+    # And at the ceiling it is still 61% - the iteration is not usable at 0.017, at any lift.
+    assert 0.4 < errors[2] < 0.9
+    # Linear in the bootstrap's error, so the precision needed is a number and not a guess.
+    assert _invert(lift=3, boot_error=0.001, top=top) < 0.05
+
+
+def test_the_range_check_runs_before_the_bootstrap_and_so_cannot_see_the_cliff():
+    """`_check_inversion_range` guards `lift * denominator`; the iteration gets it bootstrapped.
+
+    The bootstrap's error is absolute and lands after the guard, so the guard's "under 1" and the
+    iteration's "under 1" are different numbers. That is why `inv_input_lift{N}` probes after the
+    refresh: it is the only place the value the iteration actually receives can be read.
+
+    Here the lift is statically safe - 3 x 0.3036 = 0.911, which the guard passes - and 0.09 of
+    bootstrap error still destroys the result, by pushing carried slots across one end or the other.
+    """
+    top = 0.3036
+    assert 3 * top < 1.0, "the lift must be statically safe, or this tests the guard instead"
+    assert _invert(lift=3, boot_error=0.09, top=top) > 1e3

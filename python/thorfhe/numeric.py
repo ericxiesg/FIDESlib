@@ -312,6 +312,15 @@ class DivisionMixin:
             refreshed = self.add(refreshed, PADDING_FLOOR * (1.0 - np.clip(np.asarray(
                 support, dtype=float), 0.0, 1.0)))
         a = DeltaCiphertext(start, delta)
+        # What the iteration is actually handed, which until now nothing measured: `07c` is the
+        # denominator *before* the lift and the bootstrap, and `inv_iter01_b` is already one step in.
+        # The whole of Goldschmidt is derived for a value in `[epsilon, 1]` and `2 - k*b` changes
+        # sign above 1, so a single carried slot over 1 here diverges and takes the row with it -
+        # and on the device this is the one place the lift, the bootstrap error and the padding
+        # floor all land on top of each other. Costs a decryption, so it rides with THORFHE_DEBUG.
+        if _debug():
+            self.probed(f"{self._probe_tag}.inv_input_lift{lift}", [refreshed],
+                        None if support is None else np.asarray(support, dtype=float))
         b = DeltaCiphertext(refreshed, delta)
         error = epsilon
         iterations = 0

@@ -227,3 +227,51 @@ def test_noise_level_tracks_a_multiplication(engine):
     product = engine.multiply(x, 0.5)
     assert engine.noise_level(product) == 2, "a float scalar multiply costs a scale degree"
     assert engine.noise_level(engine.rescale(product)) == 1, "rescale returns it"
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_how_wrong_the_bootstrap_is_on_a_full_vector(device):
+    """The absolute error over every slot, and *which* slot is worst.
+
+    Everything else in this file probes `_values` - three non-zero slots out of 65536 - and the
+    0.017 in the xfail above came from that. A three-slot probe cannot see an error that depends on
+    where a slot sits, and there is now reason to think this one does: on a real layer the worst
+    slots of `07a`, `07d` and `07e` are all at index 0 modulo the geometry (slot 0 of a ciphertext,
+    slot 0 of a group), which is not what noise looks like.
+
+    It also cannot see an error that depends on how full the vector is, and `he_inv` bootstraps a
+    dense denominator.
+
+    Why the number matters: `he_inv`'s first denominator spans [2^-6, 0.3036] on the real
+    checkpoint, and `--inverse-lift 3` is already at its ceiling (the iteration diverges above 1, so
+    the lift cannot exceed 1/0.3036 = 3.29). That puts the smallest carried denominator at 0.0468,
+    and the relative error on 1/D comes out about 36x the bootstrap's absolute error - measured on
+    the clear engine in `test_division_padding_floor`. So:
+
+        0.017 -> 61% error on 1/D    (bad, but finite)
+        0.13  -> the 1.8e7 factor the device actually shows at `07d`
+
+    The device's `07d` is 8.631e5 against a clear-engine 0.04903. Reading that back through the
+    same curve puts the effective error near 0.13, eight times what the three-slot probe reports.
+    This test is what decides between those two numbers. It asserts nothing about the value - the
+    point is to print it - and only fails if the bootstrap is non-finite.
+    """
+    import pyfideslib as pf
+
+    engine = pf.Engine(device, **bench_params())
+    rng = np.random.default_rng(7)
+    # The magnitudes `he_inv` hands it: a dense denominator over the real range, lifted by 3.
+    want = rng.uniform(2.0 ** -6, 0.3036, engine.slots) * 3.0
+
+    got = np.real(np.asarray(engine.decrypt(engine.bootstrap(engine.encrypt(want)))))[:want.size]
+    assert np.isfinite(got).all(), "the bootstrap returned non-finite slots"
+    error = np.abs(got - want)
+    worst = np.argsort(-error)[:5]
+
+    print(f"\nbootstrap absolute error over {want.size} slots at the benchmark's parameters:"
+          f"\n  max   {error.max():.6g}"
+          f"\n  p99   {np.quantile(error, 0.99):.6g}"
+          f"\n  p50   {np.quantile(error, 0.50):.6g}"
+          f"\n  worst {', '.join(f'{int(i)}(%16={int(i) % 16}, %2048={int(i) % 2048})' for i in worst)}"
+          f"\n  -> 1/D relative error would be about {36 * error.max():.3g}")
