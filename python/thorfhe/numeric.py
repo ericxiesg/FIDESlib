@@ -373,8 +373,23 @@ class DivisionMixin:
             if _debug():
                 _trace_noise(self.engine, f"iter{iterations:02d}", correction=correction,
                              a_pre=a.ciphertext, b_pre=b.ciphertext)
-            a_new = self._times(a.ciphertext, correction)
-            b_new = self._times(b.ciphertext, correction)
+            # Order is arithmetic-neutral: the two products share a right operand and nothing else,
+            # so computing them either way round must give the same pair. THORFHE_SWAP_TIMES asks
+            # for the other order, which is a diagnostic and not a tuning knob.
+            #
+            # It exists because the device's first iteration damages `b` at slot 0 while `a`, which
+            # is multiplied by the same `correction` a line earlier, comes out clean - and
+            # `_restore_magnitude` is provably inert at that iteration (b.delta is 0.274, so
+            # int(1/delta/headroom) is 0: no doubling, factor 1), which leaves `_times` itself.
+            # If the fault follows the *second* call and moves to `a` when the order is swapped,
+            # then the first call is damaging the shared `correction` and this is aliasing. If it
+            # stays with `b`, the operand decides and aliasing is out. One run either way.
+            if os.environ.get("THORFHE_SWAP_TIMES"):
+                b_new = self._times(b.ciphertext, correction)
+                a_new = self._times(a.ciphertext, correction)
+            else:
+                a_new = self._times(a.ciphertext, correction)
+                b_new = self._times(b.ciphertext, correction)
             if _debug():
                 _trace_noise(self.engine, f"iter{iterations:02d}", a_post_times=a_new, b_post_times=b_new)
                 # Values, not just noise levels, and *before* `_restore_magnitude` - because the two

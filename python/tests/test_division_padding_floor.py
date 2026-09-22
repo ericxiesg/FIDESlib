@@ -298,3 +298,35 @@ def test_a_goldschmidt_step_can_never_exceed_one():
     # The device's number, as the quadratic that has no solution.
     target = 5.64 * (k * PADDING_FLOOR * (2 - k * PADDING_FLOOR))
     assert 4 - 4 * target < 0, "a reachable value would make this test meaningless"
+
+
+def test_swapping_the_two_times_calls_changes_nothing():
+    """`THORFHE_SWAP_TIMES` must be arithmetic-neutral, or it cannot be used as a diagnostic.
+
+    The two products in a Goldschmidt step share their right operand and nothing else, so computing
+    them in either order has to give the same pair. The switch exists to ask the device whether its
+    fault follows the *second* call - which would mean the first is damaging the shared `correction`,
+    and that is aliasing - or stays with `b`, which would mean the operand decides.
+
+    That question is only answerable if the order is genuinely neutral here. If swapping moved the
+    answer on this engine too, a moved fault on the device would say nothing about aliasing and
+    everything about my edit.
+    """
+    import os
+
+    from thorfhe.numeric import DivisionMixin
+
+    del DivisionMixin  # imported only to fail loudly here if the module ever stops exposing it
+
+    was = os.environ.pop("THORFHE_SWAP_TIMES", None)
+    try:
+        straight = _invert(lift=3, top=0.3036)
+        os.environ["THORFHE_SWAP_TIMES"] = "1"
+        swapped = _invert(lift=3, top=0.3036)
+    finally:
+        os.environ.pop("THORFHE_SWAP_TIMES", None)
+        if was is not None:
+            os.environ["THORFHE_SWAP_TIMES"] = was
+
+    assert straight == pytest.approx(swapped, rel=1e-12, abs=1e-15), (
+        f"the swap is not neutral: {straight!r} against {swapped!r}")
