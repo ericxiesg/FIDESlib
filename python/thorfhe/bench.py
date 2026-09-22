@@ -211,6 +211,7 @@ def make_engine(args, geometry):
                            strict=not args.lenient, noise_model=args.noise_model,
                            scaling_bits=args.scaling_bits, first_mod_bits=args.first_mod_bits,
                            bootstrap_precision_bits=args.bootstrap_precision_bits,
+                           seed=args.noise_seed,
                            bootstrap_noise_only=args.bootstrap_noise_only))
 
     import pyfideslib
@@ -1239,6 +1240,12 @@ def build_parser():
                         help="bits of q0/Delta the bootstrap reproduces, for --noise-model. The "
                              "default is the device's measured floor (0.015 at Delta=2^50, i.e. "
                              "0.015/32 = 2^-11), not the 22 the clear engine assumes on its own")
+    engine.add_argument("--noise-seed", type=int, default=0,
+                        help="the seed --noise-model draws its perturbations from. The failure it "
+                             "models is a tail event - a carried slot near the bottom of he_inv's "
+                             "range driven negative by the bootstrap - so one run is one sample of "
+                             "it, and a clean run says the draw missed, not that the circuit is "
+                             "safe. Vary this to get a rate instead of an anecdote")
     engine.add_argument("--output-scale", type=float, default=ACTIVATION_SCALE,
                         help="the amplitude every activation ciphertext carries relative to the real "
                              "value; THOR's final doubling is never cancelled, so this is 2. It is "

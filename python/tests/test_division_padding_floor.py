@@ -239,3 +239,27 @@ def test_warn_reports_the_same_diagnosis_and_carries_on(capsys):
     out = capsys.readouterr().out
     assert "WARNING" in out and "--inverse-lift 3" in out, out
     assert got > 1.0, "past the cliff the iteration should still be visibly wrong, not silently fine"
+
+
+def test_the_noise_level_trace_is_silent_without_an_engine_that_reports_one(capsys):
+    """`ClearEngine` has no `noise_level`, so the trace would only ever run on the device.
+
+    Which means a typo in it surfaces on hardware, on a run that costs minutes, in the middle of the
+    diagnosis it was added to serve. Exercise both branches here instead.
+    """
+    from thorfhe.numeric import _trace_noise
+
+    class Silent:
+        pass
+
+    class Reporting:
+        @staticmethod
+        def noise_level(ct):
+            return {"a": 1, "b": 2}[ct]
+
+    _trace_noise(Silent(), "pre-iter", a="a", b="b")
+    assert capsys.readouterr().out == "", "an engine without noise_level must print nothing"
+
+    _trace_noise(Reporting(), "iter03", a="a", b="b")
+    out = capsys.readouterr().out
+    assert out == "[noise_level] iter03  a=1  b=2\n", repr(out)

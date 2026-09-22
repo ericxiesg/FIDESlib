@@ -214,6 +214,26 @@ class DeltaCiphertext:
         return f"DeltaCiphertext(delta={self.delta:g})"
 
 
+def _trace_noise(engine, label: str, **ciphertexts):
+    """Print each ciphertext's NoiseLevel beside ``label``, when the engine can report one.
+
+    FIXEDMANUAL keeps NoiseLevel at 1 between operations and 2 between a multiply and its rescale,
+    and a ciphertext that drifts off that will not add to one that has not: `he_inv` is the longest
+    unbroken chain of multiplies in the port, and `_restore_magnitude`'s conjugate-add and integer
+    multiply are both meant to be level-free and scale-free. Whether they really are is a thing to
+    check rather than assume.
+
+    Gathered here rather than written out at each of the eight sites, which is how it arrived: the
+    `getattr` is needed because `ClearEngine` has no `noise_level`, and repeating that four-line
+    dance inside the iteration's hot loop buries the arithmetic it is there to watch.
+    """
+    report = getattr(engine, "noise_level", None)
+    if report is None:
+        return
+    print(f"[noise_level] {label}  "
+          + "  ".join(f"{name}={report(ct)}" for name, ct in ciphertexts.items()), flush=True)
+
+
 def _range_violation(message: str, owner):
     """Raise, or print and carry on, according to ``owner.range_violations``.
 
@@ -342,9 +362,7 @@ class DivisionMixin:
         iterations = 0
 
         if _debug():
-            nl = getattr(self.engine, "noise_level", None)
-            if nl is not None:
-                print(f"[noise_level] pre-iter  a={nl(a.ciphertext)}  b={nl(b.ciphertext)}", flush=True)
+            _trace_noise(self.engine, "pre-iter", a=a.ciphertext, b=b.ciphertext)
 
         while error < 1 - alpha:
             iterations += 1
@@ -353,24 +371,20 @@ class DivisionMixin:
             # (2/k) * delta_b - b, i.e. Goldschmidt's `2 - k*value` carried in the scaled representation
             correction = self.prepare_for_multiply(self.subtract(2 / k * b.delta, b.ciphertext))
             if _debug():
-                nl = getattr(self.engine, "noise_level", None)
-                if nl is not None:
-                    print(f"[noise_level] iter{iterations:02d}  correction={nl(correction)}  a_pre={nl(a.ciphertext)}  b_pre={nl(b.ciphertext)}", flush=True)
+                _trace_noise(self.engine, f"iter{iterations:02d}", correction=correction,
+                             a_pre=a.ciphertext, b_pre=b.ciphertext)
             a_new = self._times(a.ciphertext, correction)
             b_new = self._times(b.ciphertext, correction)
             if _debug():
-                nl = getattr(self.engine, "noise_level", None)
-                if nl is not None:
-                    print(f"[noise_level] iter{iterations:02d}  a_post_times={nl(a_new)}  b_post_times={nl(b_new)}", flush=True)
+                _trace_noise(self.engine, f"iter{iterations:02d}", a_post_times=a_new, b_post_times=b_new)
             a = DeltaCiphertext(a_new, a.delta * b.delta / k ** 2)
             b = DeltaCiphertext(b_new, b.delta * b.delta / k ** 2)
             error = k * error * (2 - k * error)
 
             a, b = self._restore_magnitude(a, b)
             if _debug():
-                nl = getattr(self.engine, "noise_level", None)
-                if nl is not None:
-                    print(f"[noise_level] iter{iterations:02d}  a_post_restore={nl(a.ciphertext)}  b_post_restore={nl(b.ciphertext)}", flush=True)
+                _trace_noise(self.engine, f"iter{iterations:02d}",
+                             a_post_restore=a.ciphertext, b_post_restore=b.ciphertext)
             # Under THORFHE_DEBUG, every step of the iteration. `07c` and `07d` bracket the whole of
             # it, and on the device they disagree by seventeen orders of magnitude with the input
             # already correct - so the question is which step, and nothing between the two says.
@@ -453,27 +467,21 @@ class DivisionMixin:
         headroom = 2 ** self.delta_headroom_bits
         if int(1 / b.delta / headroom) > 1:
             for scaled in (a, b):
-                if _debug():
-                    nl = getattr(self.engine, "noise_level", None)
-                    nl_pre = nl(scaled.ciphertext) if nl else "?"
+                before = scaled.ciphertext
                 scaled.ciphertext = self.add(scaled.ciphertext, self.conjugate(scaled.ciphertext))
                 scaled.delta *= 2
                 if _debug():
-                    nl = getattr(self.engine, "noise_level", None)
-                    if nl is not None:
-                        print(f"[noise_level] restore conjugate-add  pre={nl_pre}  post={nl(scaled.ciphertext)}", flush=True)
+                    _trace_noise(self.engine, "restore conjugate-add",
+                                 pre=before, post=scaled.ciphertext)
         factor = max(int(1 / b.delta / headroom), 1)
         if factor > 1:
-            if _debug():
-                nl = getattr(self.engine, "noise_level", None)
-                nl_a = nl(a.ciphertext) if nl else "?"
-                nl_b = nl(b.ciphertext) if nl else "?"
+            before_a, before_b = a.ciphertext, b.ciphertext
             a = DeltaCiphertext(self.multiply(a.ciphertext, factor), a.delta * factor)
             b = DeltaCiphertext(self.multiply(b.ciphertext, factor), b.delta * factor)
             if _debug():
-                nl = getattr(self.engine, "noise_level", None)
-                if nl is not None:
-                    print(f"[noise_level] restore int-mult factor={factor}  a: {nl_a}->{nl(a.ciphertext)}  b: {nl_b}->{nl(b.ciphertext)}", flush=True)
+                _trace_noise(self.engine, f"restore int-mult factor={factor}",
+                             a_pre=before_a, a_post=a.ciphertext,
+                             b_pre=before_b, b_post=b.ciphertext)
         return a, b
 
 
