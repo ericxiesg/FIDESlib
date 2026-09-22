@@ -377,6 +377,14 @@ class DivisionMixin:
             b_new = self._times(b.ciphertext, correction)
             if _debug():
                 _trace_noise(self.engine, f"iter{iterations:02d}", a_post_times=a_new, b_post_times=b_new)
+                # Values, not just noise levels, and *before* `_restore_magnitude` - because the two
+                # probes at the bottom of the loop are both taken after it, back to back with no
+                # operation between them. Reading them as a before/after pair says `_restore_magnitude`
+                # did something, when all they show is that `a` is healthy and `b` is not at the same
+                # instant. These two make the bracket real: with them, `_times` and
+                # `_restore_magnitude` are separated by a measurement rather than by an assumption.
+                self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_a_times", [a_new])
+                self.probed(f"{self._probe_tag}.inv_iter{iterations:02d}_b_times", [b_new])
             a = DeltaCiphertext(a_new, a.delta * b.delta / k ** 2)
             b = DeltaCiphertext(b_new, b.delta * b.delta / k ** 2)
             error = k * error * (2 - k * error)

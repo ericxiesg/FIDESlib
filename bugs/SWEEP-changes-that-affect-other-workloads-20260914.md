@@ -65,6 +65,14 @@ bert-tiny 的日志证明它确实在生效：
 
 **但这是本分支唯一一处我主动改了语义的地方**，而且我当时就写了"请用 OpenFHE 源码核实"。
 bert-tiny 不调它（查过），THOR 移植也不调，所以目前没有已知调用方——
+
+> **2026-09-22 更正："THOR 移植也不调"是错的。** `numeric.py` 的 `he_inv` 每一轮迭代都调：
+> `correction = self.subtract(2 / k * b.delta, b.ciphertext)`——左操作数是标量，
+> 经 `pyfideslib/__init__.py:149` 派发到 `EvalScalarSub(double, CT)`，正是这个重载。
+> 所以它**不是**没有调用方，而是在本项目最热的数值路径上，每层几十次。
+> 符号本身大概率是对的（`test_scalar_minus_ciphertext` 在设备上过，本机语义一致，
+> 而且符号错会毁掉每个槽而不是一个），**但"没有已知调用方"这条理由作废**，
+> 上游之前必须按真正有调用方来核实。
 **但如果有第三方调用方，我们改了它的算术。** 上游 PR 之前必须核实。
 
 ### 3.3 `light_plaintext_cache_capacity = 64` 默认非零
