@@ -171,13 +171,13 @@ class NumericMixin:
         if low >= min_x - slack and high <= max_x + slack:
             return
         outside = int(((values < min_x - slack) | (values > max_x + slack)).sum())
-        raise ValueError(
+        return _range_violation(
             f"he_exp: the score runs over [{low:.4g}, {high:.4g}] on {outside} of {values.size} "
             f"slots outside the window [{min_x:.4g}, {max_x:.4g}] the degree-15 fit was made on. "
             f"Outside its interval a minimax fit diverges rather than degrading, so this does not "
             f"surface as a slightly worse softmax - it surfaces as `he_inv` failing two stages "
             f"later. The window comes from `thorfhe.softmax.Softmax.LAYERS`; re-calibrate it, or "
-            f"find what made the scores larger than the calibration saw.")
+            f"find what made the scores larger than the calibration saw.", self)
 
     def he_exp1(self, x, min_x: float, max_x: float, n: int, shift: float | None = None):
         return self.he_exp(x, min_x, max_x, n, wide=False, shift=shift)
@@ -212,6 +212,22 @@ class DeltaCiphertext:
 
     def __repr__(self):
         return f"DeltaCiphertext(delta={self.delta:g})"
+
+
+def _range_violation(message: str, owner):
+    """Raise, or print and carry on, according to ``owner.range_violations``.
+
+    A guard that stops the run is right when the run is meant to produce an answer, and wrong when
+    it is meant to produce a diagnosis: the device's first `he_inv` refused at `--check-ranges`, and
+    that took `07d`, `07e` and every probe after it down with the run. Both are wanted, at different
+    times, so it is a setting rather than a choice made here. Warning is not the default: an
+    unguarded run returns a finite, plausible, wrong number, which is the failure this whole
+    mechanism exists to prevent.
+    """
+    if getattr(owner, "range_violations", "raise") == "warn":
+        print(f"[range] WARNING (--check-ranges warn, continuing): {message}", flush=True)
+        return
+    raise ValueError(message)
 
 
 def _debug() -> bool:
@@ -302,7 +318,7 @@ class DivisionMixin:
             # smaller fraction of the message, and an integer scalar costs no level.
             denominator = self.multiply(denominator, lift)
             epsilon = epsilon * lift
-        self._check_inversion_range(denominator, ones, epsilon)
+        self._check_inversion_range(denominator, ones, epsilon, lift=lift)
         # `ones` is a fresh encryption and the denominator has been through a stage, so they are
         # almost never at the same level; FIXEDMANUAL will not multiply across levels.
         start, refreshed = self.align(ones, self.bootstrap(denominator))
@@ -349,7 +365,7 @@ class DivisionMixin:
         # about `denominator`: the value is `ciphertext / delta`, so dividing the delta multiplies it.
         return a.ciphertext, a.delta / lift, error
 
-    def _check_inversion_range(self, denominator, ones, epsilon: float):
+    def _check_inversion_range(self, denominator, ones, epsilon: float, lift: int = 1):
         """Refuse a denominator outside ``[epsilon, 1]`` where the values can be read.
 
         The iteration's schedule - how many steps, and the ``k`` at each - is derived from ``epsilon``
@@ -384,13 +400,25 @@ class DivisionMixin:
         if low >= epsilon and high <= 1.0:
             return
         median = float(np.median(values[carried]))
-        raise ValueError(
+        # What went wrong, and - when the lift is the reason - what to set it to. `high` is already
+        # `lift * denominator`, so the unlifted maximum is `high / lift` and the largest integer that
+        # stays under 1 is its reciprocal, floored. That number is not a constant: it comes from the
+        # denominator this run produced, and the device's is not the clear engine's (0.3632 against
+        # 0.3036, a ceiling of 2 rather than 3). Saying it here beats deriving it from a traceback.
+        advice = ""
+        if high > 1.0:
+            ceiling = max(1, int(1.0 / (high / lift)))
+            advice = (f" The maximum is over 1, where `2 - k*b` changes sign and the iteration "
+                      f"inverts instead of converging - at lift {lift} that is {high / lift:.4g} "
+                      f"x {lift}. Below the ceiling more lift is strictly better, so the value to "
+                      f"use here is the largest one that still fits: `--inverse-lift {ceiling}`.")
+        return _range_violation(
             f"he_inv: the denominator runs over [{low:.4g}, {high:.4g}] (median {median:.4g}) on the "
             f"{int(carried.sum())} slots that carry data, but the iteration is set up for "
             f"[{epsilon:.4g}, 1]. Below the lower bound Goldschmidt saturates rather than failing - "
             f"it returns a finite, plausible, wrong number - so this cannot be left to surface "
-            f"downstream. Re-calibrate: the scale folded into the key projection is what places the "
-            f"denominator in this window (see thorfhe.softmax.calibrate).")
+            f"downstream.{advice} Re-calibrate: the scale folded into the key projection is what "
+            f"places the denominator in this window (see thorfhe.softmax.calibrate).", self)
 
     def _times(self, x, y):
         """Ciphertext product, relinearised and brought back to canonical scale."""
@@ -470,14 +498,14 @@ class InverseSqrtMixin:
                   flush=True)
         if low >= epsilon and high <= 1.0:
             return
-        raise ValueError(
+        return _range_violation(
             f"he_invsqrt: the variance runs over [{low:.4g}, {high:.4g}] (median "
             f"{float(np.median(values[carried])):.4g}) on the {int(carried.sum())} slots that carry "
             f"a statistic, but the iteration is set up for [{epsilon:.4g}, 1]. Below the lower bound "
             f"the iteration does not converge to 1/sqrt(x), and a negative value diverges outright - "
             f"which is what a LayerNorm returning a best-fit scale of -1e107 looks like. The window "
             f"comes from `min_var/max_var`, so this says the variance left "
-            f"`LayerNormStages.VARIANT_BOUNDS` rather than that the arithmetic is wrong.")
+            f"`LayerNormStages.VARIANT_BOUNDS` rather than that the arithmetic is wrong.", self)
 
     def he_invsqrt(self, denominator, ones, mask, epsilon: float, alpha: float):
         """``1 / sqrt(denominator)`` for a denominator known to lie in ``[epsilon, 1]``.

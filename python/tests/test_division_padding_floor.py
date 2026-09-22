@@ -180,3 +180,62 @@ def test_the_range_check_runs_before_the_bootstrap_and_so_cannot_see_the_cliff()
     top = 0.3036
     assert 3 * top < 1.0, "the lift must be statically safe, or this tests the guard instead"
     assert _invert(lift=3, boot_error=0.09, top=top) > 1e3
+
+
+def test_the_guard_names_the_lift_to_use_instead():
+    """Refusing is half the job; the other half is the number, and the guard is what knows it.
+
+    The ceiling is not a constant. It is `1 / max(denominator)`, and that maximum is whatever the
+    run produced: the clear engine's first softmax denominator peaks at 0.3036, which admits a lift
+    of 3, while the device's peaks at 0.3632, which admits only 2. `--inverse-lift 3` is therefore
+    correct here and over the cliff there, and the difference is 190 (at zero bootstrap error) versus
+    3e-06. Deriving that from a traceback is work the guard can do.
+    """
+    with pytest.raises(ValueError) as caught:
+        _invert(lift=4, top=0.3036)
+    message = str(caught.value)
+    assert "--inverse-lift 3" in message, message
+    assert "changes sign" in message
+
+
+def test_below_the_ceiling_more_lift_is_better_and_above_it_nothing_is():
+    """Monotone up to `1/max`, and a cliff immediately after - so the rule is "the largest that fits".
+
+    The first version of this analysis measured the sweep at top=0.3036 only, concluded "more lift is
+    always better", and told the device not to bother trying a smaller one. At top=0.3632 that is
+    wrong in the other direction: lift 3 is over the cliff, and it fails at *zero* bootstrap error,
+    which no amount of precision fixes.
+    """
+    exact = dict(boot_error=0.0)
+    # 0.3036: the ceiling is 3.29, so 3 fits and is the best of the three.
+    assert 1.0 / 0.3036 > 3
+    assert _invert(lift=3, top=0.3036, **exact) < 1e-4
+    # 0.3632: the ceiling is 2.75. Lift 2 still fits; lift 3 does not, and the guard says so.
+    assert 2 < 1.0 / 0.3632 < 3
+    assert _invert(lift=2, top=0.3632, **exact) < 1e-3
+    with pytest.raises(ValueError):
+        _invert(lift=3, top=0.3632, **exact)
+
+
+def test_warn_reports_the_same_diagnosis_and_carries_on(capsys):
+    """`--check-ranges warn`: the guard that fires first must not hide everything behind it.
+
+    On the device the first `he_inv` refused and took `07d`, `07e`, `inv_input_lift` and all of
+    stage 11 down with the run - so the one number that came back was the one already known. Warning
+    is not the default, because an unguarded iteration returns a finite, plausible, wrong number.
+    """
+    from thorfhe.numeric import DivisionMixin
+
+    original = DivisionMixin.range_violations if hasattr(DivisionMixin, "range_violations") else None
+    DivisionMixin.range_violations = "warn"
+    try:
+        got = _invert(lift=4, top=0.3036)
+    finally:
+        if original is None:
+            del DivisionMixin.range_violations
+        else:
+            DivisionMixin.range_violations = original
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "--inverse-lift 3" in out, out
+    assert got > 1.0, "past the cliff the iteration should still be visibly wrong, not silently fine"

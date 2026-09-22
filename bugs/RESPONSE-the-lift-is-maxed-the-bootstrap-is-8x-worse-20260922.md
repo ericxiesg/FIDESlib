@@ -220,7 +220,13 @@ PYFIDESLIB_BENCH_PARAMS=1 python3 -m pytest -s -q \
 （上一份报告里这行被截掉了，而它直接说出是哪个槽先越界）。
 carried max > 1.0 的话 `ValueError` 会当场抛在 `he_inv` 那一行，不用再往下找。
 
-**不要试 `--inverse-lift 1` 或 `2`。** §3 的表已经扫过了：单调，更小的 lift 严格更差。
+~~**不要试 `--inverse-lift 1` 或 `2`。** §3 的表已经扫过了：单调，更小的 lift 严格更差。~~
+
+> **2026-09-22 撤回**：那张表是在 `top = 0.3036`（ClearEngine 的 `07c`）下扫的，
+> 而设备的 `07c` 是 **0.3632**。天花板是 `1/max(denominator)`，不是常数——
+> 设备上是 **2.75**，`--inverse-lift 3` 超了，零误差下就发散到 190。
+> **请跑 `--inverse-lift 2`。**
+> 见 `RESPONSE-one-he-inv-not-two-the-device-ceiling-is-2-20260922.md`。
 
 ---
 

@@ -130,7 +130,7 @@ def _instrumented(args, engine):
     # the one place a value can actually leave the range. The flag says the bench holds the secret
     # key and will pay a decryption for the answer. It is an ordinary Python attribute on the
     # pybind11 object, the same way `instrument` rebinds the primitives below.
-    if getattr(args, "check_ranges", False):
+    if getattr(args, "check_ranges", "off") != "off":
         engine.inspectable = True
     if not getattr(args, "time_ops", False):
         return engine
@@ -576,6 +576,10 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
                 # layer has 689 of them against the weights' 19,137, so the digest is affordable and
                 # they need not be re-encoded on every run either.
                 owner.plaintext_store = store
+                # Whether a range violation stops the run or only reports it. `--check-ranges warn`
+                # exists because the guard that fires first hides everything behind it: the device's
+                # first `he_inv` refused, and `07d`, `07e` and the whole of stage 11 went with it.
+                owner.range_violations = args.check_ranges
             with timed(timings, f"layer {index}"):
                 state = layer.forward(state, weights[index], padding, index,
                                       softmax_parameters=parameters, trace=trace)
@@ -1188,14 +1192,17 @@ def build_parser():
                         help="decrypt every stage of the first sample and report its fidelity and "
                              "best-fit scale against the plaintext model - the diagnostic that says "
                              "which stage a divergence comes from")
-    engine.add_argument("--check-ranges", action="store_true",
+    engine.add_argument("--check-ranges", nargs="?", const="raise", default="off",
+                        choices=("off", "raise", "warn"),
                         help="let he_inv/he_exp/he_invsqrt verify their input range on the device "
                              "too. The guards are written against `engine.inspectable`, which only "
                              "the clear engine sets, so on hardware they have always been silent - "
                              "and hardware is where they are needed: a denominator over 1 makes "
                              "Goldschmidt's `2 - k*b` change sign and diverge rather than fail. "
                              "Costs one decryption per guarded call (about a dozen a layer, 76 ms "
-                             "each on a GV100), so it is opt-in rather than always on")
+                             "each on a GV100), so it is opt-in rather than always on. `warn` "
+                             "prints the same diagnosis and carries on, for the run whose purpose "
+                             "is the probes after the guard rather than the answer")
     # The three level-free scalings that keep a bootstrap's input inside `q0/Delta`. They are folded
     # into plaintexts, so they cost nothing at all, and they are what the 22-site magnitude
     # measurement settled at: residual 256, refresh 4, score_refresh 16. Defaults are 1.0 because
