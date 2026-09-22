@@ -341,17 +341,36 @@ class DivisionMixin:
         error = epsilon
         iterations = 0
 
+        if _debug():
+            nl = getattr(self.engine, "noise_level", None)
+            if nl is not None:
+                print(f"[noise_level] pre-iter  a={nl(a.ciphertext)}  b={nl(b.ciphertext)}", flush=True)
+
         while error < 1 - alpha:
             iterations += 1
             k = 2 / (error + 1)
 
             # (2/k) * delta_b - b, i.e. Goldschmidt's `2 - k*value` carried in the scaled representation
             correction = self.prepare_for_multiply(self.subtract(2 / k * b.delta, b.ciphertext))
-            a = DeltaCiphertext(self._times(a.ciphertext, correction), a.delta * b.delta / k ** 2)
-            b = DeltaCiphertext(self._times(b.ciphertext, correction), b.delta * b.delta / k ** 2)
+            if _debug():
+                nl = getattr(self.engine, "noise_level", None)
+                if nl is not None:
+                    print(f"[noise_level] iter{iterations:02d}  correction={nl(correction)}  a_pre={nl(a.ciphertext)}  b_pre={nl(b.ciphertext)}", flush=True)
+            a_new = self._times(a.ciphertext, correction)
+            b_new = self._times(b.ciphertext, correction)
+            if _debug():
+                nl = getattr(self.engine, "noise_level", None)
+                if nl is not None:
+                    print(f"[noise_level] iter{iterations:02d}  a_post_times={nl(a_new)}  b_post_times={nl(b_new)}", flush=True)
+            a = DeltaCiphertext(a_new, a.delta * b.delta / k ** 2)
+            b = DeltaCiphertext(b_new, b.delta * b.delta / k ** 2)
             error = k * error * (2 - k * error)
 
             a, b = self._restore_magnitude(a, b)
+            if _debug():
+                nl = getattr(self.engine, "noise_level", None)
+                if nl is not None:
+                    print(f"[noise_level] iter{iterations:02d}  a_post_restore={nl(a.ciphertext)}  b_post_restore={nl(b.ciphertext)}", flush=True)
             # Under THORFHE_DEBUG, every step of the iteration. `07c` and `07d` bracket the whole of
             # it, and on the device they disagree by seventeen orders of magnitude with the input
             # already correct - so the question is which step, and nothing between the two says.
@@ -434,12 +453,27 @@ class DivisionMixin:
         headroom = 2 ** self.delta_headroom_bits
         if int(1 / b.delta / headroom) > 1:
             for scaled in (a, b):
+                if _debug():
+                    nl = getattr(self.engine, "noise_level", None)
+                    nl_pre = nl(scaled.ciphertext) if nl else "?"
                 scaled.ciphertext = self.add(scaled.ciphertext, self.conjugate(scaled.ciphertext))
                 scaled.delta *= 2
+                if _debug():
+                    nl = getattr(self.engine, "noise_level", None)
+                    if nl is not None:
+                        print(f"[noise_level] restore conjugate-add  pre={nl_pre}  post={nl(scaled.ciphertext)}", flush=True)
         factor = max(int(1 / b.delta / headroom), 1)
         if factor > 1:
+            if _debug():
+                nl = getattr(self.engine, "noise_level", None)
+                nl_a = nl(a.ciphertext) if nl else "?"
+                nl_b = nl(b.ciphertext) if nl else "?"
             a = DeltaCiphertext(self.multiply(a.ciphertext, factor), a.delta * factor)
             b = DeltaCiphertext(self.multiply(b.ciphertext, factor), b.delta * factor)
+            if _debug():
+                nl = getattr(self.engine, "noise_level", None)
+                if nl is not None:
+                    print(f"[noise_level] restore int-mult factor={factor}  a: {nl_a}->{nl(a.ciphertext)}  b: {nl_b}->{nl(b.ciphertext)}", flush=True)
         return a, b
 
 
