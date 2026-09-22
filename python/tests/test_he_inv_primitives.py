@@ -99,3 +99,72 @@ def test_a_goldschmidt_step_does_not_compound(engine):
             f"against an expected {np.abs(want).max():.4g}")
         if engine.level(ct) < 2:
             break
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_conjugate_at_slot_zero_its_own_fixed_point(device):
+    """Is `conjugate` right at slot 0, which is the one slot the automorphism maps to itself?
+
+    Why this slot and not another. The device's `07d` has exactly one bad slot, it is slot 0, and it
+    is slot 0 on every run - three out of three, plus the two before them. Neither of the two things
+    that could place it there does:
+
+      - not the bootstrap's error, which is i.i.d.: two runs of the dense-vector measurement put
+        their five worst slots at 31049/1278/8038/4625/2160 and 9644/10144/8841/13672/28282, with no
+        overlap and no `%2048 == 0` among them;
+      - not the denominator, measured on the clear engine at the same flags: slot 0 holds 0.03757
+        and ranks 688th of 8448 carried slots, with 8.1% of them smaller. The actual minimum, 0.02643,
+        sits at `%2048 == 436`.
+
+    Structureless noise and a structureless input cannot produce a failure that lands on the same
+    slot every time. What is left is an operation, and slot 0 is special to exactly one: conjugation
+    is the Galois automorphism sending slot j to slot -j, so slot 0 is its fixed point. `he_inv`
+    calls it once per iteration inside `_restore_magnitude`, which is how `07d` would acquire it -
+    and stage 07's score unpack calls it too, which is where `07a`'s three worst carried slots were
+    slot 0 of ciphertexts 5, 6 and 7, the three built by `multiply_1j(subtract(conjugated, merged))`.
+
+    Two symptoms, one slot, one operation between them. The clear engine cannot see any of this
+    because its conjugate is numpy's, exact by construction.
+
+    Checks the identity on a real message (conj is identity), the doubling `_restore_magnitude`
+    actually performs, and a complex message (conj flips the imaginary part), each at the levels the
+    iteration reaches - and reports slot 0 against every other slot rather than a single maximum,
+    because one wrong slot in 32768 does not move a max-norm that a healthy tail already sets.
+    """
+    import pyfideslib as pf
+
+    from test_bootstrap_noise_level import bench_params
+
+    engine = pf.Engine(device, **bench_params())
+    rng = np.random.default_rng(11)
+    # The magnitudes `b` reaches in the iteration, not a unit-scale vector: the question is whether
+    # slot 0 is wrong, and a relative error shows only against the value it is relative to.
+    real = rng.uniform(0.0264, 0.3036, engine.slots) * 3.0
+    complexed = real + 1j * rng.uniform(-0.3, 0.3, engine.slots)
+
+    failures = []
+    for name, message, expected in (
+            ("conjugate(real) == real", real, real),
+            ("real + conj(real) == 2*real", real, 2 * real),
+            ("conjugate(complex)", complexed, np.conj(complexed)),
+    ):
+        for drop in (0, 8, 16):
+            ct = _at(engine, engine.encrypt(message), drop)
+            out = engine.conjugate(ct)
+            if name.startswith("real +"):
+                out = engine.add(ct, out)
+            got = np.asarray(engine.decrypt(out))[:message.size]
+            error = np.abs(got - expected)
+            others = np.delete(error, 0)
+            print(f"\n{name}, {drop} levels down (level {engine.level(ct)}):"
+                  f"\n  slot 0     {error[0]:.6g}"
+                  f"\n  every other slot: max {others.max():.6g}  p50 {np.median(others):.6g}"
+                  f"\n  slot 0 / p50 of the rest: {error[0] / max(np.median(others), 1e-30):.1f}x")
+            # A slot that is merely noisy sits inside the spread of the others. One that is wrong
+            # does not, and 100x the median of 32767 healthy slots is not a tail.
+            if error[0] > 100 * max(np.median(others), 1e-12):
+                failures.append(f"{name} at drop {drop}: slot 0 is {error[0]:.4g} against a median "
+                                f"{np.median(others):.4g} over the other {others.size} slots")
+
+    assert not failures, "conjugate is wrong at its fixed point:\n  " + "\n  ".join(failures)
