@@ -491,7 +491,15 @@ def run_encrypted(model, encoded, args, timings: Timings, traces):
         #
         # Slots are reported modulo the geometry's `n_slot` as well, because the layout repeats and
         # the residue is usually the informative half.
-        far = np.argsort(-np.abs(good))[:3]
+        # `magnitude` is |good|, already built above for the quantiles - reuse it rather than
+        # recomputing it and its negation. And partition rather than sort: this used to run only on
+        # a probe that had already gone out of range, and now runs on every one, so an O(n log n)
+        # sort of 262144 slots to read three of them is worth not doing.
+        if magnitude.size > 3:
+            top = np.argpartition(magnitude, -3)[-3:]
+        else:
+            top = np.arange(magnitude.size)
+        far = top[np.argsort(-magnitude[top])]
         outside += "  worst at " + ",".join(
             f"{int(i)}(%{int(i) % THOR_BERT.n_slot})" for i in far)
         # Split by the carried slots when the caller knows them. `07a`'s maximum is 37.5 on the
