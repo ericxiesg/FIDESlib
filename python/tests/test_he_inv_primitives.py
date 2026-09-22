@@ -14,6 +14,8 @@ operations.
 magnitude), and it happens with few levels left. Both are covered here, and the last test runs the
 step itself rather than its pieces, because a compounding error is what the device shows.
 """
+import os
+
 import numpy as np
 import pytest
 
