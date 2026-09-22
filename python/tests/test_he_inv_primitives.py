@@ -180,3 +180,66 @@ def test_conjugate_at_slot_zero_its_own_fixed_point(device):
                                 f"{np.median(others):.4g} over the other {others.size} slots")
 
     assert not failures, "conjugate is wrong at its fixed point:\n  " + "\n  ".join(failures)
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_times_at_slot_zero_with_the_iterations_own_operands(device):
+    """`rescale(relinearize(multiply(x, y)))` at slot 0, on the values iteration 1 actually holds.
+
+    Where the elimination has got to. The device's first `he_inv` damages `b` at slot 0 on every
+    run, and at that iteration:
+
+      - `b0` is healthy there - `inv_input_lift3` peaks at %3 with slot 0 absent from its worst three;
+      - `correction` is healthy there - `a` is the `ones` indicator, so `a_new` is 1 * correction at
+        slot 0, and `iter01_a` is clean;
+      - `_restore_magnitude` does nothing at all - delta_headroom_bits is 8 and b.delta is 0.274, so
+        int(1/0.274/256) is 0 and neither branch is entered;
+      - and the result is not a value the step can return. At iteration 1 delta is still 1, so the
+        probe reads `b0 * correction = b0 * (2/k - b0)` directly, and that parabola peaks at
+        b0 = 1/k with the value 1/k^2 = 0.273987. This engine reports a maximum of 0.274 - exactly
+        the ceiling, because PADDING_FLOOR at 0.5 sits beside the peak at 0.5234 and gives 0.273438.
+        The device reports 1.541, which is 5.62x a bound no real input can reach.
+
+    Both operands good, product bad, nothing else in the step. That leaves these three operations,
+    and this runs them directly rather than through a layer, so it needs no bench and no checkpoint.
+
+    Two operand pairs, because the asymmetry is the evidence: `b * correction` is the product that
+    breaks, and `ones * correction` is the one that does not, with the same right operand a line
+    earlier. If only the first is wrong here, the operand decides. If both are, the multiply is
+    wrong at slot 0 whatever it is handed. If neither is, `_times` is exonerated and what is left is
+    the `subtract` that forms `correction` - measured on its own by the first test in this file, but
+    not at slot 0.
+
+    Asserts nothing about the values; it prints, and fails only on non-finite output. Slot 0 is
+    reported against the median of the other 32767, not against their maximum, because a single wrong
+    slot does not move a max-norm that a healthy tail already sets - which is how the conjugate test
+    came back green at 12x.
+    """
+    import pyfideslib as pf
+
+    from test_bootstrap_noise_level import bench_params
+
+    engine = pf.Engine(device, **bench_params())
+    rng = np.random.default_rng(23)
+
+    epsilon = 2.0 ** -6 * 3                     # layer 0's epsilon, lifted by 3
+    k = 2 / (1 + epsilon)
+    b0 = rng.uniform(0.0814, 0.9812, engine.slots)      # the range the guard reported on the device
+    correction = 2 / k - b0                             # what `subtract(2/k * delta, b)` builds at delta = 1
+    ones = ((np.arange(engine.slots) % 16) < 12).astype(float)   # `used_slots`, what `a` starts as
+
+    for name, left, expected in (("b * correction", b0, b0 * correction),
+                                 ("ones * correction", ones, ones * correction)):
+        product = engine.rescale(engine.relinearize(
+            engine.multiply(engine.encrypt(left), engine.encrypt(correction))))
+        got = np.real(np.asarray(engine.decrypt(product)))[:expected.size]
+        assert np.isfinite(got).all(), f"{name} returned non-finite slots"
+        error = np.abs(got - expected)
+        others = np.delete(error, 0)
+        worst = np.argsort(-error)[:5]
+        print(f"\n{name}  (level {engine.level(product)}):"
+              f"\n  slot 0      error {error[0]:.6g}   value {got[0]:.6g} against {expected[0]:.6g}"
+              f"\n  other slots max {others.max():.6g}   p50 {np.median(others):.6g}"
+              f"\n  slot 0 / p50 of the rest: {error[0] / max(np.median(others), 1e-30):.1f}x"
+              f"\n  worst {', '.join(f'{int(i)}(%16={int(i) % 16})' for i in worst)}")
