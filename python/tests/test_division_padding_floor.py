@@ -263,3 +263,38 @@ def test_the_noise_level_trace_is_silent_without_an_engine_that_reports_one(caps
     _trace_noise(Reporting(), "iter03", a="a", b="b")
     out = capsys.readouterr().out
     assert out == "[noise_level] iter03  a=1  b=2\n", repr(out)
+
+
+def test_a_goldschmidt_step_can_never_exceed_one():
+    """`b` after any step is at most 1, for every k and every real input. It is a bound, not a norm.
+
+    One step maps b to `k*b*(2 - k*b)`. That parabola peaks where its derivative vanishes, at
+    b = 1/k, and its value there is `2 - 1 = 1` whatever k is. So the whole iteration lives under a
+    ceiling of 1, and a `b` above it is not a large number the iteration produced - it is a number
+    the function cannot return.
+
+    That distinction is what the device's first `he_inv` turns on. Its `inv_iter01_b` reports a
+    maximum of 1.541 against a p50 of 0.2733, and the p50 agrees with this engine's 0.2734 to four
+    figures, which pins the scaling - the probe reads the ciphertext, and `_restore_magnitude`
+    multiplies ciphertext and delta by the same integer. So slot 0 is at 5.64x the padding slots,
+    which sit essentially on the peak (PADDING_FLOOR is 0.5 and 1/k is 0.5234, giving 99.8% of it).
+    Asking which b0 produces 5.629 means solving `(k*b)^2 - 2(k*b) + 5.629 = 0`, whose discriminant
+    is -18.5. None does. A negative b0 does not either: f is negative there, and the device reported
+    a positive maximum.
+
+    Hence the conclusion that it is an arithmetic fault rather than a divergence, and hence
+    `inv_iter{n}_{a,b}_times`, which brackets `_times` against `_restore_magnitude`.
+    """
+    for epsilon in (2.0 ** -6, 2.0 ** -6 * 3, 2.0 ** -9, 2.0 ** -14, 0.5):
+        k = 2 / (1 + epsilon)
+        b = np.linspace(-5.0, 5.0, 2_000_001)
+        assert (k * b * (2 - k * b)).max() <= 1.0 + 1e-12, f"the ceiling is not 1 at epsilon {epsilon}"
+        # and the peak is where calculus says, which is what puts PADDING_FLOOR next to it
+        assert abs(k * (1 / k) * (2 - k * (1 / k)) - 1.0) < 1e-12
+
+    k = 2 / (1 + 2.0 ** -6 * 3)
+    assert 0.99 < k * PADDING_FLOOR * (2 - k * PADDING_FLOOR) < 1.0, (
+        "the padding floor sits just under the peak, which is why it sets both p50 and the maximum")
+    # The device's number, as the quadratic that has no solution.
+    target = 5.64 * (k * PADDING_FLOOR * (2 - k * PADDING_FLOOR))
+    assert 4 - 4 * target < 0, "a reachable value would make this test meaningless"
