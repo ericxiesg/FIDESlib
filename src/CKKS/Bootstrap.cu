@@ -2,6 +2,9 @@
 // Created by carlosad on 4/12/24.
 //
 
+#include <iostream>
+#include <stdexcept>
+#include <string>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/ApproxModEval.cuh"
 #include "CKKS/Bootstrap.cuh"
@@ -346,6 +349,69 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
 	uint64_t corFactor = (uint64_t)1 << std::llround(correction);
 	multIntScalar(ctxt, corFactor);
+
+	// The output contract. See BootstrapPrecomputation::OutputContract for why this lives here and
+	// not in a wrapper: the state a bootstrap returns is the one thing its caller cannot derive, so
+	// when it is merely whatever came out, a deviation surfaces stages later as something else's
+	// fault. It has done so twice.
+	//
+	// Complete bootstraps only. An intermediate from `stopAfterStage` is mid-flight by definition -
+	// its level and scale mean nothing, and holding it to a contract would be asserting on garbage.
+	if (stopAfterStage == -1) {
+		auto& precomp  = cc.GetBootPrecomputation(slots);
+		auto& contract = precomp.output;
+
+		// Pinned on first use rather than declared at setup: there are several setup paths, and
+		// capturing it here catches a context that moved without threading the same values through
+		// all of them.
+		BootstrapPrecomputation::Fingerprint now{ cc.logN, cc.L, cc.dnum, cc.K,
+												  static_cast<int>(cc.rescaleTechnique) };
+		if (!precomp.fingerprint.valid()) {
+			precomp.fingerprint = now;
+		} else if (precomp.fingerprint != now) {
+			throw std::runtime_error(
+				"FIDESlib: these bootstrap precomputations were built for a different context "
+				"(logN/L/dnum/K/rescaleTechnique has changed). Their diagonals are encoded against the "
+				"modulus chain that existed then, so reusing them now would surface as a numerical "
+				"error rather than as the configuration mistake it is.");
+		}
+
+		// Declared, not observed. FIXEDMANUAL means scale degree 1, and approxModReduction already
+		// rescales once to reach it; if it did not, correct it here - at the operation that broke
+		// the contract - rather than in a caller that cannot know how many levels it just spent.
+		if (cc.rescaleTechnique == CKKS::FIXEDMANUAL) {
+			int spent = 0;
+			while (ctxt.NoiseLevel > contract.noiseLevel && spent < 8) {
+				ctxt.rescale();
+				++spent;
+			}
+			if (ctxt.NoiseLevel != contract.noiseLevel) {
+				throw std::runtime_error("FIDESlib: bootstrap could not reach its declared scale degree " +
+										 std::to_string(contract.noiseLevel) + "; it sits at " +
+										 std::to_string(ctxt.NoiseLevel) + " after " + std::to_string(spent) +
+										 " rescales.");
+			}
+			if (spent > 0 && !contract.levelPinned) {
+				std::cout << "[FIDESlib] bootstrap returned scale degree " << (contract.noiseLevel + spent)
+						  << ", rescaled " << spent << " time(s) to reach the declared " << contract.noiseLevel
+						  << ". Each one costs a level." << std::endl;
+			}
+		}
+
+		// The level is pinned on the first bootstrap and enforced on every later one. Predicting it
+		// would mean reproducing the level budget, the secret key distribution and the level the
+		// diagonals were encoded at; observing it once and holding it catches drift without
+		// duplicating that arithmetic.
+		if (!contract.levelPinned) {
+			contract.level = ctxt.getLevel();
+			contract.levelPinned = true;
+		} else if (ctxt.getLevel() != contract.level) {
+			throw std::runtime_error("FIDESlib: this bootstrap returned level " + std::to_string(ctxt.getLevel()) +
+									 " where every earlier one with these precomputations returned " +
+									 std::to_string(contract.level) +
+									 ". A bootstrap whose output level moves breaks every level plan built on it.");
+		}
+	}
 	if constexpr (PRINT) {
 		cudaDeviceSynchronize();
 		std::cout << "End bootstrap ";
