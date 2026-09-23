@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <openfhe.h>
 
+#include <CKKS/forwardDefs.cuh>
 #include <CKKS/Context.cuh>
 #include <CKKS/Parameters.cuh>
 #include <string>
@@ -481,7 +482,47 @@ inline std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters> tparams64_16_th
 inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbcrypto::ScalingTechnique> tparams64_16_thor_fixmanual{
 	tparams64_16_thor, lbcrypto::ScalingTechnique::FIXEDMANUAL };
 
-#define TTALL64BOOTTHOR TTALL64BOOT, tparams64_16_thor_fixmanual
+
+/** Depth 23, dnum 4, FIXEDMANUAL, sparse-ternary: the one axis no test has ever covered.
+ *
+ * Correcting an earlier claim of mine in report-cts-stc-review-20260923.md: FIXEDMANUAL is *not*
+ * untested. tparams64_13_2_fix, _3_fix and _4_fix are all FIXEDMANUAL at logN 16 and they pass. I
+ * read tparams64_13_1_fix, which is FIXEDAUTO, and generalised it to all eight.
+ *
+ * What that leaves genuinely uncovered is the secret key distribution. Every set here is
+ * UNIFORM_TERNARY, and the distribution is what selects the EvalMod approximation: sparse takes
+ * g_coefficientsSparse with R_SPARSE = 3 double-angle iterations, uniform takes
+ * g_coefficientsUniform with 6. ApproxModEval.cu is the one bootstrap stage FIDESlib implements
+ * itself rather than transcribing from OpenFHE, and the benchmark runs the branch of it that no
+ * test has entered.
+ *
+ * It is the same size as the sets beside it, so it costs no memory - which matters, because the
+ * depth-37 set below OOMs on a 32 GB card and has left the per-stage comparison blocked.
+ */
+inline std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters> tparams64_13_4_sparse_ =
+	std::tuple(GeneralTestParams{ .multDepth = depthboot,
+		.firstModSize								 = firstmodboot,
+		.scaleModSize								 = scalemodboot,
+		.batchSize									 = 8,
+		.ringDim									 = 1 << logNboot,
+		.dnum										 = 4,
+		.GPUs										 = { 0 },
+		.secretKeyDist								 = lbcrypto::SPARSE_TERNARY },
+		params64_13_4);
+inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbcrypto::ScalingTechnique> tparams64_13_4_sparse{
+	tparams64_13_4_sparse_, lbcrypto::ScalingTechnique::FIXEDMANUAL };
+
+/** The benchmark's own depth 37. Opt-in: it needs more than a 32 GB card has at full key size.
+ *
+ * The per-stage comparison it was added for is better served by tparams64_13_4_sparse above, which
+ * moves the one uncovered axis and fits. Define FIDESLIB_TEST_THOR_DEPTH37 to include this as well.
+ */
+#ifdef FIDESLIB_TEST_THOR_DEPTH37
+#define TTALL64BOOTTHOR_DEPTH37 , tparams64_16_thor_fixmanual
+#else
+#define TTALL64BOOTTHOR_DEPTH37
+#endif
+#define TTALL64BOOTTHOR TTALL64BOOT, tparams64_13_4_sparse TTALL64BOOTTHOR_DEPTH37
 
 /**
 ,tparams64_15_LLM_flex,
@@ -554,6 +595,18 @@ class GeneralParametrizedTest : public testing::TestWithParam<std::tuple<std::tu
 			keys			 = cc->KeyGen();
 			cached_cc[index] = { cc, keys };
 		}
+	}
+
+	/// The boot config FIDESlib should use for this parameter set.
+	///
+	/// `GetRawParams`'s second argument defaults to UNIFORM and is *not* derived from the context,
+	/// so SetSecretKeyDist alone would leave OpenFHE building sparse bootstrap precomputation while
+	/// FIDESlib evaluated it with the uniform Chebyshev coefficients and 6 double-angle iterations
+	/// instead of sparse's 3. That mismatch would not look like a configuration error, it would look
+	/// like a precision bug - which is the kind of thing being hunted here.
+	FIDESlib::BOOT_CONFIG bootConfig() const {
+		return generalTestParams.secretKeyDist == lbcrypto::SPARSE_TERNARY ? FIDESlib::SPARSE
+																		  : FIDESlib::UNIFORM;
 	}
 
 	void TearDown() override {

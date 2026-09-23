@@ -36,7 +36,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextShowAdd) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -118,7 +118,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextPtAutomorph) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -205,7 +205,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextCreateSwitch) {
 
 	auto [swtch, sk_sparse] = CKKS::createContextSwitchingKeys(cc, cc_switch, keys, 32);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -308,7 +308,7 @@ TEST_P(OpenFHEInterfaceTest, ScalarAdd) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -383,7 +383,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextRunNTT) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -481,7 +481,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextShowPtMult) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -623,7 +623,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextShowPtMultSquareScale) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_		= GPUcc;
 	cc_									= CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc	= *cc_;
@@ -762,7 +762,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextShowPtMultSquareScale) {
 */
 TEST_P(OpenFHEInterfaceTest, InitializeOpenFHE) {
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -880,7 +880,7 @@ TEST_P(OpenFHEInterfaceTest, Rescale) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -970,7 +970,7 @@ TEST_P(OpenFHEInterfaceTest, MultScalar) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1062,7 +1062,7 @@ TEST_P(OpenFHEInterfaceTest, Mult) {
 	std::cout << "Mult:\n";
 	std::cout << "Result " << result;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 
 	FIDESlib::CKKS::Context& cc_       = GPUcc;
 	cc_                                = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
@@ -1121,7 +1121,7 @@ TEST_P(OpenFHEInterfaceTest, Square) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1195,7 +1195,7 @@ TEST_P(OpenFHEInterfaceTest, MultRescale) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1263,7 +1263,7 @@ TEST_P(OpenFHEInterfaceTest, Rotate) {
 	// cc->EvalMultKeyGen(keys.secretKey);
 	cc->EvalRotateKeyGen(keys.secretKey, { 1 });
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1328,7 +1328,7 @@ TEST_P(OpenFHEInterfaceTest, Conjugate) {
 	// cc->EvalMultKeyGen(keys.secretKey);
 	cc->EvalRotateKeyGen(keys.secretKey, { 1 });
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1398,7 +1398,7 @@ TEST_P(OpenFHEInterfaceTest, HoistedRotate) {
 	// cc->EvalMultKeyGen(keys.secretKey);
 	cc->EvalRotateKeyGen(keys.secretKey, { 1, 2, 3, 4 });
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1528,7 +1528,7 @@ TEST_P(OpenFHEInterfaceTest, ExtractContextShowPtMultAllLevels) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1624,7 +1624,7 @@ TEST_P(OpenFHEInterfaceTest, MultAllLevels) {
 	auto c2_2 = cc->Encrypt(keys.publicKey, ptxt2);
 	auto c3   = cc->Encrypt(keys.publicKey, ptxt3);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1708,7 +1708,7 @@ TEST_P(OpenFHEInterfaceTest, RotateAllLevels) {
 	// cc->EvalMultKeyGen(keys.secretKey);
 	cc->EvalRotateKeyGen(keys.secretKey, { 1 });
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1770,7 +1770,7 @@ TEST_P(OpenFHEInterfaceTest, SquareAllLevels) {
 
 	fideslibParams.batch = 3;
 	std::cout << "Batch " << 3 << std::endl;
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1834,7 +1834,7 @@ TEST_P(OpenFHEInterfaceTest, HoistedRotateAllLevels) {
 	cc->EvalRotateKeyGen(keys.secretKey, { 1, 2, 3, 4 });
 
 	fideslibParams.batch                = 3;
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -1955,7 +1955,7 @@ TEST_P(OpenFHEInterfaceTest, AccumAllLevels) {
 	cc->EvalRotateKeyGen(keys.secretKey, { 1, 2, 3, 4 });
 
 	fideslibParams.batch                = 3;
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -2029,7 +2029,7 @@ TEST_P(OpenFHEInterfaceTest, MatVec) {
 	cc->Enable(lbcrypto::KEYSWITCH);
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -2141,7 +2141,7 @@ TEST_P(OpenFHEInterfaceTest, MatVecPt) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -2226,7 +2226,7 @@ TEST_P(OpenFHEInterfaceTest, MatVecPtScalar) {
 	cc->Enable(lbcrypto::LEVELEDSHE);
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -2322,7 +2322,7 @@ TEST_P(OpenFHEBootstrapTest, ModRaise) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_ = GPUcc; cc_ = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc = *cc_;
 	///// PROBAR /////
@@ -2426,7 +2426,7 @@ TEST_P(OpenFHEBootstrapTest, ApproxModEval) {
 	std::cout << "Generate keys" << std::endl;
 	cc->EvalBootstrapKeyGen(keys.secretKey, slots);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -2653,7 +2653,7 @@ TEST_P(OpenFHEBootstrapTest, ApproxModEvalSparse) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	///// PROBAR /////
 	std::vector<double> x1 = { 0.25 / 2.0, 0.5 / 2.0, 0.75 / 2.0, -0.75 / 2.0, -0.50 / 2.0, -0.25 / 2.0, 0.1 / 2.0, -0.1 / 2.0 };
 
@@ -2842,7 +2842,7 @@ TEST_P(OpenFHEBootstrapTest, LinearTransform) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -3009,7 +3009,7 @@ TEST_P(OpenFHEBootstrapTest, CoeffsToSlots) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -3169,7 +3169,7 @@ TEST_P(OpenFHEBootstrapTest, SlotsToCoeffs) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -3307,7 +3307,7 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrapCPUsetup) {
 	std::vector<double> x1 = {0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0};
 	std::vector<double> x2 = {0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0};
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	// Encoding as plaintexts
 	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, raw_param.L - 1, nullptr, slots);
 	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
@@ -3421,7 +3421,7 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrap) {
 	std::vector<double> x1 = { 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0 };
 	std::vector<double> x2 = { 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0 };
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	// Encoding as plaintexts
 	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, raw_param.L - 1, nullptr, slots);
 	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
@@ -3527,7 +3527,7 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrapManualPrescale) {
 	std::vector<double> x1 = { 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0 };
 	std::vector<double> x2 = { 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0 };
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	// Encoding as plaintexts
 	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, raw_param.L - 1, nullptr, slots);
 	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
@@ -3625,7 +3625,7 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrapLT) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
@@ -3748,7 +3748,7 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrapDense) {
 	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
 	cc->EvalMultKeyGen(keys.secretKey);
 
-	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc);
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
 	FIDESlib::CKKS::Context& cc_        = GPUcc;
 	cc_                                 = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
 	FIDESlib::CKKS::ContextData& GPUcc  = *cc_;
