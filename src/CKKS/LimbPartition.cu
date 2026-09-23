@@ -1675,7 +1675,11 @@ size_t LimbPartition::getLimbSize(int level, bool for_launch) {
 	// NDEBUG and would drop it again, and because the interesting question is whether it ever trips
 	// on hardware. Reports once per distinct shape and does not throw: a false positive here should
 	// not take down a run that is otherwise producing data.
-	if (for_launch && checkLimbInvariants() && size > limb.size()) {
+	// `limb.size() == 0` is excluded: a polynomial with no limbs at all has not been grown yet, and
+	// a kernel bounded over an empty pointer table would not corrupt one slot, it would fault. Two
+	// rounds of reports from this check were entirely that case, so it is noise here rather than
+	// signal. What is left fires only when a partially-grown table is about to be over-indexed.
+	if (for_launch && !limb.empty() && checkLimbInvariants() && size > limb.size()) {
 		static std::set<std::tuple<int, size_t, size_t>> seen;
 		static std::mutex seen_lock;
 		const auto shape = std::make_tuple(level, size, limb.size());
