@@ -3,6 +3,11 @@
 //
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <set>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -1636,14 +1641,53 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
 	ksk_b.getS().wait(s);
 }
 
+namespace {
+/// `FIDESLIB_CHECK_LIMB_INVARIANTS=1` turns on the limb-table consistency reports.
+///
+/// Off by default: it costs a comparison on a hot path, and the reports are a diagnostic rather
+/// than an error. Read once.
+bool checkLimbInvariants() {
+	static const bool on = [] {
+		const char* v = std::getenv("FIDESLIB_CHECK_LIMB_INVARIANTS");
+		return v != nullptr && *v != 0 && *v != '0';
+	}();
+	return on;
+}
+}   // namespace
+
 size_t LimbPartition::getLimbSize(int level) {
 	size_t size = 0;
 	if (level == cc.L + 1) {
 		level = level - 1 - (cc.rescaleTechnique == FIDESlib::CKKS::FLEXIBLEAUTOEXT);
 	}
 	while (size < meta.size() && meta[size].id <= level) {
-		// assert(limb.size() > size);
 		++size;
+	}
+	// This counts `meta`, the context-wide record list, and never looks at `limb` - the table the
+	// kernels then index as `limbptr.data + i` for i in [0, size). The assertion that used to stand
+	// here, `assert(limb.size() > size)`, was commented out, so nothing has checked that the two
+	// agree. They demonstrably do not: at the same reported level a bootstrapped ciphertext holds
+	// 34 limbs where a level-dropped one holds 38.
+	//
+	// Restored as an opt-in runtime check rather than an assert, because a release build defines
+	// NDEBUG and would drop it again, and because the interesting question is whether it ever trips
+	// on hardware. Reports once per distinct shape and does not throw: a false positive here should
+	// not take down a run that is otherwise producing data.
+	if (checkLimbInvariants() && size > limb.size()) {
+		static std::set<std::tuple<int, size_t, size_t>> seen;
+		static std::mutex seen_lock;
+		const auto shape = std::make_tuple(level, size, limb.size());
+		bool report = false;
+		{
+			std::lock_guard<std::mutex> guard(seen_lock);
+			report = seen.insert(shape).second;
+		}
+		if (report) {
+			printf("[FIDESlib] limb invariant: getLimbSize(level=%d) returned %zu but limb holds "
+				   "%zu (meta %zu, SPECIALlimb %zu, SPECIALmeta %zu) - kernels bounded by the "
+				   "former will index past the latter\n",
+				   level, size, limb.size(), meta.size(), SPECIALlimb.size(), SPECIALmeta.size());
+		}
 	}
 	return size;
 }
