@@ -42,7 +42,30 @@ bootstrap 后的密文走了别的路径（rescale 真的会丢 limb），所以
 
 **两个密文在同一个 level 有不同 limb 数，是这个设计的直接后果，不是损坏。**
 
-而且它还调用在 bootstrap 内部——`ApproxModEval.cu:211/253/327`，也就是 EvalMod 那一段。
+### 1.0 调用链（复核过，因为我第一次给的证据是截断的）
+
+被质疑过一次：「`dropToLevel` 的调用方只有 `ApproxModEval`，那 `level_down` 不走它，
+34 vs 38 就不能归因到它」。**复核结果：能归因，链路是通的。**
+
+```
+engine.level_down(x, by)
+  → cc.EvalLevelReduce                      api/CryptoContext.cpp:2155
+      → res_gpu->dropToLevel(target)        Ciphertext::dropToLevel, Ciphertext.cpp:1347
+          → FIXEDMANUAL 走 else 分支         Ciphertext.cpp:1359-1360
+              c0.dropToLevel(level); c1.dropToLevel(level);
+                  → RNSPoly::dropToLevel    RNSPoly.cpp:876   ← 带 `if (0 && ...)` 的那个
+```
+
+**仓里有三个同名重载**：`Ciphertext::`、`Plaintext::`、`RNSPoly::`。
+`EvalLevelReduce` 调的是 `Ciphertext::` 那个，它再把两个分量各自转给 `RNSPoly::`。
+`ApproxModEval` 是**其中一个**调用方，不是唯一的。
+
+**质疑的来源是我自己的证据。** 我第一次查的时候跑的是
+`grep -n "dropToLevel" src/ api/ -r | head -5`，而那五行碰巧全是 `ApproxModEval.cu`，
+我就按"只有这一个调用方"写了结论。**结论对，但我把一个截断的 grep 当成了穷举**——
+`Ciphertext::dropToLevel` 的定义就在 1347 行，被 `head` 截掉了。
+
+（同一个毛病在这轮里犯了两次：上一次是 `dropLimb`，我 grep 完说"不存在"。）
 
 ### 1.1 顺带：这个设计本身没错，EasyFHE 也这么做
 
