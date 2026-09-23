@@ -229,10 +229,30 @@ def test_times_at_slot_zero_with_the_iterations_own_operands(device):
     correction = 2 / k - b0                             # what `subtract(2/k * delta, b)` builds at delta = 1
     ones = ((np.arange(engine.slots) % 16) < 12).astype(float)   # `used_slots`, what `a` starts as
 
-    for name, left, expected in (("b * correction", b0, b0 * correction),
-                                 ("ones * correction", ones, ones * correction)):
-        product = engine.rescale(engine.relinearize(
-            engine.multiply(engine.encrypt(left), engine.encrypt(correction))))
+    # The level, and where the operands came from. The first version of this test got neither right
+    # and came back green at 0.7x and 1.2x, which proved less than it looked: it multiplied at level
+    # 36, while `he_inv`'s first iteration multiplies at level 24 and rescales to 23, and it built
+    # both operands with a fresh `encrypt` while the iteration's `b` is a bootstrap's output. A
+    # fault that needs few remaining limbs, or that depends on how the ciphertext was produced, was
+    # invisible to it - this file's other tests take a `drop` for exactly that reason.
+    #
+    # "fresh, dropped" isolates the level. "bootstrapped" is the faithful one: b leaves a bootstrap
+    # and correction is built from that, the way the iteration builds it.
+    cases = [("fresh, top level (the original, known clean)",
+              engine.encrypt(b0), engine.encrypt(correction), b0, correction)]
+    dropped = _at(engine, engine.encrypt(b0), 12)
+    cases.append((f"fresh, dropped to level {engine.level(dropped)} (the iteration's)",
+                  dropped, _at(engine, engine.encrypt(correction), 12), b0, correction))
+    refreshed = engine.bootstrap(engine.encrypt(b0))
+    boot = np.real(np.asarray(engine.decrypt(refreshed)))[:b0.size]
+    cases.append((f"bootstrapped b at level {engine.level(refreshed)} (what the iteration holds)",
+                  refreshed, engine.subtract(2 / k, refreshed), boot, 2 / k - boot))
+    cases.append(("ones * correction (the control that stays clean)",
+                  engine.encrypt(ones), engine.encrypt(correction), ones, correction))
+
+    for name, left_ct, right_ct, left, right in cases:
+        expected = left * right
+        product = engine.rescale(engine.relinearize(engine.multiply(left_ct, right_ct)))
         got = np.real(np.asarray(engine.decrypt(product)))[:expected.size]
         assert np.isfinite(got).all(), f"{name} returned non-finite slots"
         error = np.abs(got - expected)
