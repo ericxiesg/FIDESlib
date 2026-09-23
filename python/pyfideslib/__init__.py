@@ -45,6 +45,7 @@ class Engine:
         secret_key_dist=_core.UNIFORM_TERNARY,
         bootstrap_level_budget: tuple[int, int] | None = None,
         bootstrap_level: int | None = None,
+        bootstrap_correction_factor: int = 0,
         rotation_indexes: dict[int, int] | list[int] | None = None,
         truncate_keys: bool = True,
         allow_key_grow: bool = False,
@@ -100,7 +101,15 @@ class Engine:
         #: a rescale or level-reduce failure, naming the wrong operation in the wrong place.
         self.bootstrap_level = bootstrap_level
         if self.bootstrap_enabled:
-            self.cc.EvalBootstrapSetup(list(bootstrap_level_budget), [0, 0], self.slots, 0)
+            # OpenFHE derives the correction factor from a curve fitted per scaling technique, and
+            # the FIXEDMANUAL branch is not the one its bootstrap-precision benchmark was calibrated
+            # on. At depth 37 the fit returns 7; thor-openfhe's own full_bootstrap_probe passes 12.
+            # The factor sets the 2^k amplification either side of ModRaise, so it is a first-order
+            # term in bootstrap accuracy and the cheapest knob we have against the 0.0156 floor.
+            # 0 keeps OpenFHE's choice.
+            self.bootstrap_correction_factor = int(bootstrap_correction_factor)
+            self.cc.EvalBootstrapSetup(list(bootstrap_level_budget), [0, 0], self.slots,
+                                       self.bootstrap_correction_factor)
             self.cc.EvalBootstrapKeyGen(self.keys.secretKey, self.slots)
 
         self.cc.LoadContext(self.keys.publicKey)
