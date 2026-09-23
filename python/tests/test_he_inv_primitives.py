@@ -263,3 +263,58 @@ def test_times_at_slot_zero_with_the_iterations_own_operands(device):
               f"\n  other slots max {others.max():.6g}   p50 {np.median(others):.6g}"
               f"\n  slot 0 / p50 of the rest: {error[0] / max(np.median(others), 1e-30):.1f}x"
               f"\n  worst {', '.join(f'{int(i)}(%16={int(i) % 16})' for i in worst)}")
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_the_same_failure_with_complete_keys(device):
+    """The reproduced failure again, with `truncate_keys` off. One flag, two hypotheses split.
+
+    The failure needs both a bootstrapped ciphertext and a low level: fresh at the top is clean,
+    fresh at the iteration's level is clean, bootstrapped at the top is clean, and bootstrapped at
+    level 20 is 13000x the median. It is also GPU-only - the CPU backend is clean in all four - and
+    the corrupted positions are 0, 9891 and 20170 in both this test and the benchmark, which run on
+    entirely different data (uniform noise here, a real softmax denominator there). So the fault is
+    positional, not data-dependent, and it is bounded to the device's key-switch arithmetic.
+
+    `truncate_keys` is the first thing to rule out, for three reasons. It is ours, added so THOR's
+    rotation keys would fit one card; it defaults to true, so every caller gets keys truncated
+    against a level plan only ever validated on THOR; and bugs/SWEEP-changes-that-affect-other-
+    workloads-20260914.md already recommends defaulting it to false and has been waiting on a
+    decision since. A key truncated to fewer levels than the ciphertext needs is exactly the kind of
+    thing that would appear only once enough levels have been spent - which is the shape here.
+
+    If this comes back clean, truncation is the cause and the fix is a flag. If it fails the same
+    way, truncation is exonerated and what is left is the bootstrap's output itself - its scale
+    degree, or whatever the refresh leaves in the limbs that a fresh encrypt does not.
+    """
+    import pyfideslib as pf
+
+    from test_bootstrap_noise_level import bench_params
+
+    params = dict(bench_params())
+    assert params.get("truncate_keys") is True, "this test is only meaningful against the default"
+    params["truncate_keys"] = False
+
+    engine = pf.Engine(device, **params)
+    rng = np.random.default_rng(23)                    # the same draw as the reproducing test
+    k = 2 / (1 + 2.0 ** -6 * 3)
+    b0 = rng.uniform(0.0814, 0.9812, engine.slots)
+
+    refreshed = engine.bootstrap(engine.encrypt(b0))
+    boot = np.real(np.asarray(engine.decrypt(refreshed)))[:b0.size]
+    product = engine.rescale(engine.relinearize(
+        engine.multiply(refreshed, engine.subtract(2 / k, refreshed))))
+
+    expected = boot * (2 / k - boot)
+    got = np.real(np.asarray(engine.decrypt(product)))[:expected.size]
+    error = np.abs(got - expected)
+    others = np.delete(error, 0)
+    ratio = error[0] / max(np.median(others), 1e-30)
+    print(f"\ntruncate_keys=False, bootstrapped b at level {engine.level(refreshed)}"
+          f"  (product at level {engine.level(product)}):"
+          f"\n  slot 0      error {error[0]:.6g}   value {got[0]:.6g} against {expected[0]:.6g}"
+          f"\n  other slots max {others.max():.6g}   p50 {np.median(others):.6g}"
+          f"\n  slot 0 / p50 of the rest: {ratio:.1f}x"
+          f"\n  worst {', '.join(f'{int(i)}(%16={int(i) % 16})' for i in np.argsort(-error)[:5])}"
+          f"\n  -> {'TRUNCATION WAS THE CAUSE' if ratio < 100 else 'truncation exonerated; look at the bootstrap output'}")
