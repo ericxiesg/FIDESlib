@@ -298,8 +298,12 @@ void Stream::init(int priority) {
 	// cudaStreamCreateWithFlags(&ptr, cudaStreamNonBlocking);
 #endif
 
+	// One event, not two. This used to create an event with `cudaEventCreateWithFlags` and then
+	// immediately overwrite the handle with a second `cudaEventCreate`, leaking the first - once per
+	// `Stream::init()`, and a `Stream` is constructed per `LimbPartition`, i.e. per polynomial per
+	// GPU. The `auxPoly` pool hides the rate by keeping polynomials alive, which is why it never
+	// showed up as an obvious leak.
 	cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
-	cudaEventCreate(&ev, cudaEventDisableTiming);
 #else
 	ptr_ = nullptr;
 	ev   = nullptr;

@@ -981,7 +981,11 @@ ContextData::~ContextData() {
 }
 
 bool ContextData::hasAuxilarPoly() const {
-	return precom.auxPoly.empty();
+	// `has` means the pool is non-empty. This returned `empty()` - the negation of its own name -
+	// which no caller ever hit, because there are none. Corrected rather than deleted: the pool is
+	// what keeps `Ciphertext` construction off the device allocator, and a predicate that asks
+	// whether it has anything is worth having spelled right.
+	return !precom.auxPoly.empty();
 }
 
 RNSPoly ContextData::getAuxilarPoly() {

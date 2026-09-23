@@ -209,3 +209,52 @@ def test_4_at_which_level_does_the_corruption_start(device):
         ratio, err, _ = _slot0_ratio(engine, product, values * (2 / K - values))
         worst = ", ".join(str(int(i)) for i in np.argsort(-err)[:3])
         print(f"    {engine.level(ct):6d}  {ratio:14.1f}  {err[0]:14.6g}   {worst}")
+
+
+# --------------------------------------------------------------------------------- experiment 5
+@BENCH
+def test_5_limb_tables_of_a_bootstrapped_versus_a_dropped_ciphertext(device):
+    """The state Python could not see until now: how wide the per-limb pointer tables actually are.
+
+    Experiment 2 compares `level` and `noise_level`, which is all the FIXEDMANUAL state the API
+    exposed. If those agree, the difference has to be somewhere else, and the pointer tables are the
+    candidate this library has and EasyFHE does not: our key-switch kernel dereferences three levels
+    deep - `((uint64_t*)digits[i + decomp*3*C_.dnum][pos])[idx]`,
+    ElemenwiseBatchKernels.cu:271-273 - while theirs indexes a dense tensor at `limb * N + coeff`
+    with no indirection at all.
+
+    `DIGITmeta` is an ordered list whose prefix shortens as levels are spent; key truncation is
+    built on exactly that prefix property (LimbPartition.cu:289-303). So the question is whether a
+    bootstrapped ciphertext and a level-dropped one, at the same nominal level, agree on how many
+    entries are live. If they do not, a kernel indexing by one of them while the data follows the
+    other would read the wrong pointer - deterministically, at a position fixed by the geometry
+    rather than by the data, which is what the corruption looks like.
+
+    Prints both tables and every key that differs. Asserts nothing: a difference here might be
+    legitimate bookkeeping, and the point is to see it, not to presume it is the fault.
+    """
+    engine = _engine(device)
+    b0 = _denominator(engine)
+
+    boot = engine.bootstrap(engine.encrypt(b0))
+    target = engine.level(boot)
+    fresh = engine.encrypt(b0)
+    dropped = engine.level_down(fresh, by=engine.level(fresh) - target)
+
+    a = engine.limb_table_sizes(boot)
+    b = engine.limb_table_sizes(dropped)
+    if not a and not b:
+        pytest.skip("limb table sizes are GPU-only; this engine reports none")
+
+    print(f"\n[5] per-limb table widths at nominal level {target}:")
+    print(f"    {'key':<24} {'bootstrapped':>14} {'dropped':>10}   ")
+    for key in sorted(set(a) | set(b)):
+        left, right = a.get(key, "-"), b.get(key, "-")
+        mark = "   <-- DIFFERS" if left != right else ""
+        print(f"    {key:<24} {str(left):>14} {str(right):>10}{mark}")
+
+    differing = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    if differing:
+        print(f"    -> tables disagree on: {', '.join(differing)}")
+    else:
+        print("    -> identical; the tables are not it, and the difference is inside the limb data")

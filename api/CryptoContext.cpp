@@ -2336,6 +2336,38 @@ uint32_t CryptoContextImpl<DCRTPoly>::GetNoiseLevel(const Ciphertext<DCRTPoly>& 
 	return static_cast<uint32_t>(ct_gpu->NoiseLevel);
 }
 
+std::map<std::string, uint32_t> CryptoContextImpl<DCRTPoly>::GetLimbTableSizes(
+	const Ciphertext<DCRTPoly>& ct) const {
+	std::map<std::string, uint32_t> out;
+	if (this->devices.empty() || ct->gpu == 0) {
+		return out;   // CPU fallback has no limb tables
+	}
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(
+		const_cast<CryptoContextImpl<DCRTPoly>*>(this)->GetDeviceCiphertext(ct->gpu));
+	if (ct_gpu->c0.GPU.empty()) {
+		return out;
+	}
+	const auto& part = ct_gpu->c0.GPU.at(0);
+	out["level"]        = static_cast<uint32_t>(ct_gpu->getLevel());
+	out["noise_level"]  = static_cast<uint32_t>(ct_gpu->NoiseLevel);
+	out["limb"]         = static_cast<uint32_t>(part.limb.size());
+	out["meta"]         = static_cast<uint32_t>(part.meta.size());
+	out["SPECIALlimb"]  = static_cast<uint32_t>(part.SPECIALlimb.size());
+	out["SPECIALmeta"]  = static_cast<uint32_t>(part.SPECIALmeta.size());
+	out["DECOMPlimb_digits"] = static_cast<uint32_t>(part.DECOMPlimb.size());
+	out["DIGITlimb_digits"]  = static_cast<uint32_t>(part.DIGITlimb.size());
+	for (size_t d = 0; d < part.DIGITlimb.size(); ++d) {
+		out["DIGITlimb_d" + std::to_string(d)] = static_cast<uint32_t>(part.DIGITlimb.at(d).size());
+	}
+	for (size_t d = 0; d < part.DIGITmeta.size(); ++d) {
+		out["DIGITmeta_d" + std::to_string(d)] = static_cast<uint32_t>(part.DIGITmeta.at(d).size());
+	}
+	for (size_t d = 0; d < part.DECOMPlimb.size(); ++d) {
+		out["DECOMPlimb_d" + std::to_string(d)] = static_cast<uint32_t>(part.DECOMPlimb.at(d).size());
+	}
+	return out;
+}
+
 uint32_t CryptoContextImpl<DCRTPoly>::GetConsumedLevels(const Ciphertext<DCRTPoly>& ct) const {
 	if (this->devices.empty() || ct->gpu == 0) {
 		auto& ctImpl = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);

@@ -272,7 +272,14 @@ void RNSPoly::binomialMult(RNSPoly& c1, RNSPoly& in, const RNSPoly& d0, const RN
 
 	if (!moddown) {
 		this->generateSpecialLimbs(true, false);
-		CudaCheckErrorMod;
+		// `CudaCheckErrorMod` contains a `cudaDeviceSynchronize`, and this sits between two calls
+		// that are already ordered by their streams, on the extended-basis multiply path - so the
+		// sync bought nothing and cost a full device drain per call. The error check itself is kept.
+		//
+		// Note this is *not* true of every use of the macro: several in this file sit immediately
+		// after a `cudaMemcpyAsync` out of a host stack vector (`cpu_ptr`), where the drain is what
+		// keeps that vector alive until the copy lands. Those are deliberately left alone.
+		CudaCheckErrorModNoSync;
 		c1.generateSpecialLimbs(true, false);
 	}
 

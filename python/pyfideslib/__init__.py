@@ -210,6 +210,17 @@ class Engine:
         """
         return int(self.cc.GetNoiseLevel(x))
 
+    def limb_table_sizes(self, x) -> dict:
+        """Live entry counts of the per-limb pointer tables behind ``x``. Empty on the CPU path.
+
+        ``level`` and ``noise_level`` are the FIXEDMANUAL state a caller can already read. This is
+        the state it cannot: how many entries `limb`, `SPECIALlimb` and each `DIGITlimb[d]` actually
+        hold, beside the `meta` records they were built from. A ciphertext whose tables are shorter
+        than the kernel indexing them expects is indistinguishable from a healthy one until the
+        arithmetic comes out wrong, which is the shape of the slot-0 corruption.
+        """
+        return dict(self.cc.GetLimbTableSizes(x))
+
     def bootstrap(self, x, keep_levels: int | None = None):
         """Refresh ``x``. ``keep_levels`` drops the result to exactly that level.
 

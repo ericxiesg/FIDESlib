@@ -245,6 +245,15 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	 * negation consumed a degree, whether a bootstrap returns one - when the question is a field.
 	 */
 	uint32_t GetNoiseLevel(const Ciphertext<DCRTPoly>& ct) const;
+
+	/// @brief Live entry counts of the per-limb pointer tables backing `ct`, for diagnosis.
+	///
+	/// Returns `limb` / `SPECIALlimb` / `DIGITlimb[d]` sizes beside the `meta` / `SPECIALmeta` /
+	/// `DIGITmeta[d]` records they are built from, for c0 on GPU 0. Levels and scale degree are
+	/// visible from Python; the width of these tables is not, and a ciphertext that reaches a
+	/// kernel with a table shorter than the kernel indexes is indistinguishable from one that does
+	/// not until the arithmetic comes out wrong. GPU path only; empty on the CPU fallback.
+	std::map<std::string, uint32_t> GetLimbTableSizes(const Ciphertext<DCRTPoly>& ct) const;
 	/**
 	 * @brief Level plan for the rotation keys registered with EvalRotateKeyGen: index -> maximum number of
 	 * remaining levels the key will ever be applied at (THOR's `create_fixed_rotation_key(sk, delta, level)`).
