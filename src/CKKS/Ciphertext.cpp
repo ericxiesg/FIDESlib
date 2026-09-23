@@ -670,7 +670,9 @@ void Ciphertext::mult(const Ciphertext& b, bool rescale, const bool moddown) {
 				this->rescale();
 			}
 			 */
-		} else if (false) {
+		} else if (FUSED_KEYSWITCH && cc.GPUid.size() == 1) {
+			// modup + dot-KSK fused into the NTT, instead of modup, DecompAndModUpConv, NTT and
+			// fusedDotKSK_2_ as separate launches. Off by default - see FUSED_KEYSWITCH.
 			cc.getKeySwitchAux().setLevel(c1.getLevel());
 			cc.getKeySwitchAux().multModupDotKSK(c1, b.c1, c0, b.c0, kskEval);
 			{ // TODO MAD Figure 4: add before fused ModDown+Rescale
@@ -844,7 +846,8 @@ void Ciphertext::square(bool rescale) {
 			if (rescale) {
 				this->rescale();
 			}
-		} else if constexpr (0) {
+		} else if (FUSED_KEYSWITCH && cc.GPUid.size() == 1) {
+			// As in `mult`: the fused modup+dot-KSK square, off by default.
 			cc.getKeySwitchAux().setLevel(c1.getLevel());
 			cc.getKeySwitchAux().squareModupDotKSK(c0, c1, kskEval);
 

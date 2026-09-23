@@ -33,6 +33,17 @@ static bool envPeerAccess(bool def = false) {
 	return out;
 }
 
+static bool envFusedKeySwitch(bool def = false) {
+	bool out = def;
+
+	char* res = getenv("FIDESLIB_USE_FUSED_KEYSWITCH");
+	if (res && !(0 == std::strcmp(res, ""))) {
+		out = atoi(res);
+		std::cout << "FIDESLIB_USE_FUSED_KEYSWITCH=" << res << ", set to: " << out << std::endl;
+	}
+	return out;
+}
+
 static bool envGraphCapture(bool def = false) {
 	bool out = def;
 
@@ -47,6 +58,7 @@ static bool envGraphCapture(bool def = false) {
 bool MEMCPY_PEER   = envMemcopyPeer(true);
 bool GRAPH_CAPTURE = envGraphCapture(false);
 bool PEER_ACCESS   = envPeerAccess(false);
+bool FUSED_KEYSWITCH = envFusedKeySwitch(false);
 
 void LimbPartition::rescaleMGPU() {
 	const int limbsize = getLimbSize(*level);

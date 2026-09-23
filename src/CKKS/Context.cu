@@ -48,6 +48,18 @@ ContextData::ContextData(const Parameters& param_, const std::vector<int>& devs,
 	if (const char* env = std::getenv("FIDESLIB_KEY_TRUNCATION")) {
 		truncateKeys = !(env[0] == '0' || env[0] == 'f' || env[0] == 'F');
 	}
+	// How many limbs one kernel launch covers. At the default of 100 a single launch spans every
+	// limb of any realistic level, so the per-limb streams the partition hands out collapse onto
+	// one and there is no intra-polynomial overlap left to exploit. Lowering it trades more
+	// launches for more concurrency; whether that is a win is a measurement nobody has taken, so
+	// it is an override rather than a new default.
+	if (const char* env = std::getenv("FIDESLIB_LIMB_BATCH")) {
+		const int requested = std::atoi(env);
+		if (requested > 0) {
+			batch = requested;
+			std::cout << "FIDESLIB_LIMB_BATCH=" << env << ", limbs per launch set to: " << batch << std::endl;
+		}
+	}
 	if (const char* env = std::getenv("FIDESLIB_KEY_LEVEL_MARGIN")) {
 		keyLevelMargin = std::max(0, std::atoi(env));
 	}

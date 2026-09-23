@@ -19,6 +19,17 @@ extern bool MEMCPY_PEER;
 extern bool GRAPH_CAPTURE;
 extern bool PEER_ACCESS;
 
+/// `FIDESLIB_USE_FUSED_KEYSWITCH=1` routes `mult` and `square` through the fused
+/// modup+dot-KSK path (`multModupDotKSK` / `squareModupDotKSK`) instead of the separate
+/// modup, DecompAndModUpConv, NTT and `fusedDotKSK_2_` launches.
+///
+/// Those implementations are ~190 lines each and have been complete, compiled and instantiated
+/// all along, reachable only from `else if (false)` / `else if constexpr (0)` branches - see the
+/// EasyFHE architecture comparison. Why they were switched off is not recorded anywhere, so this
+/// is a switch and not a new default: the naive path stays in charge until the fused one has been
+/// measured for both speed and accuracy on hardware.
+extern bool FUSED_KEYSWITCH;
+
 class LimbPartition {
   public:
 	ContextData& cc;
