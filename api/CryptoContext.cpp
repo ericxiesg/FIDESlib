@@ -1761,6 +1761,16 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalBootstrap(const Ciphertext
 	auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	// Fall back to CPU.
 	if (this->devices.empty()) {
+		// Refuse rather than ignore. OpenFHE's EvalBootstrap has no stopAfterStage, so this branch
+		// used to run the *whole* bootstrap and hand back a finished ciphertext for a request that
+		// asked for an intermediate. That is not a harmless no-op: it invites a GPU stage-2 result to
+		// be compared against a CPU full refresh as though they were the same measurement, which is
+		// exactly what happened. A silently dropped parameter is worse than an absent one.
+		if (stopAfterStage != -1) {
+			OPENFHE_THROW("EvalBootstrap: stopAfterStage is implemented on the GPU path only. The CPU "
+						  "fallback would run the whole bootstrap and return a finished ciphertext, which "
+						  "is not the intermediate that was asked for.");
+		}
 
 		auto& ctImpl                = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ciphertext->cpu);
 		auto ct                     = context->EvalBootstrap(ctImpl, numIterations, precision);
