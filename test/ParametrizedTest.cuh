@@ -188,6 +188,9 @@ struct GeneralTestParams {
 	uint64_t ringDim;
 	uint64_t dnum;
 	std::vector<int> GPUs;
+	/// FIDESlib picks the Chebyshev coefficient set and the double-angle depth from this, so a suite
+	/// left on the default tests a different approximation from the one the benchmark runs.
+	lbcrypto::SecretKeyDist secretKeyDist = lbcrypto::UNIFORM_TERNARY;
 };
 
 extern std::array<int, 1> batch_configs;
@@ -449,6 +452,37 @@ inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbc
 #define TTALL64BOOT \
 	tparams64_13_1_flex, tparams64_13_1_fix, tparams64_13_2_flex, tparams64_13_2_fix, tparams64_13_3_flex, tparams64_13_3_fix, tparams64_13_4_flex, tparams64_13_4_fix
 
+/** The configuration `thorfhe.bench` actually runs, so the bootstrap stages can be tested at it.
+ *
+ * `TTALL64BOOT` is eight parameter sets and every one of them is FIXEDAUTO or FLEXIBLEAUTOEXT at
+ * depth 23, scale 59, first modulus 60, uniform-ternary key, with the linear transform's baby-step
+ * split pinned to {16, 16}. The benchmark is FIXEDMANUAL at depth 37, scale 50, first modulus 55,
+ * sparse-ternary key, and passes {0, 0} so OpenFHE chooses the split. None of those five is covered.
+ *
+ * Two of them reach straight into CoeffsToSlots. The baby-step split decides how many diagonals a
+ * step holds and which rotations it needs, so {16, 16} exercises a different decomposition than the
+ * one that runs; and `EvalCoeffsToSlots` opens with a FIXEDMANUAL-only rescale that no parameter
+ * set here ever reaches. That is why a green `CoeffsToSlots` cannot presently be cited as evidence
+ * about the benchmark - see report/report-cts-stc-review-20260923.md.
+ *
+ * Only the bootstrap suite takes it: depth 37 at logN 16 is the expensive end and there is no
+ * reason to pay it on every interface test.
+ */
+inline FIDESlib::CKKS::Parameters params64_16_thor{ .logN = 16, .L = 37, .dnum = 4, .primes = p64, .Sprimes = sp64 };
+inline GeneralTestParams gparams64_16_thor{ .multDepth = 37,
+	.firstModSize									 = 55,
+	.scaleModSize									 = 50,
+	.batchSize										 = 8,
+	.ringDim										 = 1 << 16,
+	.dnum											 = 4,
+	.GPUs											 = { 0 },
+	.secretKeyDist									 = lbcrypto::SPARSE_TERNARY };
+inline std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters> tparams64_16_thor = std::tuple(gparams64_16_thor, params64_16_thor);
+inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbcrypto::ScalingTechnique> tparams64_16_thor_fixmanual{
+	tparams64_16_thor, lbcrypto::ScalingTechnique::FIXEDMANUAL };
+
+#define TTALL64BOOTTHOR TTALL64BOOT, tparams64_16_thor_fixmanual
+
 /**
 ,tparams64_15_LLM_flex,
   tparams64_16_boot1_fix, tparams64_16_boot1_fixauto, tparams64_16_boot1_flex,
@@ -496,7 +530,8 @@ class GeneralParametrizedTest : public testing::TestWithParam<std::tuple<std::tu
 		}
 
 		uint64_t index = generalTestParams.ringDim + (1ul << 20) * generalTestParams.multDepth + std::get<1>(params) + (1ul << 30) * generalTestParams.dnum +
-		  (1ul << 40) * generalTestParams.scaleModSize;
+		  (1ul << 40) * generalTestParams.scaleModSize + (1ul << 47) * generalTestParams.firstModSize +
+	  (1ul << 55) * static_cast<uint64_t>(generalTestParams.secretKeyDist);
 		if (cached_cc.contains(index)) {
 			cc	 = cached_cc[index].first;
 			keys = cached_cc[index].second;
@@ -511,7 +546,7 @@ class GeneralParametrizedTest : public testing::TestWithParam<std::tuple<std::tu
 			parameters.SetRingDim(generalTestParams.ringDim);
 			parameters.SetNumLargeDigits(generalTestParams.dnum);
 			parameters.SetScalingTechnique(std::get<1>(params));
-			parameters.SetSecretKeyDist(lbcrypto::UNIFORM_TERNARY);
+			parameters.SetSecretKeyDist(generalTestParams.secretKeyDist);
 			parameters.SetPREMode(lbcrypto::INDCPA);
 
 			cc = GenCryptoContext(parameters);

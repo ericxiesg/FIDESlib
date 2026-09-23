@@ -3029,7 +3029,11 @@ TEST_P(OpenFHEBootstrapTest, CoeffsToSlots) {
 
 	lbcrypto::Plaintext result;
 	std::cout << "Setup Bootstrap" << std::endl;
-	cc->EvalBootstrapSetup({ 3, 3 }, { 16, 16 }, slots);
+	// {0, 0} lets OpenFHE choose the baby-step split, which is what `thorfhe.bench` passes and what
+	// the SlotsToCoeffs test below already uses. Pinned to {16, 16} this exercised a decomposition
+	// with a different diagonal count and rotation set than the one that runs, so a green result
+	// here said nothing about the benchmark.
+	cc->EvalBootstrapSetup({ 3, 3 }, { 0, 0 }, slots);
 
 	std::cout << "Generate keys" << std::endl;
 	cc->EvalBootstrapKeyGen(keys.secretKey, slots);
@@ -3850,5 +3854,5 @@ TEST_P(OpenFHEBootstrapTest, OpenFHEBootstrapDense) {
 	}
 }
 
-INSTANTIATE_TEST_SUITE_P(OpenFHEBootstrapTests, OpenFHEBootstrapTest, testing::Values(TTALL64BOOT));
+INSTANTIATE_TEST_SUITE_P(OpenFHEBootstrapTests, OpenFHEBootstrapTest, testing::Values(TTALL64BOOTTHOR));
 } // namespace FIDESlib::Testing

@@ -5,6 +5,8 @@ produces at that level, so `multiply(ct, light)` and `multiply(ct, ndarray)` mus
 Since the CPU backend rebuilds the RNS towers with OpenFHE and the CUDA backend expands them with its
 own kernel + NTT, running this on both devices is what pins the coefficient ordering down.
 """
+import os
+
 import numpy as np
 import pytest
 
@@ -125,3 +127,36 @@ def test_message_too_large_for_one_tower_is_rejected(engine):
     big = np.full(engine.slots, float(2**12))
     with pytest.raises(RuntimeError):
         engine.encode_to_light_plaintext(big)
+
+
+@pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
+                    reason="set PYFIDESLIB_BENCH_PARAMS=1 to build an engine at the benchmark's parameters")
+def test_encoding_is_level_independent_at_bench_depth(device):
+    """The premise the weight cache rests on, checked at the depth the benchmark runs.
+
+    `MakeLightPlaintext` no longer encodes at level 0; since 7a03a0d it encodes at `towers - 2`,
+    because under a level-independent scaling technique the integer coefficients do not depend on
+    the level and building 38 towers to read two was 96% of a layer's wall clock. Every `.flpt` on
+    disk is those coefficients, and `plaintext_store` keys by provenance - model, ring, depth,
+    scales - not by content, so a cache written before that commit is read after it without
+    anything noticing. That is only safe if the premise holds.
+
+    `test_multiply_matches_dense_encoding` already pins it: the dense path encodes at
+    `depth - level(ct)`, which is 0 for a fresh ciphertext, and the light path at `towers - 2`, and
+    the two products must agree to 1e-9. But it runs at depth 12, where the gap is 0 vs 11. The
+    benchmark's gap is 0 vs 36, and the commit that introduced it was never verified at either.
+    """
+    import pyfideslib as pf
+    from test_bootstrap_noise_level import bench_params
+
+    engine = pf.Engine(device, **bench_params())
+    x, w = rand(engine, 51), rand(engine, 52)
+    cx = engine.encrypt(x)
+    assert engine.level(cx) == engine.depth, "the dense encode below has to land on level 0"
+
+    dense = engine.rescale(engine.multiply(cx, w))
+    compact = engine.rescale(engine.multiply(cx, engine.encode_to_light_plaintext(w)))
+
+    # Same integer coefficients or not at all: this is well below the CKKS noise floor, so any
+    # level dependence in the encoder shows up here rather than as a fidelity drift 22 layers later.
+    assert np.max(np.abs(engine.decrypt_real(compact) - engine.decrypt_real(dense))) < 1e-9

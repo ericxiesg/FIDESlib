@@ -1315,6 +1315,77 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
 	GPUcc.printKeyMemoryReport(std::cout);
 }
 
+namespace {
+
+/** Check the shape of a linear-transform precomputation we inherited rather than computed.
+
+    `AddBootstrapPlaintexts` does not build the bootstrap diagonals; it transcribes OpenFHE's
+    `m_U0hatTPreFFT` and `m_U0PreFFT`. Every property `EvalCoeffsToSlots` relies on - how many layers
+    there are, how many diagonals each holds, what level each is encoded at, and which order the
+    layers arrive in - is therefore a convention we copied and nothing verifies. `alignToDiagonals`
+    already reports one of them at use time, once per process; the rest are unchecked, and the layer
+    order is reversed on the CtS side only (`A.at(A.size() - 1 - i)` against `invA.at(i)`), which is
+    exactly the kind of inherited detail that would invert a transform silently if upstream changed it.
+
+    Checking here costs one pass over a few hundred plaintexts, once per context.
+
+    The two classes are treated differently on purpose. A size mismatch throws: it is unambiguous, and
+    the alternative is an `std::out_of_range` from `.at()` with nothing to say. The level progression
+    only reports, because "each step consumes exactly one level" is an inference about OpenFHE's level
+    budget rather than something this tree states anywhere - and a check of mine that aborted a working
+    bootstrap on a wrong invariant has already happened twice (`LimbPartitionBatch.cu:320` carries the
+    warning). Report first, tighten once the device has shown what the numbers actually are.
+ */
+void CheckPrecomputationShape(const char* name, const std::vector<FIDESlib::CKKS::BootstrapPrecomputation::LTstep>& steps, size_t upstreamLayers, int ciphertextLevel) {
+	if (steps.size() != upstreamLayers)
+		OPENFHE_THROW(std::string("bootstrap precomputation: ") + name + " has " + std::to_string(steps.size()) +
+					  " layers but OpenFHE supplied " + std::to_string(upstreamLayers));
+
+	int previous = -1;
+	for (size_t i = 0; i < steps.size(); ++i) {
+		const auto& step = steps.at(i);
+		const std::string where = std::string(name) + " layer " + std::to_string(i);
+
+		if (static_cast<size_t>(step.slots) != step.A.size())
+			OPENFHE_THROW("bootstrap precomputation: " + where + " declares " + std::to_string(step.slots) +
+						  " slots but holds " + std::to_string(step.A.size()) +
+						  " diagonals; EvalCoeffsToSlots indexes by the former and reads the latter");
+
+		int lo = -1, hi = -1;
+		for (const auto& pt : step.A) {
+			const int level = pt.c0.getLevel();
+			if (level < 0)
+				continue;
+			if (lo < 0 || level < lo)
+				lo = level;
+			if (level > hi)
+				hi = level;
+		}
+		if (lo < 0)
+			continue;
+
+		if (hi > lo)
+			std::cerr << "[FIDESlib] bootstrap precomputation: " << where << " spans levels " << lo << " to " << hi
+					  << " over " << step.A.size() << " diagonals. alignToDiagonals drops the ciphertext to the "
+					  << "lowest, which truncates the rest into a wrong value rather than an error." << std::endl;
+
+		if (previous >= 0 && lo != previous - 1)
+			std::cerr << "[FIDESlib] bootstrap precomputation: " << where << " is at level " << lo << ", but the "
+					  << "layer before it is at " << previous << ". Each step is assumed to consume exactly one "
+					  << "level, and a layer at a *higher* level than its predecessor means the layer order is "
+					  << "the reverse of what this code assumes." << std::endl;
+		previous = lo;
+
+		if (i == 0 && ciphertextLevel >= 0 && lo > ciphertextLevel)
+			std::cerr << "[FIDESlib] bootstrap precomputation: " << where << " is encoded at level " << lo
+					  << ", above the ciphertext's " << ciphertextLevel << ". alignToDiagonals only ever drops the "
+					  << "ciphertext, so the extra plaintext limbs are read against limbs that are not there."
+					  << std::endl;
+	}
+}
+
+} // namespace
+
 void FIDESlib::CKKS::AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DCRTPoly> cc, int slots, FIDESlib::CKKS::Context& GPUcc_, FIDESlib::CKKS::BootstrapPrecomputation& result) {
 	ContextData& GPUcc = *GPUcc_;
 	auto precom		   = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE)->m_bootPrecomMap.find(slots)->second;
@@ -1360,17 +1431,11 @@ void FIDESlib::CKKS::AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DC
 				}
 			}
 
-			// Which side of the seam a level mismatch is on is not otherwise visible: the tower count
-			// of these diagonals is decided entirely by OpenFHE's EvalBootstrapSetup (GetRawPlainText
-			// just reports GetAllElements().size()), while the ciphertext's post-ModRaise level is
-			// chosen here, by scaling technique. Print both once so the two are comparable in a log.
-			// A FIXEDMANUAL context grows the ciphertext to L, i.e. L + 1 limbs; anything less here is
-			// the gap that EvalCoeffsToSlots has to drop the ciphertext across.
-			if (!result.CtS.empty() && !result.CtS.front().A.empty()) {
-				std::cerr << "[FIDESlib] bootstrap diagonals: CtS layer 0 holds "
-						  << result.CtS.front().A.front().c0.getLevel() + 1 << " limbs; a ciphertext at L=" << GPUcc.L
-						  << " has " << GPUcc.L + 1 << " (scaling technique " << (int)GPUcc.rescaleTechnique << ")" << std::endl;
-			}
+			// The diagonals' levels are decided entirely by OpenFHE's EvalBootstrapSetup, while the
+			// ciphertext's post-ModRaise level is chosen here by scaling technique. Nothing else
+			// compares the two, or checks the shape of what we just transcribed - see
+			// report/report-cts-stc-review-20260923.md section 5.
+			CheckPrecomputationShape("CtS", result.CtS, A.size(), GPUcc.L);
 
 			for (uint32_t i = 0; i < invA.size(); ++i) {
 				for (uint32_t j = 0; j < invA.at(i).size(); ++j) {
@@ -1380,6 +1445,8 @@ void FIDESlib::CKKS::AddBootstrapPlaintexts(lbcrypto::CryptoContext<lbcrypto::DC
 						result.StC.at(i).A.back().c0.freeSpecialLimbs();
 				}
 			}
+
+			CheckPrecomputationShape("StC", result.StC, invA.size(), GPUcc.L);
 		}
 	}
 }
