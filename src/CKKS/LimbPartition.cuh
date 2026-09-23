@@ -235,7 +235,12 @@ class LimbPartition {
 
 	void multModupDotKSK(LimbPartition& c1, const LimbPartition& c1tilde, LimbPartition& c0, const LimbPartition& c0tilde, const LimbPartition& ksk_a, const LimbPartition& ksk_b);
 
-	size_t getLimbSize(int level);
+	/// Limbs whose record id is at or below `level`, counted from `meta`.
+	///
+	/// `for_launch` says whether the answer is about to bound a kernel over `limbptr`, in which case
+	/// `limb` must already hold that many. `generateLimbToLevel` calls it to decide how many limbs to
+	/// *create*, where a short `limb` is the normal case and not a fault - so it passes false.
+	size_t getLimbSize(int level, bool for_launch = true);
 	void automorph(const int index, const int br, LimbPartition* src, bool ext);
 
 	void modupInto(LimbPartition& partition, LimbPartition& partition1);

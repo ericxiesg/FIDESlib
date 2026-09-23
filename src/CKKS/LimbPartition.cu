@@ -259,7 +259,9 @@ void LimbPartition::generateLimb() {
 
 void LimbPartition::generateLimbToLevel(int new_level) {
 	cudaSetDevice(device);
-	int new_size = getLimbSize(new_level);
+	// Not a launch: this asks how many limbs to create, and `limb` being shorter is the whole
+	// reason to call it - the next line tests exactly that.
+	int new_size = getLimbSize(new_level, /*for_launch=*/false);
 	if (static_cast<size_t>(new_size) > limb.size()) {
 		generate(meta, limb, limbptr, new_size - 1, &auxptr);
 	}
@@ -1655,7 +1657,7 @@ bool checkLimbInvariants() {
 }
 }   // namespace
 
-size_t LimbPartition::getLimbSize(int level) {
+size_t LimbPartition::getLimbSize(int level, bool for_launch) {
 	size_t size = 0;
 	if (level == cc.L + 1) {
 		level = level - 1 - (cc.rescaleTechnique == FIDESlib::CKKS::FLEXIBLEAUTOEXT);
@@ -1673,7 +1675,7 @@ size_t LimbPartition::getLimbSize(int level) {
 	// NDEBUG and would drop it again, and because the interesting question is whether it ever trips
 	// on hardware. Reports once per distinct shape and does not throw: a false positive here should
 	// not take down a run that is otherwise producing data.
-	if (checkLimbInvariants() && size > limb.size()) {
+	if (for_launch && checkLimbInvariants() && size > limb.size()) {
 		static std::set<std::tuple<int, size_t, size_t>> seen;
 		static std::mutex seen_lock;
 		const auto shape = std::make_tuple(level, size, limb.size());
@@ -1683,7 +1685,7 @@ size_t LimbPartition::getLimbSize(int level) {
 			report = seen.insert(shape).second;
 		}
 		if (report) {
-			printf("[FIDESlib] limb invariant: getLimbSize(level=%d) returned %zu but limb holds "
+			printf("[FIDESlib] limb invariant AT A LAUNCH: getLimbSize(level=%d) returned %zu but limb holds "
 				   "%zu (meta %zu, SPECIALlimb %zu, SPECIALmeta %zu) - kernels bounded by the "
 				   "former will index past the latter\n",
 				   level, size, limb.size(), meta.size(), SPECIALlimb.size(), SPECIALmeta.size());
