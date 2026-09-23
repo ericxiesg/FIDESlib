@@ -6,6 +6,10 @@
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
 #include "CudaUtils.cuh"
+#include <cstdlib>
+#include <iostream>
+#include <set>
+#include <string>
 #if defined(__clang__)
 #include <experimental/source_location>
 using sc = std::experimental::source_location;
@@ -20,6 +24,38 @@ using namespace FIDESlib::CKKS;
 
 void evalChebyshevSeries(Ciphertext& ctxt, const KeySwitchingKey& keySwitchingKey, std::vector<double>& coefficients, double lower_bound, double upper_bound);
 void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval);
+
+namespace {
+
+/** One line per stage of EvalMod: the level and scale degree, and nothing else.
+
+    `PRINT` already reports these, but it dumps whole limbs alongside them, so nobody turns it on and
+    the numbers have never been read. They are the ones in question: under FIXEDMANUAL the scale degree
+    is the whole contract, `applyDoubleAngleIterations` rescales at the *top* of each iteration where
+    OpenFHE's `ApplyDoubleAngleIterations` does it at the bottom, and whether those are equivalent
+    depends entirely on the degree `evalChebyshevSeries` hands over. That exit comes out of a recursive
+    `innerEvalChebyshevPS`, so reading it off the source is not practical - but it costs nothing to
+    print.
+
+    Expected under FIXEDMANUAL, if the rotated rescale is equivalent: degree 2 into the double-angle
+    loop, degree 2 out of it (OpenFHE's final ModReduce has no counterpart here, which is where the
+    NoiseLevel=2 bootstrap exit of 72dc818 comes from). Degree 1 on entry would mean the first
+    iteration's rescale drops a level nothing accounted for.
+
+    Off unless FIDESLIB_TRACE_MODEVAL is set, and once per process, so it cannot affect a timed run.
+ */
+void TraceModEval(const char* where, const FIDESlib::CKKS::Ciphertext& ct) {
+	static const bool on = std::getenv("FIDESLIB_TRACE_MODEVAL") != nullptr;
+	if (!on)
+		return;
+	static std::set<std::string> seen;
+	if (!seen.insert(where).second)
+		return;
+	std::cout << "[FIDESlib] EvalMod " << where << ": level " << ct.getLevel() << ", scale degree "
+			  << ct.NoiseLevel << std::endl;
+}
+
+} // namespace
 
 void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEncI, const KeySwitchingKey& keySwitchingKey, uint64_t post) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
@@ -50,7 +86,9 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 		std::cout << std::endl;
 	}
 
+	TraceModEval("after Chebyshev (into double-angle)", ctxtEnc);
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
+	TraceModEval("after double-angle", ctxtEnc);
 	if constexpr (COMPLEX)
 		applyDoubleAngleIterations(ctxtEncI, cc.GetDoubleAngleIts(), keySwitchingKey);
 	if constexpr (PRINT) {
@@ -78,6 +116,7 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 		ctxtEnc.add(ctxtEnc);
 	// cudaDeviceSynchronize();
 	multIntScalar(ctxtEnc, post);
+	TraceModEval("after post scalar (EvalMod exit)", ctxtEnc);
 	if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
 		ctxtEnc.rescale();
 	// cudaDeviceSynchronize();
@@ -107,7 +146,9 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		}
 		std::cout << std::endl;
 	}
+	TraceModEval("after Chebyshev (into double-angle)", ctxtEnc);
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
+	TraceModEval("after double-angle", ctxtEnc);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc DA " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -117,6 +158,7 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		std::cout << std::endl;
 	}
 	multIntScalar(ctxtEnc, post);
+	TraceModEval("after post scalar (EvalMod exit)", ctxtEnc);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc final " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
