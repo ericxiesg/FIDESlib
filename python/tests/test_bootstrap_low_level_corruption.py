@@ -258,3 +258,66 @@ def test_5_limb_tables_of_a_bootstrapped_versus_a_dropped_ciphertext(device):
         print(f"    -> tables disagree on: {', '.join(differing)}")
     else:
         print("    -> identical; the tables are not it, and the difference is inside the limb data")
+
+
+# --------------------------------------------------------------------------------- experiment 6
+@BENCH
+def test_6_stage2_slot_spectrum(device):
+    """Pre-check the collaborator asked for: which slots are anomalous after CoeffsToSlots?
+
+    Stage 2 (CoeffsToSlots) leaves each slot holding one coefficient of the message. Slot 0
+    reads 7.39e-05 against a median of 0.054 - 725x too small. The question is whether only
+    slot 0 collapses, or whether 9891, 19782 and 20170 (the worst-5 from the multiply bug)
+    collapse with it.
+
+    One anomalous slot means a single wrong entry in a CtS diagonal. The group means a
+    structure - a stride, a digit boundary, or the baby-step grouping.
+    """
+    engine = _engine(device)
+    b0 = _denominator(engine)
+
+    out = engine.bootstrap_stage(engine.encrypt(b0), 2)
+    values = np.abs(np.real(np.asarray(engine.decrypt(out)))[:b0.size])
+    median = np.median(values)
+    p10 = np.percentile(values, 10)
+
+    print(f"\n[6] stage 2 (CoeffsToSlots) slot spectrum, {values.size} slots:")
+    print(f"    median {median:.6g}  p10 {p10:.6g}  min {values.min():.6g}  max {values.max():.6g}")
+
+    # The known worst-5 from the multiply bug
+    known = [0, 9891, 19782, 20170]
+    print(f"\n    known worst-5 slots from the multiply bug:")
+    for s in known:
+        if s < values.size:
+            ratio = values[s] / max(median, 1e-30)
+            label = "ANOMALOUS" if ratio < 0.1 else ("small" if ratio < 0.5 else "normal")
+            print(f"      slot {s:6d}: |val| {values[s]:12.6g}  ratio-to-median {ratio:8.3f}  {label}")
+
+    # The 20 smallest slots by absolute value
+    order = np.argsort(values)
+    print(f"\n    20 smallest slots by |value|:")
+    for rank, idx in enumerate(order[:20]):
+        ratio = values[idx] / max(median, 1e-30)
+        in_known = " <-- known" if idx in known else ""
+        print(f"      {rank+1:3d}. slot {idx:6d}: |val| {values[idx]:12.6g}  ratio {ratio:8.4f}{in_known}")
+
+    # How many slots are below p10?
+    below = np.where(values < p10)[0]
+    print(f"\n    {below.size} slots below p10 ({p10:.6g})")
+    if below.size <= 50:
+        print(f"    indices: {sorted(below.tolist())}")
+    else:
+        # Check for stride patterns
+        diffs = np.diff(sorted(below.tolist()))
+        if len(diffs) > 0:
+            print(f"    most common gaps: {np.bincount(diffs).argmax()}")
+            print(f"    first 30: {sorted(below.tolist())[:30]}")
+
+    # Cluster check: are the known slots in a baby-step / digit pattern?
+    print(f"\n    structural check:")
+    for stride in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
+        hits = [s for s in known if s < values.size and values[s] < p10]
+        if len(hits) >= 2:
+            gaps = [known[i+1] - known[i] for i in range(len(known)-1)]
+            if all(g % stride == 0 for g in gaps if g > 0):
+                print(f"      stride {stride:5d}: all known-slot gaps divisible by it")
