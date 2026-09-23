@@ -159,6 +159,8 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 	}
 	multIntScalar(ctxtEnc, post);
 	TraceModEval("after post scalar (EvalMod exit)", ctxtEnc);
+	if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
+		ctxtEnc.rescale();
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc final " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
