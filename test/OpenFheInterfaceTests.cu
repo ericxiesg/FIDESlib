@@ -2732,6 +2732,141 @@ TEST_P(OpenFHEBootstrapTest, CtSStCIdentityDense) {
 	}
 }
 
+// CtS error analysis: compare CPU CtS vs GPU CtS per-slot, compute ratio statistics.
+// The existing CoeffsToSlots test shows 20-26x error but doesn't analyze the pattern.
+// This test determines whether the error is a constant scaling factor (systematic)
+// or slot-dependent (precision defect).
+TEST_P(OpenFHEBootstrapTest, CtSErrorAnalysis) {
+	CKKS::DeregisterAllContexts();
+	for (auto& i : cached_cc) {
+		i.second.first->ClearEvalAutomorphismKeys();
+		i.second.first->ClearEvalMultKeys();
+		if (std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE))
+			std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE)->m_bootPrecomMap.clear();
+	}
+	cc->Enable(lbcrypto::PKE);
+	cc->Enable(lbcrypto::KEYSWITCH);
+	cc->Enable(lbcrypto::LEVELEDSHE);
+	cc->Enable(lbcrypto::ADVANCEDSHE);
+	cc->Enable(lbcrypto::FHE);
+	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl;
+	cc->EvalMultKeyGen(keys.secretKey);
+
+	int slots = cc->GetRingDimension() / 2;
+	std::cout << "Setup Bootstrap {3,3}, slots=" << slots << std::endl;
+	cc->EvalBootstrapSetup({3, 3}, {0, 0}, slots);
+	cc->EvalBootstrapKeyGen(keys.secretKey, slots);
+
+	std::vector<double> x1 = {0.25, 0.5, 0.75, 0.1, -0.1, -0.75, -0.5, -0.25};
+
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
+	FIDESlib::CKKS::Context& cc_        = GPUcc;
+	cc_                                = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
+	FIDESlib::CKKS::ContextData& GPUcc = *cc_;
+
+	int encLevel = GPUcc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT ? 2 : 1;
+	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, encLevel, nullptr, slots);
+	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
+
+	auto c1 = cc->Encrypt(keys.publicKey, ptxt1);
+	auto c2 = cc->Encrypt(keys.publicKey, ptxt2);
+
+	FIDESlib::CKKS::AddBootstrapPrecomputation(cc, keys, slots, cc_);
+
+	auto FHE = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE);
+	auto raised = c1->Clone();
+
+	// CPU CtS
+	std::cout << "Running CPU CtS..." << std::endl;
+	auto ctxtEncCPU = FHE->EvalCoeffsToSlots(FHE->m_bootPrecomMap.at(slots)->m_U0hatTPreFFT, raised);
+	cc->RescaleInPlace(ctxtEncCPU);
+	// NOTE: no conjugate+add on CPU side, to match GPU (which skips it for dense N/2 slots)
+	lbcrypto::Plaintext resultCPU;
+	cc->Decrypt(keys.secretKey, ctxtEncCPU, &resultCPU);
+	auto cpuValues = resultCPU->GetCKKSPackedValue();
+	std::cout << "CPU CtS done. LogPrecision=" << resultCPU->GetLogPrecision() << std::endl;
+
+	// GPU CtS
+	std::cout << "Running GPU CtS..." << std::endl;
+	FIDESlib::CKKS::RawCipherText raw1 = FIDESlib::CKKS::GetRawCipherText(cc, raised);
+	FIDESlib::CKKS::Ciphertext GPUct1_(cc_, raw1);
+
+	for (int batch : FIDESlib::Testing::batch_configs) {
+		fideslibParams.batch = batch;
+		GPUcc.batch = batch;
+		cudaDeviceSynchronize();
+
+		FIDESlib::CKKS::Ciphertext GPUct1(cc_);
+		GPUct1.copy(GPUct1_);
+
+		FIDESlib::CKKS::EvalCoeffsToSlots(GPUct1, slots, false);
+		CudaCheckErrorMod;
+
+		FIDESlib::CKKS::RawCipherText raw_res1;
+		GPUct1.store(raw_res1);
+		auto cResGPU = c2->Clone();
+		GetOpenFHECipherText(cResGPU, raw_res1);
+
+		if (slots < GPUcc.N / 2) {
+			auto conj = cc->EvalRotate(cResGPU, slots);
+			cc->EvalAddInPlace(cResGPU, conj);
+		}
+
+		lbcrypto::Plaintext resultGPU;
+		cc->Decrypt(keys.secretKey, cResGPU, &resultGPU);
+		auto gpuValues = resultGPU->GetCKKSPackedValue();
+
+		// Compute per-slot ratio GPU/CPU for non-zero CPU values
+		std::vector<double> ratios;
+		std::vector<double> absErrors;
+		double maxError = 0;
+		int checkCount = std::min(64, slots);
+		for (int i = 0; i < checkCount && i < (int)cpuValues.size() && i < (int)gpuValues.size(); i++) {
+			double cpuReal = cpuValues[i].real();
+			double gpuReal = gpuValues[i].real();
+			double absDiff = std::abs(gpuReal - cpuReal);
+			maxError = std::max(maxError, absDiff);
+			absErrors.push_back(absDiff);
+			if (std::abs(cpuReal) > 1e-6) {
+				ratios.push_back(gpuReal / cpuReal);
+			}
+		}
+
+		double expected = pow(2.0, -resultCPU->GetLogPrecision() + 1);
+		std::cout << "Batch " << batch << std::endl;
+		std::cout << "Max error: " << maxError << " (Expected: " << expected << "), ratio: " << maxError / expected << "x" << std::endl;
+
+		if (!ratios.empty()) {
+			double minR = *std::min_element(ratios.begin(), ratios.end());
+			double maxR = *std::max_element(ratios.begin(), ratios.end());
+			std::sort(ratios.begin(), ratios.end());
+			double medianR = ratios[ratios.size() / 2];
+			double spread = (maxR - minR) / std::abs(medianR);
+
+			std::cout << "GPU/CPU ratio stats (" << ratios.size() << " non-zero slots):" << std::endl;
+			std::cout << "  min=" << minR << " max=" << maxR << " median=" << medianR << " spread=" << spread << std::endl;
+			std::cout << "  First 8 ratios: ";
+			for (int i = 0; i < 8 && i < (int)ratios.size(); i++) std::cout << ratios[i] << " ";
+			std::cout << std::endl;
+
+			if (spread < 0.01) {
+				std::cout << "  → CONSTANT scaling error (systematic, not precision)" << std::endl;
+			} else {
+				std::cout << "  → SLOT-DEPENDENT error (precision defect)" << std::endl;
+			}
+		}
+
+		// Print first 8 CPU and GPU values side by side
+		std::cout << "First 8 values (CPU vs GPU):" << std::endl;
+		for (int i = 0; i < 8 && i < (int)cpuValues.size() && i < (int)gpuValues.size(); i++) {
+			std::cout << "  slot" << i << ": CPU=" << cpuValues[i].real() << " GPU=" << gpuValues[i].real()
+			          << " diff=" << std::abs(gpuValues[i].real() - cpuValues[i].real()) << std::endl;
+		}
+
+		CudaCheckErrorMod;
+	}
+}
+
 TEST_P(OpenFHEBootstrapTest, ApproxModEval) {
 
 	CKKS::DeregisterAllContexts();
