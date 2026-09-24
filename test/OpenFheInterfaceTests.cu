@@ -2392,6 +2392,104 @@ std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE); auto ra
 	}
 }
 */
+TEST_P(OpenFHEBootstrapTest, ModRaiseLimbCheck) {
+	CKKS::DeregisterAllContexts();
+	for (auto& i : cached_cc) {
+		i.second.first->ClearEvalAutomorphismKeys();
+		i.second.first->ClearEvalMultKeys();
+		if (std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE))
+			std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE)->m_bootPrecomMap.clear();
+	}
+	cc->Enable(lbcrypto::PKE);
+	cc->Enable(lbcrypto::KEYSWITCH);
+	cc->Enable(lbcrypto::LEVELEDSHE);
+	cc->Enable(lbcrypto::ADVANCEDSHE);
+	cc->Enable(lbcrypto::FHE);
+	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl << std::endl;
+	cc->EvalMultKeyGen(keys.secretKey);
+
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
+	FIDESlib::CKKS::Context& cc_ = GPUcc;
+	cc_ = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
+	FIDESlib::CKKS::ContextData& GPUcc = *cc_;
+
+	const int slots = 32;
+	std::vector<double> x1 = {0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0};
+	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, 1, nullptr, slots);
+	auto c1 = cc->Encrypt(keys.publicKey, ptxt1);
+
+	FIDESlib::CKKS::RawCipherText raw1 = FIDESlib::CKKS::GetRawCipherText(cc, c1);
+	FIDESlib::CKKS::Ciphertext GPUct1(cc_, raw1);
+
+	if (GPUct1.NoiseLevel == 2)
+		GPUct1.rescale();
+	GPUct1.dropToLevel(0, true);
+	std::cout << "Before ModRaise: level=" << GPUct1.getLevel() << " NoiseLevel=" << GPUct1.NoiseLevel << std::endl;
+
+	GPUct1.c0.INTT(GPUcc.batch, true);
+	std::vector<std::vector<uint64_t>> before;
+	GPUct1.c0.store(before);
+	GPUct1.c0.NTT(GPUcc.batch, true);
+	std::cout << "Before: " << before.size() << " limbs, limb0 size=" << before[0].size() << std::endl;
+	std::cout << "Limb0 first5: ";
+	for (int i = 0; i < 5 && i < (int)before[0].size(); ++i) std::cout << before[0][i] << " ";
+	std::cout << std::endl;
+
+	FIDESlib::CKKS::ModRaise(GPUct1, slots, 0, true, false);
+	std::cout << "After ModRaise: level=" << GPUct1.getLevel() << std::endl;
+
+	GPUct1.c0.INTT(GPUcc.batch, true);
+	std::vector<std::vector<uint64_t>> after;
+	GPUct1.c0.store(after);
+	GPUct1.c0.NTT(GPUcc.batch, true);
+	std::cout << "After: " << after.size() << " limbs" << std::endl;
+
+	bool limb0_ok = true;
+	int limb0_mismatches = 0;
+	for (size_t i = 0; i < before[0].size() && i < after[0].size(); ++i) {
+		if (after[0][i] != before[0][i]) {
+			if (limb0_mismatches < 10)
+				std::cout << "Limb0 MISMATCH coeff " << i << ": " << after[0][i] << " vs " << before[0][i] << std::endl;
+			limb0_mismatches++;
+		}
+	}
+	if (limb0_mismatches > 0) {
+		std::cout << "FAIL: limb0 has " << limb0_mismatches << " mismatches" << std::endl;
+		limb0_ok = false;
+	} else {
+		std::cout << "PASS: limb0 bit-identical" << std::endl;
+	}
+
+	bool newlimbs_ok = true;
+	for (size_t limb = 1; limb < after.size(); ++limb) {
+		uint64_t q_i = GPUcc.prime[limb].p;
+		int mismatches = 0;
+		for (size_t j = 0; j < before[0].size() && j < after[limb].size(); ++j) {
+			uint64_t q0 = GPUcc.prime[0].p;
+			uint64_t a = before[0][j];
+			uint64_t expected;
+			if (a > q0 / 2) {
+				uint64_t diff = q_i - (q0 % q_i);
+				a = a + diff;
+			}
+			if (a >= q_i) a = a % q_i;
+			expected = a;
+			if (after[limb][j] != expected) {
+				if (mismatches < 5)
+					std::cout << "Limb" << limb << " MISMATCH coeff " << j << ": " << after[limb][j]
+						<< " vs " << expected << " (" << before[0][j] << " mod " << q_i << ")" << std::endl;
+				mismatches++;
+			}
+		}
+		if (mismatches > 0) {
+			std::cout << "FAIL: limb" << limb << " (q=" << q_i << ") has " << mismatches << " mismatches" << std::endl;
+			newlimbs_ok = false;
+		}
+	}
+	if (newlimbs_ok) std::cout << "PASS: all new limbs = limb0 mod q_i" << std::endl;
+
+	ASSERT_TRUE(limb0_ok && newlimbs_ok);
+}
 TEST_P(OpenFHEBootstrapTest, ApproxModEval) {
 
 	CKKS::DeregisterAllContexts();
