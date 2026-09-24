@@ -2867,6 +2867,158 @@ TEST_P(OpenFHEBootstrapTest, CtSErrorAnalysis) {
 	}
 }
 
+// CtS conjugate fold analysis: compare BOTH halves of the production fold.
+// Production (Bootstrap.cu:119-130) uses:
+//   re = ctxt + conj(ctxt)  → 2·Re   (tested by existing CoeffsToSlots, 20.9x error)
+//   im = ctxt - conj(ctxt)  → 2·Im   (NEVER TESTED — fed to approxModReduction)
+// A defect that cancels in +conj but flips in -conj would be invisible to all tests
+// but would corrupt production. This test checks both halves separately.
+// Uses same input as existing CoeffsToSlots (8 values, level 1) for 36-bit reference.
+TEST_P(OpenFHEBootstrapTest, CtSConjugateFold) {
+	CKKS::DeregisterAllContexts();
+	for (auto& i : cached_cc) {
+		i.second.first->ClearEvalAutomorphismKeys();
+		i.second.first->ClearEvalMultKeys();
+		if (std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE))
+			std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE)->m_bootPrecomMap.clear();
+	}
+	cc->Enable(lbcrypto::PKE);
+	cc->Enable(lbcrypto::KEYSWITCH);
+	cc->Enable(lbcrypto::LEVELEDSHE);
+	cc->Enable(lbcrypto::ADVANCEDSHE);
+	cc->Enable(lbcrypto::FHE);
+	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl;
+	cc->EvalMultKeyGen(keys.secretKey);
+
+	int slots = cc->GetRingDimension() / 2;
+	std::cout << "Setup Bootstrap {3,3}, slots=" << slots << std::endl;
+	cc->EvalBootstrapSetup({3, 3}, {0, 0}, slots);
+	cc->EvalBootstrapKeyGen(keys.secretKey, slots);
+
+	std::vector<double> x1 = {0.25, 0.5, 0.75, 0.1, -0.1, -0.75, -0.5, -0.25};
+
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
+	FIDESlib::CKKS::Context& cc_        = GPUcc;
+	cc_                                = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
+	FIDESlib::CKKS::ContextData& GPUcc = *cc_;
+
+	int encLevel = GPUcc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT ? 2 : 1;
+	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, encLevel, nullptr, slots);
+	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
+
+	auto c1 = cc->Encrypt(keys.publicKey, ptxt1);
+	auto c2 = cc->Encrypt(keys.publicKey, ptxt2);
+
+	FIDESlib::CKKS::AddBootstrapPrecomputation(cc, keys, slots, cc_);
+
+	auto FHE = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cc->GetScheme()->m_FHE);
+	auto raised = c1->Clone();
+
+	// CPU CtS
+	std::cout << "Running CPU CtS..." << std::endl;
+	auto ctxtEncCPU = FHE->EvalCoeffsToSlots(FHE->m_bootPrecomMap.at(slots)->m_U0hatTPreFFT, raised);
+	cc->RescaleInPlace(ctxtEncCPU);
+	auto evalKeyMap = cc->GetEvalAutomorphismKeyMap(ctxtEncCPU->GetKeyTag());
+	auto conjCPU = FHE->Conjugate(ctxtEncCPU, evalKeyMap);
+
+	// CPU re half: ctxt + conj
+	auto reCPU = ctxtEncCPU->Clone();
+	cc->EvalAddInPlace(reCPU, conjCPU);
+	lbcrypto::Plaintext resultReCPU;
+	cc->Decrypt(keys.secretKey, reCPU, &resultReCPU);
+
+	// CPU im half: ctxt - conj
+	auto imCPU = ctxtEncCPU->Clone();
+	cc->EvalSubInPlace(imCPU, conjCPU);
+	lbcrypto::Plaintext resultImCPU;
+	cc->Decrypt(keys.secretKey, imCPU, &resultImCPU);
+
+	std::cout << "CPU CtS done. Re LogPrecision=" << resultReCPU->GetLogPrecision()
+	          << " Im LogPrecision=" << resultImCPU->GetLogPrecision() << std::endl;
+
+	// GPU CtS
+	std::cout << "Running GPU CtS..." << std::endl;
+	FIDESlib::CKKS::RawCipherText raw1 = FIDESlib::CKKS::GetRawCipherText(cc, raised);
+	FIDESlib::CKKS::Ciphertext GPUct1_(cc_, raw1);
+
+	for (int batch : FIDESlib::Testing::batch_configs) {
+		fideslibParams.batch = batch;
+		GPUcc.batch = batch;
+		cudaDeviceSynchronize();
+
+		FIDESlib::CKKS::Ciphertext GPUct1(cc_);
+		GPUct1.copy(GPUct1_);
+
+		FIDESlib::CKKS::EvalCoeffsToSlots(GPUct1, slots, false);
+		CudaCheckErrorMod;
+
+		FIDESlib::CKKS::RawCipherText raw_res1;
+		GPUct1.store(raw_res1);
+		auto cResGPU = c2->Clone();
+		GetOpenFHECipherText(cResGPU, raw_res1);
+
+		auto evalKeyMapGPU = cc->GetEvalAutomorphismKeyMap(cResGPU->GetKeyTag());
+		auto conjGPU = FHE->Conjugate(cResGPU, evalKeyMapGPU);
+
+		// GPU re half: ctxt + conj
+		auto reGPU = cResGPU->Clone();
+		cc->EvalAddInPlace(reGPU, conjGPU);
+		lbcrypto::Plaintext resultReGPU;
+		cc->Decrypt(keys.secretKey, reGPU, &resultReGPU);
+
+		// GPU im half: ctxt - conj
+		auto imGPU = cResGPU->Clone();
+		cc->EvalSubInPlace(imGPU, conjGPU);
+		lbcrypto::Plaintext resultImGPU;
+		cc->Decrypt(keys.secretKey, imGPU, &resultImGPU);
+
+		// Compare both halves
+		std::cout << "Batch " << batch << std::endl;
+
+		// Re half (existing test checks this)
+		{
+			double acc = 0.0, Max = 0.0;
+			for (size_t i = 0; i < resultReCPU->GetSlots(); ++i) {
+				double diff = std::abs(resultReGPU->GetRealPackedValue().at(i) - resultReCPU->GetRealPackedValue().at(i));
+				acc += diff * diff;
+				Max = std::max(Max, diff);
+			}
+			acc = std::sqrt(acc / resultReCPU->GetSlots());
+			double expected = pow(2.0, -resultReCPU->GetLogPrecision() + 1);
+			std::cout << "Re half: Max error: " << Max << " (Expected: " << expected
+			          << "), ratio: " << Max / expected << "x, dev: " << acc << std::endl;
+		}
+
+		// Im half (NEVER TESTED BEFORE)
+		{
+			double acc = 0.0, Max = 0.0;
+			for (size_t i = 0; i < resultImCPU->GetSlots(); ++i) {
+				double diff = std::abs(resultImGPU->GetRealPackedValue().at(i) - resultImCPU->GetRealPackedValue().at(i));
+				acc += diff * diff;
+				Max = std::max(Max, diff);
+			}
+			acc = std::sqrt(acc / resultImCPU->GetSlots());
+			double expected = pow(2.0, -resultImCPU->GetLogPrecision() + 1);
+			std::cout << "Im half: Max error: " << Max << " (Expected: " << expected
+			          << "), ratio: " << Max / expected << "x, dev: " << acc << std::endl;
+		}
+
+		// Print first 8 values for both halves
+		std::cout << "First 8 Re (CPU vs GPU):" << std::endl;
+		for (int i = 0; i < 8; i++) {
+			std::cout << "  slot" << i << ": CPU=" << resultReCPU->GetRealPackedValue().at(i)
+			          << " GPU=" << resultReGPU->GetRealPackedValue().at(i) << std::endl;
+		}
+		std::cout << "First 8 Im (CPU vs GPU):" << std::endl;
+		for (int i = 0; i < 8; i++) {
+			std::cout << "  slot" << i << ": CPU=" << resultImCPU->GetRealPackedValue().at(i)
+			          << " GPU=" << resultImGPU->GetRealPackedValue().at(i) << std::endl;
+		}
+
+		CudaCheckErrorMod;
+	}
+}
+
 TEST_P(OpenFHEBootstrapTest, ApproxModEval) {
 
 	CKKS::DeregisterAllContexts();
