@@ -512,6 +512,31 @@ inline std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters> tparams64_13_4_
 inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbcrypto::ScalingTechnique> tparams64_13_4_sparse{
 	tparams64_13_4_sparse_, lbcrypto::ScalingTechnique::FIXEDMANUAL };
 
+/** THOR's *moduli* at depth 23: the config that reproduces the 6-bit bootstrap and still fits.
+ *
+ * 82e9514 swept depth and modulus independently and settled it: depth has no effect (6.0 bits at
+ * 23, 30 and 37 alike with 50/55) while modulus size has a large one (14.0 bits at 59/60 against
+ * 6.0 at 50/55, at every depth). So the depth-37 set was never the thing that mattered - the
+ * moduli were, and those cost nothing to change.
+ *
+ * tparams64_13_4_sparse above holds scalemodboot/firstmodboot at 59/60, which is precisely the
+ * side of that sweep where the bootstrap still works, so it cannot reproduce the failure. This one
+ * moves only the two numbers that do, and keeps depth at 23 so the per-stage comparison stays
+ * inside a 32 GB card.
+ */
+inline std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters> tparams64_13_4_thormod_ =
+	std::tuple(GeneralTestParams{ .multDepth = depthboot,
+		.firstModSize								 = 55,
+		.scaleModSize								 = 50,
+		.batchSize									 = 8,
+		.ringDim									 = 1 << logNboot,
+		.dnum										 = 4,
+		.GPUs										 = { 0 },
+		.secretKeyDist								 = lbcrypto::SPARSE_TERNARY },
+		params64_13_4);
+inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbcrypto::ScalingTechnique> tparams64_13_4_thormod{
+	tparams64_13_4_thormod_, lbcrypto::ScalingTechnique::FIXEDMANUAL };
+
 /** The benchmark's own depth 37. Opt-in: it needs more than a 32 GB card has at full key size.
  *
  * The per-stage comparison it was added for is better served by tparams64_13_4_sparse above, which
@@ -522,7 +547,7 @@ inline std::tuple<std::tuple<GeneralTestParams, FIDESlib::CKKS::Parameters>, lbc
 #else
 #define TTALL64BOOTTHOR_DEPTH37
 #endif
-#define TTALL64BOOTTHOR TTALL64BOOT, tparams64_13_4_sparse TTALL64BOOTTHOR_DEPTH37
+#define TTALL64BOOTTHOR TTALL64BOOT, tparams64_13_4_sparse, tparams64_13_4_thormod TTALL64BOOTTHOR_DEPTH37
 
 /**
 ,tparams64_15_LLM_flex,
