@@ -70,3 +70,16 @@ After:  Z limbs
 ## 5. 为什么我坚持要澄清这个
 
 如果 ModRaise 被错误地标成清白,排除法就只剩 StC 了,接下来所有精力都会压到那一边。**而 ModRaise 恰好是那个把 1 个 limb 扩成 38 个 limb 的操作**——它是整个 bootstrap 里唯一一个"凭空造出 37 倍数据"的步骤,在一个 28 bit 缺口面前,它不该靠一个我解释不通的 PASS 出局。
+
+---
+
+## 附:§2(b) 我自己查掉了,不成立
+
+我在 §2 留了一条"也许我对域的理解错了,如果是请指出,我撤回"。查完了,**这条不成立,不用你们花时间**:
+
+- `RNSPoly::NTT`(`RNSPoly.cpp:489`)只是对每个 GPU 分区转发到 `LimbPartition::NTT`。
+- `LimbPartition::NTT`(`LimbPartition.cu:483`)在 `limbsize > 0` 时直接 `ApplyNTT<algo, mode>(...)`,**没有任何 format / isNTT 标志位的短路**。
+
+所以 `Bootstrap.cu:757` 那次 NTT 是真的执行的,`store` 拿到的确实是求值域的值。
+
+**§1 的论证成立,§2 只剩 (a) 一种可能:内层循环没跑。** 麻烦就贴那两行(`Before: X limbs` / `After: Z limbs`),`Z == 1` 就确认了。
