@@ -2611,6 +2611,127 @@ TEST_P(OpenFHEBootstrapTest, CtSStCIdentity) {
 	}
 }
 
+// CtS-StC identity test (DENSE): slots = N/2, {3,3} levelBudget — production config.
+// Addresses 744a883 §3: the /32-slot sparse-branch test may not apply to production dense branch.
+TEST_P(OpenFHEBootstrapTest, CtSStCIdentityDense) {
+	CKKS::DeregisterAllContexts();
+	for (auto& i : cached_cc) {
+		i.second.first->ClearEvalAutomorphismKeys();
+		i.second.first->ClearEvalMultKeys();
+		if (std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE))
+			std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(i.second.first->GetScheme()->m_FHE)->m_bootPrecomMap.clear();
+	}
+	cc->Enable(lbcrypto::PKE);
+	cc->Enable(lbcrypto::KEYSWITCH);
+	cc->Enable(lbcrypto::LEVELEDSHE);
+	cc->Enable(lbcrypto::ADVANCEDSHE);
+	cc->Enable(lbcrypto::FHE);
+	std::cout << "CKKS scheme is using ring dimension " << cc->GetRingDimension() << std::endl;
+	cc->EvalMultKeyGen(keys.secretKey);
+
+	int slots = cc->GetRingDimension() / 2;
+	std::cout << "Setup Bootstrap {3,3}, slots=" << slots << " (dense)" << std::endl;
+	cc->EvalBootstrapSetup({3, 3}, {0, 0}, slots);
+	std::cout << "Generate keys" << std::endl;
+	cc->EvalBootstrapKeyGen(keys.secretKey, slots);
+
+	std::vector<double> x1(slots);
+	for (int i = 0; i < slots; i++) x1[i] = 1.0 + i;
+
+	FIDESlib::CKKS::RawParams raw_param = FIDESlib::CKKS::GetRawParams(cc, bootConfig());
+
+	std::cout << "raw_param.L = " << raw_param.L << std::endl;
+	int targetLevel = 12;
+	lbcrypto::Plaintext ptxt1 = cc->MakeCKKSPackedPlaintext(x1, 1, targetLevel, nullptr, slots);
+	lbcrypto::Plaintext ptxt2 = cc->MakeCKKSPackedPlaintext(x1, 1, 0, nullptr, slots);
+
+	std::cout << "Input first8: ";
+	for (int i = 0; i < 8; i++) std::cout << x1[i] << " ";
+	std::cout << std::endl;
+
+	auto c1 = cc->Encrypt(keys.publicKey, ptxt1);
+	auto c2 = cc->Encrypt(keys.publicKey, ptxt2);
+	std::cout << "Encrypted level: " << c1->GetLevel() << std::endl;
+
+	FIDESlib::CKKS::Context& cc_        = GPUcc;
+	cc_                                = CKKS::GenCryptoContextGPU(fideslibParams.adaptTo(raw_param), devices);
+	FIDESlib::CKKS::ContextData& GPUcc = *cc_;
+
+	FIDESlib::CKKS::AddBootstrapPrecomputation(cc, keys, slots, cc_);
+
+	FIDESlib::CKKS::RawCipherText raw1 = FIDESlib::CKKS::GetRawCipherText(cc, c1);
+	FIDESlib::CKKS::Ciphertext GPUct1_(cc_, raw1);
+
+	for (int batch : FIDESlib::Testing::batch_configs) {
+		fideslibParams.batch = batch;
+		std::cout << "Batch " << batch << std::endl;
+		GPUcc.batch = batch;
+		cudaDeviceSynchronize();
+
+		FIDESlib::CKKS::Ciphertext GPUct1(cc_);
+		GPUct1.copy(GPUct1_);
+		std::cout << "Before CtS: level=" << GPUct1.getLevel() << std::endl;
+
+		FIDESlib::CKKS::EvalCoeffsToSlots(GPUct1, slots, false);
+		CudaCheckErrorMod;
+		std::cout << "After CtS: level=" << GPUct1.getLevel() << std::endl;
+
+		FIDESlib::CKKS::EvalCoeffsToSlots(GPUct1, slots, true);
+		CudaCheckErrorMod;
+		std::cout << "After StC: level=" << GPUct1.getLevel() << std::endl;
+
+		FIDESlib::CKKS::RawCipherText raw_res1;
+		GPUct1.store(raw_res1);
+		auto cResGPU = c2->Clone();
+		GetOpenFHECipherText(cResGPU, raw_res1);
+
+		if (slots < GPUcc.N / 2) {
+			auto conj = cc->EvalRotate(cResGPU, slots);
+			cc->EvalAddInPlace(cResGPU, conj);
+		}
+
+		lbcrypto::Plaintext resultGPU;
+		cc->Decrypt(keys.secretKey, cResGPU, &resultGPU);
+		auto outputComplex = resultGPU->GetCKKSPackedValue();
+
+		std::vector<double> ratios;
+		int checkCount = std::min(256, slots);
+		for (int i = 0; i < checkCount && i < (int)outputComplex.size(); i++) {
+			double outReal = outputComplex[i].real();
+			if (std::abs(x1[i]) > 1e-10) {
+				ratios.push_back(outReal / x1[i]);
+			}
+		}
+
+		if (!ratios.empty()) {
+			double minR = *std::min_element(ratios.begin(), ratios.end());
+			double maxR = *std::max_element(ratios.begin(), ratios.end());
+			std::sort(ratios.begin(), ratios.end());
+			double medianR = ratios[ratios.size() / 2];
+			double spread  = (maxR - minR) / std::abs(medianR);
+
+			std::cout << "Ratio stats (" << ratios.size() << " slots): min=" << minR << " max=" << maxR
+			          << " median=" << medianR << " spread=" << spread << std::endl;
+			std::cout << "First 8 ratios: ";
+			for (int i = 0; i < 8 && i < (int)ratios.size(); i++) std::cout << ratios[i] << " ";
+			std::cout << std::endl;
+
+			if (spread < 0.01) {
+				std::cout << "PASS: ratio is constant (spread < 1%)" << std::endl;
+			} else {
+				std::cout << "FAIL: ratio varies across slots (spread = " << spread << ")" << std::endl;
+			}
+		}
+
+		std::cout << "First 8 output: ";
+		for (int i = 0; i < 8 && i < (int)outputComplex.size(); i++)
+			std::cout << outputComplex[i].real() << " ";
+		std::cout << std::endl;
+
+		CudaCheckErrorMod;
+	}
+}
+
 TEST_P(OpenFHEBootstrapTest, ApproxModEval) {
 
 	CKKS::DeregisterAllContexts();
