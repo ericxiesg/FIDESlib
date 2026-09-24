@@ -24,6 +24,8 @@ import os
 import numpy as np
 import pytest
 
+from thorfhe.clear import effective_bootstrap_precision_bits
+
 pf = pytest.importorskip("pyfideslib")
 BENCH = pytest.mark.skipif(not os.environ.get("PYFIDESLIB_BENCH_PARAMS"),
                            reason="set PYFIDESLIB_BENCH_PARAMS=1")
@@ -53,9 +55,15 @@ def test_bootstrap_error_versus_correction_factor(device, factor):
 
     err = np.abs(got - x)
     rms = float(np.sqrt(np.mean(err ** 2)))
-    bits = -np.log2(max(rms, 1e-300))
+    # Raw bits and the normalised figure both: a bootstrap reproduces q0/Delta to some precision,
+    # so the raw number moves with the moduli even when the implementation does not. See
+    # thorfhe.clear.effective_bootstrap_precision_bits.
+    raw = -np.log2(max(rms, 1e-300))
+    eff = effective_bootstrap_precision_bits(max(rms, 1e-300), params["scaling_bits"],
+                                             params["first_mod_bits"])
     print(f"\n[correction factor {factor:2d}] max {np.max(err):.6g}  rms {rms:.6g}  "
-          f"~{bits:.1f} bits  (sigma 0.0156 = 10.9 bits is the current floor)")
+          f"raw {raw:.1f} bits  effective {eff:.1f} bits "
+          f"(CPU reaches 38.1 on these params; ClearEngine assumes 22)")
 
     # Only a sanity bound: a bootstrap that returns noise this large is not bootstrapping at all,
     # and the number above is then not a precision measurement worth comparing across the sweep.

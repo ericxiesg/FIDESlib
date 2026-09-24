@@ -415,3 +415,20 @@ class ClearEngine:
 
     def intt(self, ct):
         return ct
+
+def effective_bootstrap_precision_bits(rms_error, scaling_bits, first_mod_bits):
+    """Invert `ClearEngine._bootstrap_sigma`: the `bootstrap_precision_bits` a run actually achieved.
+
+    A bootstrap's error is not an absolute quantity. It reproduces `message_bound = q0/Delta` to some
+    number of bits, so the same implementation reports a different raw error at a different modulus
+    pair purely because the bound moved - and comparing raw errors across modulus pairs therefore
+    measures the moduli as much as it measures the implementation.
+
+    Reporting this instead divides that out, and it changes what a sweep says. On the device sweep of
+    2026-09-23 the raw figures run 6.0 bits at 50/55 up to 14.0 at 59/60 and read as a large modulus
+    effect; normalised they are 11.0 and 15.0, so half of that 8-bit spread is just q0/Delta falling
+    from 32 to 2, which every correct bootstrap does. What survives is a roughly flat shortfall - 11
+    to 15 effective bits against the 38 the CPU reaches on the same parameters, and against the 22
+    this engine assumes by default.
+    """
+    return float(np.log2(2.0 ** (first_mod_bits - scaling_bits) / rms_error))
